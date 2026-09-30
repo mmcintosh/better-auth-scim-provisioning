@@ -53,9 +53,16 @@ Then:
      scheduled: (event, env, ctx) => ctx.waitUntil(getAuth(env).api.scimProvisioningRun({ body: {} })),
    };
    ```
-3. **Once, after adding a target** (or to repair drift), queue everyone:
+3. **Once, after adding or changing a target** (or to repair drift), queue everyone:
    ```ts
-   await auth.api.scimProvisioningReconcile({ body: {} }); // { queued }
+   await auth.api.scimProvisioningReconcile({ body: {} }); // { queued, next: null }
+   ```
+   With many users, or on Workers (which limits the work per invocation), go a page at a time:
+   ```ts
+   let next: string | null = null;
+   do {
+     ({ next } = await auth.api.scimProvisioningReconcile({ body: { limit: 200, after: next ?? undefined } }));
+   } while (next);
    ```
 
 **On Workers, give Better Auth `waitUntil`.** Deliveries run in the background, and the runtime cancels work still running after the response unless it runs under `waitUntil`:
@@ -73,20 +80,24 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | Option | Default | |
 |---|---|---|
 | `id` | required | Stable id: letters, digits, `-`, `_`. Jobs, links and logs use it. |
-| `url` | required | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost). |
+| `url` | required | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
 | `token` | required | Its bearer token. |
 | `organizationId` | | Only members of this organization (Better Auth's organization plugin). |
-| `include` | | `(user) => boolean`: who else to leave out. Returning false for a provisioned user deprovisions them. |
-| `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. |
+| `include` | | `(user) => boolean`: who else to leave out. Only `true` includes; anything else deprovisions a provisioned user at their next delivery. |
+| `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. An account that already exists at the app is still only taken over for a verified email. |
 | `mapUser` | see below | `(user) => ScimUser`: what's sent. |
 | `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
 | `timeoutMs` | `10000` | Per request. |
 
-Retries are shared by all targets: `retry: { maxAttempts: 8, baseDelayMs: 30000 }`. The delay doubles each attempt up to 6 hours, or is longer if the app's `Retry-After` asks for it.
+Retries are shared by all targets: `retry: { maxAttempts: 8, baseDelayMs: 30000 }`. The delay doubles each attempt, or is longer if the app's `Retry-After` asks for it (up to a day). After `maxAttempts`, failures that can fix themselves are retried every 6 hours.
+
+A change to a target (`include`, `organizationId`, `deprovision`) applies to each user at their next change: run a reconcile to apply it to everyone. Do the same after an app's outage or a token fix, to deliver what's waiting now rather than at its next retry.
 
 ## Who is provisioned, and what's sent
 
-A user is at a target when their email is verified (unless `requireVerifiedEmail: false`), they aren't banned (the admin plugin), they're a member of `organizationId` if one is set, and `include` doesn't return false. Otherwise they're deprovisioned there, if they had been provisioned.
+A user is at a target when their email is verified (unless `requireVerifiedEmail: false`), they aren't banned (the admin plugin), they're a member of `organizationId` if one is set, and `include` returns true (if set). Otherwise they're deprovisioned there, if they had been provisioned. A timed ban is lifted at the app when it runs out.
+
+Membership changes are seen through the organization plugin's endpoints (add, remove, update role, accept an invitation, leave, delete the organization) and server-side `addMember`. Members added any other way (the creator of a new organization, SSO or inbound SCIM provisioning, your own database writes) are provisioned at their next change or reconcile.
 
 By default the app gets:
 - **`userName`** and the one primary **`emails`** value: the user's email;
@@ -102,9 +113,11 @@ Override it per target with `mapUser`, for example to take `userName` from an em
 - **An outbox in your database.** A change queues one job per user and target. The job carries no user data: delivery reads the user as they are then, so quick changes collapse into one request with the latest state.
 - **Never in the way.** Provisioning never fails the user's own write. A failure to queue is logged, and the next reconcile catches up.
 - **Leases.** A job is claimed before delivery, so two workers never deliver it at once. A change that arrives during a delivery goes out straight after it.
-- **Retries.** 429 (honouring `Retry-After`), 5xx, timeouts, network errors, and 401/403 (an expired token is the host's problem, not the user's) are retried with backoff. Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
-- **Careful adoption.** A user who already exists at the app is found by userName and taken over, but only if that account has no `externalId` or ours. A new user signing up with a deleted user's old email is refused, not handed the old account.
+- **Retries.** 429 (honouring `Retry-After`), 5xx, timeouts, network errors, and 401/403 (an expired token is the host's problem, not the user's) are retried with backoff, for as long as it takes. Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
+- **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off.
+- **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, and the user's email is verified. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
 - **Reconcile** covers every user, and every user still linked at a target, so deleted users whose deprovisioning was lost are cleaned up too.
+- **No redirects.** The token only goes to the target's URL: a redirect fails the request, with the new location in the error.
 
 ## Apps
 

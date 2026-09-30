@@ -20,13 +20,15 @@ export interface ScimTarget {
   token: string;
   /**
    * Who is provisioned to this target, beyond the defaults (a verified email unless
-   * `requireVerifiedEmail: false`, and not banned). Return false and a provisioned user is
-   * deprovisioned. Runs at delivery time, on the user as stored.
+   * `requireVerifiedEmail: false`, and not banned). Only `true` includes. Anything else, and a
+   * provisioned user is deprovisioned at their next delivery. Runs at delivery time, on the user
+   * as stored; after changing it, run a reconcile.
    */
   include?: ((user: ProvisionedUser) => boolean | Promise<boolean>) | undefined;
   /**
    * Only users with a verified email (the default). Set false where the sign-in provider leaves
-   * `emailVerified` false but the address is trusted, e.g. some SSO and OAuth setups (S1-6).
+   * `emailVerified` false but the address is trusted, e.g. some SSO and OAuth setups (S1-6). An
+   * account that already exists at the app is still adopted only for a verified email (S2-5).
    */
   requireVerifiedEmail?: boolean | undefined;
   /** Only members of this organization (Better Auth's organization plugin). */
@@ -44,7 +46,11 @@ export interface ScimTarget {
 export interface ScimProvisioningOptions {
   targets: ScimTarget[];
   retry?: {
-    /** Attempts before a job is marked failed (until the user changes again); default 8. */
+    /**
+     * Attempts at the normal backoff; default 8. After that, a failure that can fix itself (429,
+     * 5xx, timeouts, 401/403) is retried every 6 hours. Other errors fail the job at once, until
+     * the user changes again or a reconcile.
+     */
     maxAttempts?: number | undefined;
     /** First retry after this; doubles each attempt, capped at 6 hours. Default 30 seconds. */
     baseDelayMs?: number | undefined;

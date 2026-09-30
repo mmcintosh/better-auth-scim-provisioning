@@ -39,12 +39,17 @@ export class ScimError extends Error {
   }
 }
 
-/** `Retry-After` as milliseconds: delay-seconds or an HTTP date; undefined if absent or unreadable. */
+const DAY_MS = 86_400_000;
+
+/**
+ * `Retry-After` as milliseconds: delay-seconds or an HTTP date, at most a day (a huge value would
+ * park the job for years, or make an invalid date, S2-9); undefined if absent or unreadable.
+ */
 export function retryAfterMs(header: string | null, now = Date.now()): number | undefined {
   if (!header) return undefined;
-  if (/^\d+$/.test(header.trim())) return Number(header.trim()) * 1000;
+  if (/^\d+$/.test(header.trim())) return Math.min(DAY_MS, Number(header.trim()) * 1000);
   const at = Date.parse(header);
-  return Number.isNaN(at) ? undefined : Math.max(0, at - now);
+  return Number.isNaN(at) ? undefined : Math.min(DAY_MS, Math.max(0, at - now));
 }
 
 /** A SCIM filter string literal: quotes and backslashes escaped (RFC 7644 §3.4.2.2, JSON rules). */
@@ -66,6 +71,8 @@ export function scimClient(endpoint: ScimEndpoint) {
           ...(body === undefined ? {} : { "content-type": "application/scim+json" }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        // Never follow: a redirect would replay the token and body to wherever it points (S2-13).
+        redirect: "manual",
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
@@ -82,6 +89,10 @@ export function scimClient(endpoint: ScimEndpoint) {
       }
     }
     if (res.ok) return { status: res.status, json };
+    if (res.status >= 300 && res.status < 400) {
+      const to = res.headers.get("location");
+      throw new ScimError(`${method} ${path}: redirected (${res.status})${to ? ` to ${to.slice(0, 200)}` : ""}; use the final URL as the target's url`, res.status, false);
+    }
     const detail = (json as { detail?: unknown } | null)?.detail;
     const scimType = (json as { scimType?: unknown } | null)?.scimType;
     // 401/403 are the host's token, not the user: retried, so jobs recover once it's fixed (S1-4).

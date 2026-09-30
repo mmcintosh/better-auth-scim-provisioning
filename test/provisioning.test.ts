@@ -114,13 +114,15 @@ describe("holding up", () => {
     expect(appUsers(h.app)).toEqual([expect.objectContaining({ displayName: "Fixed Name" })]);
   });
 
-  it("gives up after maxAttempts", async () => {
+  it("past maxAttempts, a retryable failure slows to every 6 hours instead of giving up", async () => {
     const h = await createHost({ retry: { baseDelayMs: 0, maxAttempts: 3 } });
     h.app.fail({ status: 500 }, { status: 500 }, { status: 500 });
     await h.user();
     await h.auth.api.scimProvisioningRun({ body: {} });
     await h.auth.api.scimProvisioningRun({ body: {} });
-    expect(await h.jobs()).toEqual([expect.objectContaining({ attempts: 3, failed: true })]);
+    const [job] = await h.jobs();
+    expect(job).toMatchObject({ attempts: 3, failed: false, lastStatus: 500 });
+    expect(new Date(job!.nextAttemptAt as Date).getTime() - Date.now()).toBeGreaterThan(5 * 3_600_000);
   });
 
   it("two workers on the same job: one delivers, the other is told it's busy", async () => {
@@ -188,7 +190,7 @@ describe("organizations and reconcile", () => {
     await h.user("Two Person");
     h.app.users.clear();
     await h.ctx.adapter.deleteMany({ model: "scimProvisioningLink", where: [] });
-    expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({ queued: 2 });
+    expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({ queued: 2, next: null });
     expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 2 });
     expect(h.app.users.size).toBe(2);
   });
