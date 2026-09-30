@@ -14,7 +14,8 @@ const token = process.env.SCIM_TOKEN;
 describe.skipIf(!url || !token)("live SCIM lifecycle", () => {
   const stamp = Date.now().toString(36);
   const email = `scim-live-${stamp}@example.com`;
-  const client = scimClient({ url: url!, token: token! });
+  // Built only when the tests run: without credentials the file is skipped, not broken.
+  const client = url && token ? scimClient({ url, token }) : (null as unknown as ReturnType<typeof scimClient>);
   const pending = new Set<Promise<unknown>>();
   const created: string[] = [];
 
