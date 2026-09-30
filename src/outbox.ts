@@ -162,7 +162,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       return;
     }
 
-    if (!link || !link.active) return;
+    if (!link?.active) return;
     if ((target.deprovision ?? "deactivate") === "delete") {
       await client.remove(link.remoteId);
       await adapter.deleteMany({ model: LINK_MODEL, where: [{ field: "key", value: link.key }] });
