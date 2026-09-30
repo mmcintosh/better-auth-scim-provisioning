@@ -12,7 +12,14 @@
     "saml",
     "identity-provider"
   ],
-  "homepage": "https://github.com/mmcintosh/better-auth-saml-idp",
+  "homepage": "https://github.com/mmcintosh/better-auth-scim-provisioning#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmcintosh/better-auth-scim-provisioning.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mmcintosh/better-auth-scim-provisioning/issues"
+  },
   "engines": {
     "node": ">=22"
   },
@@ -31,7 +38,8 @@
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "biome lint --error-on-warnings",
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "pack:check": "pnpm build && tsc -p tsconfig.strict-host.json && node node_modules/typescript-5/bin/tsc -p tsconfig.strict-host.json && publint --strict && attw --pack . --profile esm-only"
   },
   "peerDependencies": {
     "@better-auth/core": ">=1.7.5 <1.8.0",
@@ -41,6 +49,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
     "@better-auth/core": "1.7.6",
     "@better-auth/utils": "0.4.2",
     "@biomejs/biome": "^2.5.14",
@@ -51,7 +60,9 @@
     "mongodb": "^7.7.0",
     "mysql2": "^3.24.5",
     "pg": "^8.23.0",
+    "publint": "^0.3.24",
     "typescript": "^7.0.2",
+    "typescript-5": "npm:typescript@5.9.3",
     "vitest": "^4.1.11"
   },
   "packageManager": "pnpm@10.10.0",

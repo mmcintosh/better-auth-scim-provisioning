@@ -1,0 +1,6 @@
+{
+  "name": "release-npm-cli",
+  "private": true,
+  "description": "The npm CLI the release workflow stages with, pinned by integrity in package-lock.json (npm stage needs >= 11.15).",
+  "dependencies": { "npm": "11.20.0" }
+}

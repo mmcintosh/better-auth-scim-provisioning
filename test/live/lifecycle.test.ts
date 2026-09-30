@@ -21,7 +21,7 @@ describe.skipIf(!url || !token)("live SCIM lifecycle", () => {
   const setup = async () => {
     const auth = betterAuth({
       baseURL: "http://localhost:3000",
-      secret: "live-test-secret-that-is-at-least-32-characters",
+      secret: "live-secret-that-is-at-least-32-characters-long",
       telemetry: { enabled: false },
       database: new DatabaseSync(":memory:"),
       emailAndPassword: { enabled: true },

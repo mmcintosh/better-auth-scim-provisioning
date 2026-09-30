@@ -1,0 +1,16 @@
+{
+  // test/types/strict-host.ts: a host with exactOptionalPropertyTypes, against dist/ (run after the build).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM"],
+    "types": [],
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": { "better-auth-scim-provisioning": ["./dist/index.d.ts"] }
+  },
+  "files": ["test/types/strict-host.ts"]
+}

@@ -1,0 +1,9 @@
+# Secret scan over the full git history (CI job "secrets"). Live-test credentials live in the
+# git-ignored .env.live and are never committed; the only allow-listed values are the fixed Better
+# Auth test secrets, spelled "<name>-secret-that-is-at-least-32-characters-long".
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test-only placeholders"
+regexes = ['''[a-z]+-secret-that-is-at-least-32-characters-long''']

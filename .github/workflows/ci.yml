@@ -1,0 +1,76 @@
+# Tested at the peer range's minimum and the latest 1.7.x, on the oldest and newest Node LTS.
+# Runners are pinned to ubuntu-24.04 (not ubuntu-latest), and every action to a SHA.
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+# Least privilege: jobs only read the repository (OpenSSF Scorecard: Token-Permissions).
+permissions: { contents: read }
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        better-auth: ["1.7.5", "latest-1.7"]
+        node: [24]
+        include:
+          - { better-auth: "1.7.5", node: 22 } # oldest Node LTS still maintained
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "${{ matrix.node }}", cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: scripts/use-better-auth.sh ${{ matrix.better-auth }}
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test # SQLite (node:sqlite), the mock SCIM app, the review regressions
+      - run: pnpm pack:check # dist build, strict host under TypeScript 5.9 and 7, publint, Are the Types Wrong
+
+  # The outbox on real databases: its leases, version checks, dates and booleans are what differ
+  # (D-004 found a MySQL and a MongoDB bug that SQLite and Postgres don't show).
+  adapters:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - db: postgres
+            url: postgres://postgres:test@localhost:5432/postgres
+          - db: mysql
+            url: mysql://root:test@127.0.0.1:3306/mysql
+          - db: mongodb
+            url: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env: { POSTGRES_PASSWORD: test }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      mysql:
+        image: mysql:8.4@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d
+        env: { MYSQL_ROOT_PASSWORD: test }
+        ports: ["3306:3306"]
+        options: --health-cmd "mysqladmin ping -ptest --silent" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - if: matrix.db == 'mongodb'
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8.2@sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3 --replSet rs0 --bind_ip_all
+          for i in $(seq 1 30); do docker exec mongo mongosh --quiet --eval 'db.runCommand({ping:1}).ok' 2>/dev/null | grep -q 1 && break; sleep 2; done
+          docker exec mongo mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          for i in $(seq 1 30); do docker exec mongo mongosh --quiet --eval 'rs.status().myState' 2>/dev/null | grep -q '^1$' && break; sleep 2; done
+      - run: npx vitest run test/adapters
+        env: { ADAPTER_DB: "${{ matrix.db }}", ADAPTER_URL: "${{ matrix.url }}", ADAPTER_REQUIRED: "1" }
+
+  secrets:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0 }
+      - run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854 git /repo --no-banner --redact -c /repo/.gitleaks.toml

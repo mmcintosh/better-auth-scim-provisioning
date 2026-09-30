@@ -1,0 +1,114 @@
+# Release: the full test suite, then the exact tarball that was tested is published to npm with
+# provenance (a signed statement, from GitHub's OIDC token, of which commit and workflow built it)
+# and attached to a GitHub release with its CycloneDX SBOM.
+#
+# - Push a tag `vX.Y.Z` matching package.json's version (and "private" removed) to publish.
+# - Run it by hand (Actions > Release > Run workflow) for a dry run: everything except publishing,
+#   with the tarball and SBOM kept as workflow artifacts.
+# See CONTRIBUTING.md#releasing for the npm side (trusted publishing).
+name: Release
+on:
+  push: { tags: ["v*"] }
+  workflow_dispatch:
+permissions: { contents: read }
+concurrency: { group: release, cancel-in-progress: false }
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck && pnpm lint && pnpm test && pnpm pack:check
+      # What `npm install better-auth-scim-provisioning` brings in.
+      - run: pnpm audit --prod --audit-level low
+
+  # Build the tarball and its SBOM. No secrets and no write access here.
+  package:
+    needs: verify
+    runs-on: ubuntu-24.04
+    outputs: { version: "${{ steps.meta.outputs.version }}" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false, fetch-depth: 0 }
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: 24, cache: pnpm, registry-url: "https://registry.npmjs.org" }
+      - run: pnpm install --frozen-lockfile
+      - id: meta
+        env: { REF_NAME: "${{ github.ref_name }}", EVENT: "${{ github.event_name }}" }
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          private="$(node -p 'require("./package.json").private === true')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = push ]; then
+            [ "$REF_NAME" = "v$version" ] || { echo "::error::tag $REF_NAME doesn't match package.json version $version"; exit 1; }
+            [ "$private" = false ] || { echo "::error::package.json is still \"private\": true"; exit 1; }
+            # Only commits already on main are released, whoever pushed the tag (R4-L10).
+            git fetch --quiet origin main
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::tag $REF_NAME is not on main"; exit 1; }
+          fi
+      - run: pnpm build && mkdir -p out && pnpm pack --pack-destination out
+      # The SBOM describes what a user installs: the tarball's runtime dependency tree.
+      # The package and its runtime dependencies as a user gets them, from the pinned lockfile
+      # (not resolved afresh at release time); peers (better-auth) are the host's and left out.
+      # The SBOM's root: the package's production dependencies only, from the pinned lockfile.
+      - run: |
+          mkdir sbom-root && cp package.json pnpm-lock.yaml sbom-root/
+          pnpm --dir sbom-root install --prod --frozen-lockfile --ignore-scripts --config.node-linker=hoisted
+      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: sbom-root
+          format: cyclonedx-json
+          config: .github/syft.yaml
+          output-file: out/better-auth-scim-provisioning-${{ steps.meta.outputs.version }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: release, path: out/, retention-days: 30 }
+
+  # Publish the tested tarball. Runs only for tags, in the `npm` environment: add required
+  # reviewers to it (Settings > Environments) so every release needs an approval (R4-L10).
+  publish:
+    needs: package
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    environment: npm
+    permissions: { contents: write, id-token: write, attestations: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: 24, registry-url: "https://registry.npmjs.org" }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: release, path: out }
+      # Trusted publishing (OIDC) + staged publishing: npm trusts this repo, workflow and
+      # environment (no token anywhere), and the trusted publisher may only *stage*. The version
+      # goes live after a maintainer approves it on npmjs.com (or `npm stage approve`) with 2FA,
+      # so a compromised GitHub account alone can't publish. `npm stage` needs npm >= 11.15.
+      # npm >= 11.15 for `npm stage`, pinned by integrity in .github/npm-cli/package-lock.json.
+      - run: npm ci --prefix .github/npm-cli --no-audit --no-fund && .github/npm-cli/node_modules/.bin/npm --version
+      # Pre-releases (X.Y.Z-rc.N) go to the `next` dist-tag, so a plain install never gets one;
+      # npm refuses a pre-release without an explicit tag anyway.
+      - id: tag
+        env: { VERSION: "${{ needs.package.outputs.version }}" }
+        run: case "$VERSION" in *-*) echo "tag=next" >> "$GITHUB_OUTPUT" ;; *) echo "tag=latest" >> "$GITHUB_OUTPUT" ;; esac
+      # A signed SLSA provenance of the tarball, also attached to the GitHub release as
+      # <tarball>.sigstore.json, so the release itself carries its signature. Before staging on
+      # npm: if it fails, nothing is staged, and a re-run starts clean (review 6).
+      - id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with: { subject-path: "out/*.tgz" }
+      # "./": without it, npm reads out/<file>.tgz as GitHub shorthand (user/repo) and tries git.
+      - run: ./.github/npm-cli/node_modules/.bin/npm stage publish ./out/*.tgz --provenance --access public --tag "$TAG"
+        env: { TAG: "${{ steps.tag.outputs.tag }}" }
+      - run: for t in out/*.tgz; do cp "$BUNDLE" "$t.sigstore.json"; done
+        env: { BUNDLE: "${{ steps.attest.outputs.bundle-path }}" }
+      - env: { GH_TOKEN: "${{ github.token }}", VERSION: "${{ needs.package.outputs.version }}", TAG: "${{ steps.tag.outputs.tag }}" }
+        run: |
+          awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {on=1; next} on && /^## \[/ {exit} on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::CHANGELOG.md has no ## [$VERSION] section"; exit 1; }
+          pre=""; [ "$TAG" = next ] && pre="--prerelease"
+          gh release create "v$VERSION" out/* --title "v$VERSION" --notes-file notes.md --verify-tag $pre

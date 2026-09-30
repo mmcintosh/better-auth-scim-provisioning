@@ -1,0 +1,23 @@
+# Weekly, grouped updates. Better Auth itself is excluded: the peer range is deliberate, and new
+# 1.7 releases are tested by CI's latest-1.7 matrix entry.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dev: { dependency-type: development, update-types: [minor, patch] }
+      runtime: { dependency-type: production, update-types: [minor, patch] }
+    ignore:
+      - dependency-name: better-auth
+      - dependency-name: "@better-auth/*"
+  # The npm CLI the release job stages with (pinned by integrity; npm stage needs >= 11.15).
+  - package-ecosystem: npm
+    directory: /.github/npm-cli
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }

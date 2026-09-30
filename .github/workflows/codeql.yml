@@ -1,0 +1,28 @@
+# Static analysis: CodeQL's security-extended queries over the TypeScript and the workflows
+# themselves. Results appear under Security > Code scanning.
+name: CodeQL
+on:
+  push: { branches: [main] }
+  pull_request:
+  schedule: [{ cron: "23 5 * * 2" }]
+permissions: { contents: read }
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    permissions: { contents: read, security-events: write, actions: read }
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+          config: |
+            # Tests and e2e harnesses don't ship; keep the results about the package and its tooling.
+            paths-ignore: [node_modules, dist, test]
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with: { category: "/language:${{ matrix.language }}" }

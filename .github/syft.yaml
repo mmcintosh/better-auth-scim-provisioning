@@ -1,0 +1,5 @@
+# SBOM scan config for release.yml. The SBOM root is a `pnpm deploy --prod` tree built from the
+# pinned lockfile; it has no lockfile of its own, so read the installed packages' package.json
+# files (syft only reads lockfiles in directory scans by default).
+select-catalogers:
+  - "+javascript-package-cataloger"

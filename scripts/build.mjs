@@ -1,6 +1,6 @@
 // Build the published package: ESM bundled per entry (dependencies external), plus .d.ts from tsc.
 import { execFileSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { build } from "esbuild";
 
 const root = new URL("..", import.meta.url).pathname;
@@ -18,3 +18,15 @@ await build({
   logLevel: "warning",
 });
 execFileSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: root, stdio: "inherit" });
+
+// Sources use extensionless relative imports (moduleResolution "Bundler"). Consumers on
+// "NodeNext" need explicit extensions in declaration files (both `from "./x"` and the inline
+// `import("./x")` tsc emits), so add them.
+for (const file of readdirSync(`${root}dist`).filter((f) => f.endsWith(".d.ts"))) {
+  const path = `${root}dist/${file}`;
+  const src = readFileSync(path, "utf8");
+  const out = src.replace(/(from\s+|import\()(["'])(\.{1,2}\/[^"']+)\2/g, (m, pre, q, spec) =>
+    /\.(js|mjs|cjs|json)$/.test(spec) ? m : `${pre}${q}${spec}.js${q}`,
+  );
+  if (out !== src) writeFileSync(path, out);
+}
