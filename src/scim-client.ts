@@ -1,6 +1,6 @@
 // A small SCIM 2.0 client (RFC 7644) for the operations provisioning needs: find a user by
 // userName, create, replace, set active, delete. Every failure is a ScimError that says whether
-// retrying later can help (429, 5xx, timeouts, network errors) or not (other 4xx).
+// retrying later can help (429, 5xx, 401/403, timeouts, network errors) or not (other 4xx).
 
 export const SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User";
 const PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
@@ -84,9 +84,11 @@ export function scimClient(endpoint: ScimEndpoint) {
     if (res.ok) return { status: res.status, json };
     const detail = (json as { detail?: unknown } | null)?.detail;
     const scimType = (json as { scimType?: unknown } | null)?.scimType;
-    const retryable = res.status === 429 || res.status >= 500;
+    // 401/403 are the host's token, not the user: retried, so jobs recover once it's fixed (S1-4).
+    const auth = res.status === 401 || res.status === 403;
+    const retryable = res.status === 429 || res.status >= 500 || auth;
     throw new ScimError(
-      `${method} ${path}: ${res.status}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
+      `${method} ${path}: ${res.status}${auth ? " (check the target's token)" : ""}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
       res.status,
       retryable,
       retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
@@ -101,14 +103,14 @@ export function scimClient(endpoint: ScimEndpoint) {
   };
 
   return {
-    /** The id of the user with this userName, or null. */
-    async findByUserName(userName: string): Promise<string | null> {
+    /** The user with this userName (its id and externalId), or null. */
+    async findByUserName(userName: string): Promise<{ id: string; externalId: string | null } | null> {
       const { json } = await request("GET", `/Users?filter=${encodeURIComponent(`userName eq ${scimString(userName)}`)}&count=2`);
       const list = json as { schemas?: unknown; Resources?: unknown } | null;
-      const resources = Array.isArray(list?.Resources) ? (list.Resources as { id?: unknown; userName?: unknown }[]) : [];
+      const resources = Array.isArray(list?.Resources) ? (list.Resources as { id?: unknown; userName?: unknown; externalId?: unknown }[]) : [];
       // SCIM compares userName case-insensitively; so do we, but only an exact hit is ours.
       const hit = resources.find((r) => typeof r.userName === "string" && r.userName.toLowerCase() === userName.toLowerCase());
-      return hit ? idOf(hit, "GET /Users") : null;
+      return hit ? { id: idOf(hit, "GET /Users"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null } : null;
     },
     async create(user: ScimUser): Promise<string> {
       return idOf((await request("POST", "/Users", user)).json, "POST /Users");

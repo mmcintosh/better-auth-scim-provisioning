@@ -46,7 +46,12 @@ export interface Link {
 }
 
 const EPOCH = new Date(0);
-const LEASE_MS = 60_000;
+/**
+ * How long a claimed job is held: a delivery makes at most four requests (replace, create, find,
+ * replace), each up to the target's timeout, plus a margin. Shorter, and a second worker could
+ * claim a job still being delivered (S1-3).
+ */
+const leaseFor = (target: ScimTarget | undefined) => 4 * (target?.timeoutMs ?? 10_000) + 30_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
 const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
@@ -90,7 +95,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   /** Should this user be at this target now? */
   async function wanted(target: ScimTarget, user: ProvisionedUser | null): Promise<boolean> {
-    if (!user || user.emailVerified !== true || isBanned(user)) return false;
+    if (!user || isBanned(user)) return false;
+    if ((target.requireVerifiedEmail ?? true) && user.emailVerified !== true) return false;
     if (target.organizationId) {
       const member = (await adapter.findOne({ model: "member", where: [{ field: "userId", value: user.id }, { field: "organizationId", value: target.organizationId }] })) as { userId?: unknown; organizationId?: unknown } | null;
       if (!member || member.userId !== user.id || member.organizationId !== target.organizationId) return false;
@@ -124,8 +130,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           if (!(e instanceof ScimError && e.status === 409)) throw e;
           const found = await client.findByUserName(scim.userName);
           if (!found) throw new ScimError(`${scim.userName}: the app says it exists but can't find it`, 409, false);
-          await client.replace(found, scim);
-          remoteId = found;
+          // Only an account that's ours or nobody's (provisioned by hand): one tied to another
+          // user, such as a deleted user whose email was reused, must never be handed over (S1-1).
+          if (found.externalId !== null && found.externalId !== (scim.externalId ?? userId))
+            throw new ScimError(`${scim.userName}: the app's account belongs to another user (externalId ${found.externalId}); resolve it at the app`, 409, false);
+          await client.replace(found.id, scim);
+          remoteId = found.id;
         }
       }
       await saveLink(target, userId, { remoteId, userName: scim.userName, active: true });
@@ -155,7 +165,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const claimed = await adapter.updateMany({
       model: JOB_MODEL,
       where: [{ field: "id", value: job.id }, { field: "lockedUntil", value: new Date(now), operator: "lt" }],
-      update: { lockedUntil: new Date(now + LEASE_MS) },
+      update: { lockedUntil: new Date(now + leaseFor(targets.get(job.targetId))) },
     });
     if (claimed === 0) return "busy";
     const current = (await adapter.findOne({ model: JOB_MODEL, where: [{ field: "id", value: job.id }] })) as Job | null;

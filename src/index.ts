@@ -19,6 +19,7 @@ const optionsSchema = z.object({
         url: z.url({ protocol: /^https?$/ }).refine((u) => u.startsWith("https://") || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(u), "must be https (http only for localhost)"),
         token: z.string().min(1),
         include: z.function().optional(),
+        requireVerifiedEmail: z.boolean().optional(),
         organizationId: z.string().min(1).optional(),
         mapUser: z.function().optional(),
         deprovision: z.enum(["deactivate", "delete"]).optional(),
@@ -29,6 +30,20 @@ const optionsSchema = z.object({
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
   retry: z.object({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
 });
+
+/**
+ * The organization plugin's endpoints that change a membership. Server-side `addMember` has no
+ * path, so a path-less call is taken too. Reads (getActiveMember, …) also return member rows and
+ * are called on page loads: they must not provision (S1-2).
+ */
+const MEMBERSHIP_WRITES = new Set([
+  "/organization/add-member",
+  "/organization/remove-member",
+  "/organization/update-member-role",
+  "/organization/accept-invitation",
+  "/organization/leave",
+  "/organization/delete",
+]);
 
 /** A member row (organization plugin) in an endpoint's result: `{ member }`, or the member itself. */
 function membersIn(returned: unknown): { userId: string; organizationId: string }[] {
@@ -113,10 +128,10 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       after: [
         {
           // Membership changes go through the organization plugin's own adapter calls, which
-          // Better Auth's database hooks don't see, and its server-side addMember has no path. So
-          // look at what an organization call returns: a member row means that user's membership
-          // changed. Queue them for the targets of that organization.
-          matcher: () => options.targets.some((t) => t.organizationId),
+          // Better Auth's database hooks don't see. So after a membership write, look at what it
+          // returned: a member row names the user whose membership changed. Queue them for the
+          // targets of that organization.
+          matcher: (ctx) => options.targets.some((t) => t.organizationId) && (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path)),
           handler: createAuthMiddleware(async (ctx) => {
             const returned = (ctx.context as { returned?: unknown }).returned;
             if (!returned || returned instanceof Error || !box) return;
@@ -157,15 +172,26 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         if (!box) throw new Error("[scim] not initialised");
         const targetIds = ctx.body?.targetId ? [ctx.body.targetId] : options.targets.map((t) => t.id);
         let queued = 0;
+        const seen = new Set<string>();
         for (let offset = 0; ; offset += 500) {
           const users = (await ctx.context.adapter.findMany({ model: "user", limit: 500, offset, sortBy: { field: "id", direction: "asc" } })) as { id: string }[];
           for (const u of users) {
+            seen.add(u.id);
             for (const t of targetIds) {
               await box.enqueue(t, u.id);
               queued++;
             }
           }
           if (users.length < 500) break;
+        }
+        // And everyone linked at a target who no longer exists: deleted users whose
+        // deprovisioning was lost are deprovisioned now (S1-5).
+        for (const t of targetIds) {
+          for (const userId of await box.linkedUsers(t)) {
+            if (seen.has(userId)) continue;
+            await box.enqueue(t, userId);
+            queued++;
+          }
         }
         return ctx.json({ queued });
       }),

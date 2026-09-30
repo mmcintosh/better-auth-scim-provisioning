@@ -19,10 +19,16 @@ export interface ScimTarget {
   /** Its bearer token. */
   token: string;
   /**
-   * Who is provisioned to this target, beyond the defaults (verified email, not banned). Return
-   * false and a provisioned user is deprovisioned. Runs at delivery time, on the user as stored.
+   * Who is provisioned to this target, beyond the defaults (a verified email unless
+   * `requireVerifiedEmail: false`, and not banned). Return false and a provisioned user is
+   * deprovisioned. Runs at delivery time, on the user as stored.
    */
   include?: ((user: ProvisionedUser) => boolean | Promise<boolean>) | undefined;
+  /**
+   * Only users with a verified email (the default). Set false where the sign-in provider leaves
+   * `emailVerified` false but the address is trusted, e.g. some SSO and OAuth setups (S1-6).
+   */
+  requireVerifiedEmail?: boolean | undefined;
   /** Only members of this organization (Better Auth's organization plugin). */
   organizationId?: string | undefined;
   /** The SCIM user sent; default: userName = email, names split from `name`, one primary email. */
