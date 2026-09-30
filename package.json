@@ -5,12 +5,27 @@
   "license": "MIT",
   "author": "Mark McIntosh",
   "type": "module",
-  "keywords": ["better-auth", "scim", "provisioning", "saml", "identity-provider"],
+  "keywords": [
+    "better-auth",
+    "scim",
+    "provisioning",
+    "saml",
+    "identity-provider"
+  ],
   "homepage": "https://github.com/mmcintosh/better-auth-saml-idp",
-  "engines": { "node": ">=22" },
-  "files": ["dist", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
     "test": "vitest run",
@@ -30,11 +45,19 @@
     "@better-auth/utils": "0.4.2",
     "@biomejs/biome": "^2.5.14",
     "@types/node": "^26.6.3",
+    "@types/pg": "^8.23.1",
     "better-auth": "1.7.6",
     "esbuild": "^0.28.2",
+    "mongodb": "^7.7.0",
+    "mysql2": "^3.24.5",
+    "pg": "^8.23.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   },
   "packageManager": "pnpm@10.10.0",
-  "pnpm": { "overrides": { "@better-auth/utils": "0.4.2" } }
+  "pnpm": {
+    "overrides": {
+      "@better-auth/utils": "0.4.2"
+    }
+  }
 }

@@ -1,0 +1,163 @@
+// The outbox on real databases (CI's `adapters` job): its leases, version checks, date
+// comparisons and booleans are exactly what differs between databases, so SQLite passing isn't
+// enough. ADAPTER_DB is postgres, mysql or mongodb; ADAPTER_URL points at a server where the test
+// may create databases. Each test gets a fresh, empty database.
+import { afterEach, describe, expect, it } from "vitest";
+import { createHost, type HostDatabase } from "../support/host";
+
+const KIND = process.env.ADAPTER_DB;
+const URL_ = process.env.ADAPTER_URL ?? "";
+if (process.env.ADAPTER_REQUIRED && (!KIND || !URL_)) throw new Error("ADAPTER_REQUIRED is set, but ADAPTER_DB or ADAPTER_URL is empty");
+
+const fresh = () => `scim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+const databases: Record<string, () => Promise<HostDatabase & { close(): Promise<void> }>> = {
+  async postgres() {
+    const { Pool } = await import("pg");
+    const name = fresh();
+    const admin = new Pool({ connectionString: URL_ });
+    await admin.query(`CREATE DATABASE ${name}`);
+    const url = new URL(URL_);
+    url.pathname = `/${name}`;
+    const pool = new Pool({ connectionString: url.toString(), max: 10 });
+    pool.on("error", () => {});
+    return {
+      database: pool,
+      migrate: true,
+      async close() {
+        await pool.end();
+        await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+        await admin.end();
+      },
+    };
+  },
+  async mysql() {
+    const mysql = await import("mysql2/promise");
+    const name = fresh();
+    const admin = await mysql.createConnection(URL_);
+    await admin.query(`CREATE DATABASE ${name}`);
+    const url = new URL(URL_);
+    url.pathname = `/${name}`;
+    const pool = mysql.createPool({ uri: url.toString(), connectionLimit: 10, timezone: "Z" });
+    return {
+      database: pool,
+      migrate: true,
+      async close() {
+        await pool.end();
+        await admin.query(`DROP DATABASE IF EXISTS ${name}`);
+        await admin.end();
+      },
+    };
+  },
+  async mongodb() {
+    const { MongoClient } = await import("mongodb");
+    const { mongodbAdapter } = await import("better-auth/adapters/mongodb");
+    const client = new MongoClient(URL_);
+    await client.connect();
+    const db = client.db(fresh());
+    return {
+      // No migrations: the adapter creates collections and (UNIQUE) indexes on first use.
+      database: mongodbAdapter(db, { client }),
+      migrate: false,
+      async close() {
+        await db.dropDatabase();
+        await client.close();
+      },
+    };
+  },
+};
+
+const open: { close(): Promise<void> }[] = [];
+afterEach(async () => {
+  for (const d of open.splice(0)) await d.close();
+});
+
+async function host(o: Parameters<typeof createHost>[0] = {}) {
+  const make = databases[KIND as string];
+  if (!make) throw new Error(`unknown ADAPTER_DB ${KIND}`);
+  const database = await make();
+  open.push(database);
+  return createHost({ ...o, database });
+}
+
+const appUsers = (app: { users: Map<string, unknown> }) => [...app.users.values()] as Record<string, any>[];
+
+describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
+  it("a user's life: create, change, ban, unban, delete", async () => {
+    const h = await host();
+    const u = await h.user("Ada King Lovelace");
+    expect(appUsers(h.app)).toEqual([expect.objectContaining({ externalId: u.id, active: true, name: expect.objectContaining({ familyName: "Lovelace" }) })]);
+    await h.ctx.internalAdapter.updateUser(u.id, { name: "Ada Byron" });
+    await h.settle();
+    expect(appUsers(h.app)[0]?.displayName).toBe("Ada Byron");
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    expect(appUsers(h.app)[0]?.active).toBe(false);
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: false });
+    await h.settle();
+    expect(appUsers(h.app)[0]?.active).toBe(true);
+    await h.ctx.internalAdapter.deleteUser(u.id);
+    await h.settle();
+    expect(appUsers(h.app)[0]?.active).toBe(false);
+    expect(await h.jobs()).toEqual([]);
+  });
+
+  it("two workers on one job: exactly one delivers (the lease)", async () => {
+    const h = await host({ retry: { baseDelayMs: 0 } });
+    h.app.fail({ status: 503 });
+    await h.user();
+    const runs = await Promise.all([1, 2, 3].map(() => h.auth.api.scimProvisioningRun({ body: {} })));
+    expect(runs.reduce((n, r) => n + r.done, 0)).toBe(1);
+    expect(h.app.users.size).toBe(1);
+    expect(h.app.requests.filter((r) => r.method === "POST")).toHaveLength(2); // the 503, then the one delivery
+  });
+
+  it("a change during delivery is delivered too (the version check)", async () => {
+    const h = await host();
+    const u = await h.user("First Name");
+    const release = h.app.hold();
+    await h.ctx.internalAdapter.updateUser(u.id, { name: "Second Name" });
+    await new Promise((r) => setTimeout(r, 50));
+    await h.ctx.internalAdapter.updateUser(u.id, { name: "Third Name" });
+    release();
+    await h.settle();
+    expect(appUsers(h.app)[0]?.displayName).toBe("Third Name");
+    expect(await h.jobs()).toEqual([]);
+  });
+
+  it("retries wait for their time (dates), and failed jobs stay out of the run (booleans)", async () => {
+    const h = await host({ retry: { baseDelayMs: 60_000 } });
+    h.app.fail({ status: 503 });
+    await h.user();
+    expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 0, retry: 0 });
+    const h2 = await host({ retry: { baseDelayMs: 0 } });
+    h2.app.fail({ status: 400 });
+    await h2.user();
+    expect(await h2.jobs()).toEqual([expect.objectContaining({ failed: true })]);
+    expect(await h2.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 0 });
+  });
+
+  it("adoption refuses another user's account (S1-1)", async () => {
+    const h = await host();
+    const a = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "First Owner", emailVerified: true }, { method: "admin" });
+    await h.settle();
+    await h.ctx.internalAdapter.deleteUser(a.id);
+    await h.settle();
+    const b = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "Second Person", emailVerified: true }, { method: "admin" });
+    await h.settle();
+    expect(appUsers(h.app)).toEqual([expect.objectContaining({ externalId: a.id, active: false })]);
+    expect(await h.jobs()).toEqual([expect.objectContaining({ userId: b.id, failed: true })]);
+  });
+
+  it("reconcile covers existing and deleted users (S1-5)", async () => {
+    const h = await host();
+    const kept = await h.user("Kept Person");
+    const gone = await h.user("Gone Person");
+    await h.ctx.adapter.delete({ model: "user", where: [{ field: "id", value: gone.id }] });
+    expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({ queued: 2 });
+    await h.auth.api.scimProvisioningRun({ body: {} });
+    expect(appUsers(h.app)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ externalId: kept.id, active: true }), expect.objectContaining({ externalId: gone.id, active: false })]),
+    );
+  });
+});

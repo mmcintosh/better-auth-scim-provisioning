@@ -45,7 +45,11 @@ export interface Link {
   active: boolean;
 }
 
-const EPOCH = new Date(0);
+/**
+ * "Not held": any date in the past works; 2000-01-01 rather than the epoch, which MySQL's
+ * TIMESTAMP columns reject (they start one second after it).
+ */
+const RELEASED = new Date("2000-01-01T00:00:00.000Z");
 /**
  * How long a claimed job is held: a delivery makes at most four requests (replace, create, find,
  * replace), each up to the target's timeout, plus a margin. Shorter, and a second worker could
@@ -66,18 +70,34 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   const baseDelayMs = options.retry?.baseDelayMs ?? 30_000;
   const backoff = (attempts: number) => Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** Math.max(0, attempts - 1));
 
+  /**
+   * The jobs for (target, user). Normally one; a database without the UNIQUE key (MongoDB builds
+   * indexes lazily) can briefly hold two, which is harmless: each delivers the latest state.
+   */
+  async function jobsFor(key: string): Promise<Job[]> {
+    const rows = (await adapter.findMany({ model: JOB_MODEL, where: [{ field: "key", value: key }], limit: 10 })) as Job[];
+    return rows.filter((j) => j.key === key);
+  }
+
+  const free = (j: Job, now = Date.now()) => !j.failed && new Date(j.lockedUntil).getTime() < now && new Date(j.nextAttemptAt).getTime() <= now;
+
   /** Ask for (target, user) to be synced now; an existing job is bumped rather than duplicated. */
   async function enqueue(targetId: string, userId: string): Promise<void> {
     const key = keyOf(targetId, userId);
     const now = new Date();
     const fresh = { attempts: 0, nextAttemptAt: now, failed: false, lastError: null, updatedAt: now };
+    const bump = async (job: Job) => {
+      await adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: job.id }], update: { ...fresh, version: job.version + 1 } });
+    };
+    const existing = await jobsFor(key);
+    if (existing[0]) return bump(existing[0]);
     try {
-      await adapter.create({ model: JOB_MODEL, data: { key, targetId, userId, version: 1, lockedUntil: EPOCH, createdAt: now, ...fresh } });
-      return;
+      await adapter.create({ model: JOB_MODEL, data: { key, targetId, userId, version: 1, lockedUntil: RELEASED, createdAt: now, ...fresh } });
     } catch (e) {
-      const existing = (await adapter.findOne({ model: JOB_MODEL, where: [{ field: "key", value: key }] })) as Job | null;
-      if (!existing || existing.key !== key) throw e;
-      await adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: existing.id }], update: { ...fresh, version: existing.version + 1 } });
+      // Created meanwhile (the UNIQUE key): bump that one instead.
+      const raced = (await jobsFor(key))[0];
+      if (!raced) throw e;
+      await bump(raced);
     }
   }
 
@@ -187,25 +207,33 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const recorded = await adapter.updateMany({
         model: JOB_MODEL,
         where: [{ field: "id", value: current.id }, { field: "version", value: current.version }],
-        update: { attempts, lastError: err.message.slice(0, 1000), lockedUntil: EPOCH, failed: giveUp, nextAttemptAt: new Date(Date.now() + wait), updatedAt: new Date() },
+        update: { attempts, lastError: err.message.slice(0, 1000), lockedUntil: RELEASED, failed: giveUp, nextAttemptAt: new Date(Date.now() + wait), updatedAt: new Date() },
       });
       // Bumped during delivery (a new change, already due now): free it and try the new state.
-      if (recorded === 0) {
-        await release(current.id);
-        if (round < MAX_ROUNDS) return run(current, round + 1);
-      }
+      if (recorded === 0) await release(current.id);
+      // Only new work goes round again: the bumped job, or a duplicate; never the one that just
+      // failed unchanged, which waits for its backoff.
+      const again = await nextFor(current.key, round, recorded === 0 ? undefined : current.id);
+      if (again) return again;
       return giveUp ? "failed" : "retry";
     }
     const deleted = await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }, { field: "version", value: current.version }] });
-    // Bumped during delivery: keep the job, free it, and deliver the new change now.
-    if (deleted === 0) {
-      await release(current.id);
-      if (round < MAX_ROUNDS) return run(current, round + 1);
-    }
-    return "done";
+    // Bumped during delivery: keep the job, free it; then deliver whatever is still due for this
+    // user (the bumped job, or a duplicate), so the latest change goes out now.
+    if (deleted === 0) await release(current.id);
+    return (await nextFor(current.key, round)) ?? "done";
   }
 
-  const release = (id: string) => adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: id }], update: { lockedUntil: EPOCH } });
+  /** Another delivery for the same (target, user), if one is free and due and rounds remain. */
+  async function nextFor(key: string, round: number, skipId?: string): Promise<Outcome | null> {
+    if (round >= MAX_ROUNDS) return null;
+    const next = (await jobsFor(key)).find((j) => j.id !== skipId && free(j));
+    if (!next) return null;
+    const outcome = await run(next, round + 1);
+    return outcome === "busy" ? null : outcome;
+  }
+
+  const release = (id: string) => adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: id }], update: { lockedUntil: RELEASED } });
 
   /** Deliver the jobs that are due, oldest first. */
   async function runDue(limit = 50): Promise<Record<Outcome, number>> {
@@ -222,8 +250,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   /** Deliver (target, user) now if due, e.g. right after enqueue. */
   async function runFor(targetId: string, userId: string): Promise<Outcome | null> {
-    const job = (await adapter.findOne({ model: JOB_MODEL, where: [{ field: "key", value: keyOf(targetId, userId) }] })) as Job | null;
-    if (!job || job.failed || new Date(job.nextAttemptAt).getTime() > Date.now()) return null;
+    const jobs = await jobsFor(keyOf(targetId, userId));
+    const job = jobs.find((j) => free(j));
+    if (!job) return jobs.length ? "busy" : null;
     return run(job);
   }
 

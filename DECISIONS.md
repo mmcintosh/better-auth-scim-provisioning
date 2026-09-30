@@ -55,3 +55,13 @@ Notes:
 - Cloudflare's SCIM secret only takes effect once the identity provider is **saved**; the secret shown before the first save was rejected (401). Regenerate, copy, save.
 - Better Auth's `Database schema mismatch` log in the tests is the test hosts' order (Better Auth checks its tables when it starts, before the test migrates), not the plugin.
 - PUT and PATCH both work on Cloudflare; the PUT-or-PATCH question stays open until an app that behaves differently (AWS IAM Identity Center) can be checked.
+
+## D-004: The outbox on Postgres, MySQL and MongoDB (2026-09-30)
+
+`test/adapters/outbox.adapters.test.ts` runs the outbox on real databases, a fresh one per test (CI's `adapters` job; locally with `ADAPTER_DB` and `ADAPTER_URL`). Its leases, version checks, date comparisons and booleans are what differ between databases. The first run found two bugs that SQLite and Postgres don't show:
+- **MySQL: nothing was provisioned.** The "not held" lease value was the Unix epoch, and MySQL's TIMESTAMP columns start one second after it, so every queue attempt failed with `Incorrect datetime value`.
+  - Fix: 2000-01-01, valid in every database; any past date works.
+- **MongoDB: a change during delivery waited for the scheduled run.** Better Auth's MongoDB adapter hadn't built the UNIQUE index on the job key, so a second change created a duplicate job instead of bumping the one being delivered. That delivery finished its own job and never saw the duplicate.
+  - Fix: the outbox no longer depends on the UNIQUE key. `enqueue` bumps an existing job before creating one. After a delivery, any other free job for the same user and target (a bump or a duplicate) is delivered at once, so a duplicate costs at most one extra delivery of the latest state. Only new work goes round again: a job that just failed unchanged waits for its backoff.
+
+Result: the six adapter tests (a user's life, the lease, a change during delivery, retry timing and failed jobs, S1-1, S1-5) pass on Postgres 17, MySQL 8.4 and MongoDB 8.2, twice each.

@@ -11,16 +11,23 @@ import { mockScim } from "./mock-scim";
 
 type TargetSpec = Omit<ScimTarget, "url" | "token" | "fetch"> & { requireNames?: boolean };
 
-export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"] } = {}) {
+/** A database for Better Auth's `database` option, and whether it needs Better Auth's migrations. */
+export interface HostDatabase {
+  database: unknown;
+  migrate: boolean;
+}
+
+export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; database?: HostDatabase } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
   const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true })]));
   const pending = new Set<Promise<unknown>>();
   const db = new DatabaseSync(":memory:");
+  const database = o.database ?? { database: db, migrate: true };
   const auth = betterAuth({
     baseURL: "http://localhost:3000",
     secret: "test-secret-that-is-at-least-32-characters-long",
     telemetry: { enabled: false },
-    database: db,
+    database: database.database as never,
     emailAndPassword: { enabled: true },
     advanced: {
       backgroundTasks: {
@@ -40,7 +47,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
     ],
   });
   const ctx = await auth.$context;
-  await (await getMigrations(ctx.options)).runMigrations();
+  if (database.migrate) await (await getMigrations(ctx.options)).runMigrations();
 
   /** Wait for every background delivery (and any it starts). */
   const settle = async () => {
