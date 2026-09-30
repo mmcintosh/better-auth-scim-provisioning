@@ -36,3 +36,22 @@ Read as if written by someone else, looking for what breaks in real use. Each fi
   - two concurrent bumps can't lose a change (the version check);
   - a failure to queue never fails the user's own write.
 - **Open, decided after live tests:** updates use PUT, which replaces the whole user at the app, including attributes an admin set there. PATCH is gentler, but which apps accept which PATCH form needs checking against AWS IAM Identity Center and Cloudflare Access first.
+
+## D-003: Verified live against Cloudflare Access (2026-09-30)
+
+`test/live/lifecycle.test.ts` runs the plugin, unchanged, against a real SCIM service (`SCIM_URL`, `SCIM_TOKEN` in the git-ignored `.env.live`; `npx vitest run -c vitest.live.config.ts`; never in CI), reads the user back from the service after each step, and removes it there at the end.
+
+Against Cloudflare Zero Trust (a generic SAML identity provider with **Enable SCIM** on), every step passed:
+- **created:** userName = email, active, given/family names split, displayName and externalId stored as sent;
+- **renamed:** name and displayName updated;
+- **email changed:** the same account's userName changed;
+- **banned:** `active: false`; **unbanned:** `active: true`;
+- **deleted:** `active: false`, account kept;
+- **a deleted user's email reused:** refused (S1-1); the old account stayed the old user's and inactive, and the job failed with "belongs to another user".
+
+Cloudflare's ServiceProviderConfig: PATCH, filter (max 100) and sort supported; no bulk, no ETags. Nothing was left at the service.
+
+Notes:
+- Cloudflare's SCIM secret only takes effect once the identity provider is **saved**; the secret shown before the first save was rejected (401). Regenerate, copy, save.
+- Better Auth's `Database schema mismatch` log in the tests is the test hosts' order (Better Auth checks its tables when it starts, before the test migrates), not the plugin.
+- PUT and PATCH both work on Cloudflare; the PUT-or-PATCH question stays open until an app that behaves differently (AWS IAM Identity Center) can be checked.
