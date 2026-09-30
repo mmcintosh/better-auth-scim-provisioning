@@ -2,7 +2,7 @@
 // changed, banned or deleted in Better Auth (or added to or removed from an organization) is queued
 // for each target, and delivered in the background; a scheduled run retries what failed.
 import type { BetterAuthPlugin } from "better-auth";
-import { createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import * as z from "zod";
 import { type Adapter, JOB_MODEL, LINK_MODEL, outbox } from "./outbox";
 import type { ScimProvisioningOptions } from "./types";
@@ -11,12 +11,28 @@ export { defaultScimUser, splitName } from "./mapping";
 export { SCIM_USER_SCHEMA, ScimError, type ScimUser } from "./scim-client";
 export type { ProvisionedUser, ScimProvisioningOptions, ScimTarget } from "./types";
 
+/**
+ * A SCIM base URL: https, or http to a loopback address; no credentials, query or fragment, which
+ * would send the token elsewhere or break every path built on it (S2-13).
+ */
+function targetUrl(value: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return false;
+  }
+  if (u.username || u.password || u.search || u.hash || value.includes("?") || value.includes("#")) return false;
+  if (u.protocol === "https:") return true;
+  return u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+}
+
 const optionsSchema = z.object({
   targets: z
     .array(
       z.object({
         id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
-        url: z.url({ protocol: /^https?$/ }).refine((u) => u.startsWith("https://") || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(u), "must be https (http only for localhost)"),
+        url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment"),
         token: z.string().min(1),
         include: z.function().optional(),
         requireVerifiedEmail: z.boolean().optional(),
@@ -85,6 +101,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           lockedUntil: { type: "date", required: true },
           failed: { type: "boolean", required: true },
           lastError: { type: "string", required: false },
+          lastStatus: { type: "number", required: false },
           createdAt: { type: "date", required: true },
           updatedAt: { type: "date", required: true },
         },
@@ -92,10 +109,11 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       [LINK_MODEL]: {
         fields: {
           key: { type: "string", required: true, unique: true },
-          targetId: { type: "string", required: true },
+          targetId: { type: "string", required: true, index: true },
           userId: { type: "string", required: true, index: true },
-          remoteId: { type: "string", required: true },
+          remoteId: { type: "string", required: true, index: true },
           userName: { type: "string", required: true },
+          externalId: { type: "string", required: false },
           active: { type: "boolean", required: true },
           syncedAt: { type: "date", required: true },
         },
@@ -147,12 +165,28 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               await queue(m.userId, options.targets.filter((t) => t.organizationId === m.organizationId).map((t) => t.id));
             }
             // A deleted organization takes its members with it: deprovision everyone linked
-            // through its targets.
-            if (ctx.path === "/organization/delete") {
-              const orgId = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
-              for (const t of options.targets.filter((x) => typeof orgId === "string" && x.organizationId === orgId)) {
-                for (const userId of await b.linkedUsers(t.id)) await queue(userId, [t.id]);
-              }
+            // through its targets. In the background, one user at a time: never in the way of
+            // the request, and never a burst at the app (S2-6, S2-10). Whatever doesn't finish
+            // is left queued for the scheduled run, or found by the next reconcile.
+            const orgId = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
+            const orgTargets = options.targets.filter((t) => ctx.path === "/organization/delete" && typeof orgId === "string" && t.organizationId === orgId);
+            if (orgTargets.length) {
+              background(
+                (async () => {
+                  const queued: [string, string][] = [];
+                  for (const t of orgTargets) {
+                    for await (const userId of b.allLinkedUsers(t.id)) {
+                      try {
+                        await b.enqueue(t.id, userId);
+                        queued.push([t.id, userId]);
+                      } catch (e) {
+                        ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
+                      }
+                    }
+                  }
+                  for (const [targetId, userId] of queued) await b.runFor(targetId, userId);
+                })(),
+              );
             }
           }),
         },
@@ -165,36 +199,78 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         return ctx.json(await box.runDue(ctx.body?.limit ?? 50));
       }),
       /**
-       * Queue every user for every target (or one): after adding a target, or to repair drift.
-       * Delivery then happens through scimProvisioningRun.
+       * Queue every user for every target (or one), and every user still linked at a target who no
+       * longer exists (deleted users whose deprovisioning was lost, S1-5): after adding or fixing a
+       * target, or to repair drift. Delivery then happens through scimProvisioningRun. With
+       * `limit`, one page at a time: call again with `after: next` until `next` is null (S2-6).
        */
-      scimProvisioningReconcile: createAuthEndpoint.serverOnly({ method: "POST", body: z.object({ targetId: z.string().optional() }).optional() }, async (ctx) => {
-        if (!box) throw new Error("[scim] not initialised");
-        const targetIds = ctx.body?.targetId ? [ctx.body.targetId] : options.targets.map((t) => t.id);
-        let queued = 0;
-        const seen = new Set<string>();
-        for (let offset = 0; ; offset += 500) {
-          const users = (await ctx.context.adapter.findMany({ model: "user", limit: 500, offset, sortBy: { field: "id", direction: "asc" } })) as { id: string }[];
-          for (const u of users) {
-            seen.add(u.id);
-            for (const t of targetIds) {
-              await box.enqueue(t, u.id);
-              queued++;
+      scimProvisioningReconcile: createAuthEndpoint.serverOnly(
+        {
+          method: "POST",
+          body: z.object({ targetId: z.string().optional(), after: z.string().optional(), limit: z.number().int().min(1).max(10_000).optional() }).optional(),
+        },
+        async (ctx) => {
+          if (!box) throw new Error("[scim] not initialised");
+          const b = box;
+          const all = options.targets.map((t) => t.id);
+          const targetId = ctx.body?.targetId;
+          if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+          const targetIds = targetId ? [targetId] : all;
+          let budget = ctx.body?.limit ?? Number.POSITIVE_INFINITY;
+          let queued = 0;
+          // The cursor: "u:<last user id>" while walking users, then "l:<target>:<last user id>"
+          // while walking each target's links.
+          const cursor = ctx.body?.after ?? "u:";
+          const page = () => Math.min(500, budget);
+
+          if (cursor.startsWith("u:")) {
+            let last = cursor.slice(2) || null;
+            for (;;) {
+              const size = page();
+              const users = (await ctx.context.adapter.findMany({
+                model: "user",
+                where: last === null ? [] : [{ field: "id", value: last, operator: "gt" }],
+                limit: size,
+                sortBy: { field: "id", direction: "asc" },
+              })) as { id: string }[];
+              for (const u of users) {
+                for (const t of targetIds) await b.enqueue(t, u.id, { now: true });
+                queued += targetIds.length;
+                last = u.id;
+              }
+              budget -= users.length;
+              if (users.length < size) break;
+              if (budget <= 0) return ctx.json({ queued, next: `u:${last}` });
             }
           }
-          if (users.length < 500) break;
-        }
-        // And everyone linked at a target who no longer exists: deleted users whose
-        // deprovisioning was lost are deprovisioned now (S1-5).
-        for (const t of targetIds) {
-          for (const userId of await box.linkedUsers(t)) {
-            if (seen.has(userId)) continue;
-            await box.enqueue(t, userId);
-            queued++;
+
+          const [, fromTarget = targetIds[0], fromUser = ""] = cursor.startsWith("l:") ? (/^l:([^:]*):(.*)$/.exec(cursor) ?? []) : [];
+          for (const t of targetIds.slice(Math.max(0, targetIds.indexOf(fromTarget as string)))) {
+            let last: string | null = t === fromTarget && fromUser ? fromUser : null;
+            for (;;) {
+              if (budget <= 0) return ctx.json({ queued, next: `l:${t}:${last ?? ""}` });
+              const size = page();
+              const linked = await b.linkedUsers(t, last, size);
+              if (linked.length) {
+                const existing = new Set(
+                  ((await ctx.context.adapter.findMany({ model: "user", where: [{ field: "id", value: linked, operator: "in" }], limit: linked.length })) as { id: string }[]).map((u) => u.id),
+                );
+                for (const userId of linked) {
+                  if (!existing.has(userId)) {
+                    await b.enqueue(t, userId, { now: true });
+                    queued++;
+                  }
+                  last = userId;
+                }
+              }
+              budget -= linked.length;
+              if (linked.length < size) break;
+              if (budget <= 0) return ctx.json({ queued, next: `l:${t}:${last}` });
+            }
           }
-        }
-        return ctx.json({ queued });
-      }),
+          return ctx.json({ queued, next: null as string | null });
+        },
+      ),
     },
   } satisfies BetterAuthPlugin;
 }

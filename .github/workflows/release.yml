@@ -5,7 +5,8 @@
 # - Push a tag `vX.Y.Z` matching package.json's version (and "private" removed) to publish.
 # - Run it by hand (Actions > Release > Run workflow) for a dry run: everything except publishing,
 #   with the tarball and SBOM kept as workflow artifacts.
-# See CONTRIBUTING.md#releasing for the npm side (trusted publishing).
+# The npm side: a trusted publisher on npmjs.com for this repository, release.yml and the `npm`
+# environment, which should have required reviewers.
 name: Release
 on:
   push: { tags: ["v*"] }
@@ -46,9 +47,11 @@ jobs:
           if [ "$EVENT" = push ]; then
             [ "$REF_NAME" = "v$version" ] || { echo "::error::tag $REF_NAME doesn't match package.json version $version"; exit 1; }
             [ "$private" = false ] || { echo "::error::package.json is still \"private\": true"; exit 1; }
-            # Only commits already on main are released, whoever pushed the tag (R4-L10).
+            # Only commits already on main are released, whoever pushed the tag.
             git fetch --quiet origin main
             git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::tag $REF_NAME is not on main"; exit 1; }
+            # The release notes: checked here, before anything is staged on npm.
+            grep -q "^## \\[$version\\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no ## [$version] section"; exit 1; }
           fi
       - run: pnpm build && mkdir -p out && pnpm pack --pack-destination out
       # The SBOM describes what a user installs: the tarball's runtime dependency tree.
@@ -70,7 +73,7 @@ jobs:
         with: { name: release, path: out/, retention-days: 30 }
 
   # Publish the tested tarball. Runs only for tags, in the `npm` environment: add required
-  # reviewers to it (Settings > Environments) so every release needs an approval (R4-L10).
+  # reviewers to it (Settings > Environments) so every release needs an approval.
   publish:
     needs: package
     if: github.event_name == 'push'
@@ -97,7 +100,7 @@ jobs:
         run: case "$VERSION" in *-*) echo "tag=next" >> "$GITHUB_OUTPUT" ;; *) echo "tag=latest" >> "$GITHUB_OUTPUT" ;; esac
       # A signed SLSA provenance of the tarball, also attached to the GitHub release as
       # <tarball>.sigstore.json, so the release itself carries its signature. Before staging on
-      # npm: if it fails, nothing is staged, and a re-run starts clean (review 6).
+      # npm: if it fails, nothing is staged, and a re-run starts clean.
       - id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with: { subject-path: "out/*.tgz" }

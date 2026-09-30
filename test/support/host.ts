@@ -9,7 +9,7 @@ import { scimProvisioning } from "../../src";
 import type { ScimProvisioningOptions, ScimTarget } from "../../src/types";
 import { mockScim } from "./mock-scim";
 
-type TargetSpec = Omit<ScimTarget, "url" | "token" | "fetch"> & { requireNames?: boolean };
+type TargetSpec = Omit<ScimTarget, "url" | "token" | "fetch"> & { requireNames?: boolean; keepsExternalId?: boolean };
 
 /** A database for Better Auth's `database` option, and whether it needs Better Auth's migrations. */
 export interface HostDatabase {
@@ -19,7 +19,7 @@ export interface HostDatabase {
 
 export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; database?: HostDatabase } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
-  const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true })]));
+  const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true })]));
   const pending = new Set<Promise<unknown>>();
   const db = new DatabaseSync(":memory:");
   const database = o.database ?? { database: db, migrate: true };
@@ -41,7 +41,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
       admin(),
       organization(),
       scimProvisioning({
-        targets: specs.map(({ requireNames: _, ...s }) => ({ ...s, url: apps[s.id]!.url, token: apps[s.id]!.token, fetch: apps[s.id]!.fetch })),
+        targets: specs.map(({ requireNames: _, keepsExternalId: __, ...s }) => ({ ...s, url: apps[s.id]!.url, token: apps[s.id]!.token, fetch: apps[s.id]!.fetch })),
         ...(o.retry ? { retry: o.retry } : {}),
       }),
     ],

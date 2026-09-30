@@ -154,10 +154,59 @@ describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
     const kept = await h.user("Kept Person");
     const gone = await h.user("Gone Person");
     await h.ctx.adapter.delete({ model: "user", where: [{ field: "id", value: gone.id }] });
-    expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({ queued: 2 });
+    expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({ queued: 2, next: null });
     await h.auth.api.scimProvisioningRun({ body: {} });
     expect(appUsers(h.app)).toEqual(
       expect.arrayContaining([expect.objectContaining({ externalId: kept.id, active: true }), expect.objectContaining({ externalId: gone.id, active: false })]),
     );
+  });
+
+  it("reconcile in pages (id order, gt and in queries) (S2-6)", async () => {
+    const h = await host();
+    const users = [await h.user("One Person"), await h.user("Two Person"), await h.user("Three Person")];
+    const gone = await h.user("Gone Person");
+    await h.ctx.adapter.delete({ model: "user", where: [{ field: "id", value: gone.id }] });
+    let queued = 0;
+    let next: string | null | undefined;
+    do {
+      const r = await h.auth.api.scimProvisioningReconcile({ body: { limit: 1, ...(next ? { after: next } : {}) } });
+      queued += r.queued;
+      next = r.next;
+    } while (next);
+    expect(queued).toBe(4);
+    expect((await h.jobs()).map((j) => j.userId).sort()).toEqual([...users.map((u) => u.id), gone.id].sort());
+  });
+
+  it("a lost create reply, then a ban: the pending link finds the account (S2-2)", async () => {
+    const h = await host({ retry: { baseDelayMs: 60_000 } });
+    h.app.fail({ lostReply: true });
+    const u = await h.user();
+    expect(await h.links()).toEqual([expect.objectContaining({ userId: u.id, remoteId: "" })]);
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    expect(appUsers(h.app)).toEqual([expect.objectContaining({ externalId: u.id, active: false })]);
+  });
+
+  it("adoption refuses an account linked to another user, by remoteId (S2-3)", async () => {
+    const h = await host({ targets: [{ id: "app", keepsExternalId: false }] });
+    const a = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "First Owner", emailVerified: true }, { method: "admin" });
+    await h.settle();
+    await h.ctx.internalAdapter.deleteUser(a.id);
+    await h.settle();
+    const b = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "Second Person", emailVerified: true }, { method: "admin" });
+    await h.settle();
+    expect(appUsers(h.app)).toEqual([expect.objectContaining({ active: false, displayName: "First Owner" })]);
+    expect(await h.jobs()).toEqual([expect.objectContaining({ userId: b.id, failed: true })]);
+  });
+
+  it("a timed ban is lifted when it runs out (S2-7)", async () => {
+    const h = await host();
+    const u = await h.user();
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true, banExpires: new Date(Date.now() + 1500) });
+    await h.settle();
+    expect(appUsers(h.app)[0]?.active).toBe(false);
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 1 });
+    expect(appUsers(h.app)[0]?.active).toBe(true);
   });
 });

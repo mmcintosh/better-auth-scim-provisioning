@@ -28,3 +28,11 @@ const auth = betterAuth({ plugins: [organization(), scimProvisioning({ targets: 
 // The server-only endpoints are typed on auth.api.
 export const run = () => auth.api.scimProvisioningRun({ body: { limit: 50 } });
 export const reconcile = () => auth.api.scimProvisioningReconcile({ body: {} });
+
+// Reconcile a page at a time, as the README shows.
+export async function reconcileInPages() {
+  let next: string | null = null;
+  do {
+    ({ next } = await auth.api.scimProvisioningReconcile({ body: { limit: 200, after: next ?? undefined } }));
+  } while (next);
+}

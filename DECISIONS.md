@@ -65,3 +65,31 @@ Notes:
   - Fix: the outbox no longer depends on the UNIQUE key. `enqueue` bumps an existing job before creating one. After a delivery, any other free job for the same user and target (a bump or a duplicate) is delivered at once, so a duplicate costs at most one extra delivery of the latest state. Only new work goes round again: a job that just failed unchanged waits for its backoff.
 
 Result: the six adapter tests (a user's life, the lease, a change during delivery, retry timing and failed jobs, S1-1, S1-5) pass on Postgres 17, MySQL 8.4 and MongoDB 8.2, twice each.
+
+## D-005: Review S2, fresh eyes before 0.1.0 (2026-09-30)
+
+A review by a new agent with no history in the project, looking for what's wrong rather than what's there. Each finding it proved was reproduced by a test outside the repo; each fix has a test in `test/review/s2-*` that failed first, and the database-sensitive paths are in the adapter matrix too.
+
+- **S2-1 (High): a change could be lost.** The hook read the job, the delivery that just finished deleted it, and the bump then updated nothing. D-002's "two concurrent bumps can't lose a change" held for bumps, not for a bump racing the delete.
+  - Fix: a bump that changes no row looks again and creates the job.
+- **S2-2 (Medium): a create whose reply was lost couldn't be undone.** The link was saved only after the app answered, so a user who then left (banned, deleted, removed) had no link, and their account stayed active at the app, even through reconcile.
+  - Fix: a pending link (no remoteId yet) is written before the create. A leaving user with a pending link is looked up by userName: deprovisioned if the account is ours (our externalId), forgotten if there's none. If the app doesn't keep externalId, the job fails with a message rather than guess.
+- **S2-3 (Medium, security): adoption trusted the app to keep externalId.** Many apps drop it, so every account looked like nobody's, and a new user with a deleted user's email was handed the old account, reactivated.
+  - Fix: an account already linked to another user at the target, by our own links, is never adopted. (`remoteId` is indexed for this.)
+- **S2-4 (Medium): outages longer than about an hour dropped changes.** 5xx, timeouts and 401/403 counted toward `maxAttempts` (8), then the job failed for good, deprovisioning included.
+  - Fix: only an error that won't fix itself fails a job. Past `maxAttempts`, retries continue every 6 hours, and the log turns to an error once.
+- **S2-5 (Medium, security): `requireVerifiedEmail: false` let anyone claim an account.** Sign up as someone else's address, unverified, and the matching hand-made account at the app was adopted.
+  - Fix: an existing account that isn't ours is adopted only for a verified email.
+- **S2-6 (Medium): large organizations and user bases.**
+  - Deleting an organization queued and delivered every member inside the admin's request, all at once. Now it's in the background, one user at a time; what doesn't finish stays queued.
+  - Reconcile did everything in one call, and "every linked user" stopped at 10,000. Now links are walked in pages (userId order), and reconcile takes `limit` and `after` and returns `next`, so on Workers it can run a page per invocation. An unknown `targetId` is refused. `targetId` is indexed.
+- **S2-7 (Low): a timed ban never lifted at the app.** Better Auth clears an expired ban only at the next sign-in. Now the job is kept until `banExpires`, and delivered then.
+- **S2-8 (Low): delete mode skipped users who were only deactivated,** e.g. after switching a target from `deactivate` to `delete`. Now they're deleted too.
+- **S2-9 (Low): backoff.** Every change reset a job's backoff, so a busy user kept hitting an app that answered 429. Now a job the app rate-limited keeps its wait (reconcile still starts over). `Retry-After` is capped at a day: a huge value made an invalid date and wedged the job.
+- **S2-10 (Low): a database error in the organization-delete hook failed the admin's request** after the organization was gone. The work is now in the background (S2-6), where errors are logged.
+- **S2-11 (Low): duplicate jobs (MongoDB) could be delivered at once.** A claimed job now removes free duplicates, and of held ones only the first claimed goes ahead.
+- **S2-12 (Low): memberships made outside the organization plugin's endpoints aren't seen,** e.g. the creator of a new organization, SSO or inbound SCIM provisioning, or the host's own adapter writes. Documented; reconcile covers them.
+- **S2-13 (Low): the target URL check.** `http://localhost:80@evil.example/…` passed (userinfo), query strings passed and broke every path, and fetch followed redirects, replaying the token and body.
+  - Fix: parsed with `URL`; https, or http to a loopback address; no credentials, query or fragment. Redirects are never followed: a 3xx fails with the location, to put the final URL in the target.
+- **S2-14 (Low): the release checked CHANGELOG.md after staging on npm,** so a missing section would stage a version and then fail. Now checked before anything is built. Leftovers from better-auth-saml-idp in comments and the lint config are gone.
+- **Checked and fine:** server-only endpoints have no HTTP route; hooks run after commit and keep the host's own hooks; the membership matcher; the SCIM filter and path encoding; tokens never logged; the release pipeline's pinning, permissions and provenance.

@@ -8,4 +8,5 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 - **SCIM 2.0 provisioning for Better Auth** (`scimProvisioning`): users created, changed, banned or deleted, and organization members added or removed, are created, updated or deactivated at each target. An outbox in the database, delivered in the background and by a scheduled run (`scimProvisioningRun`), with leases, retries with backoff (Retry-After honoured), careful adoption of existing accounts, and `scimProvisioningReconcile` (DECISIONS.md D-001).
 - Per target: `organizationId`, `include`, `requireVerifiedEmail`, `mapUser`, `deprovision` (`deactivate` or `delete`), `timeoutMs`.
-- Reviewed before release (D-002), tested on SQLite, PostgreSQL, MySQL and MongoDB (D-004), and verified live against Cloudflare Access (D-003).
+- `scimProvisioningReconcile` in pages (`limit`, `after` → `next`), for Workers and large user bases.
+- Reviewed twice before release (D-002, D-005), tested on SQLite, PostgreSQL, MySQL and MongoDB (D-004), and verified live against Cloudflare Access (D-003).

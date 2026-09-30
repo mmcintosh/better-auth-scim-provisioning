@@ -12,9 +12,11 @@ export interface StoredUser {
   active: boolean;
 }
 
-export type Fault = { status: number; retryAfter?: string; detail?: string } | { timeout: true };
+/** A reply instead of the real one, no reply at all, or the real work done and the reply lost. */
+export type Fault = { status: number; retryAfter?: string; detail?: string } | { timeout: true } | { lostReply: true };
 
-export function mockScim(o: { token?: string; requireNames?: boolean } = {}) {
+/** `keepsExternalId: false`: an app that ignores externalId, as many do. */
+export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
   const requests: { method: string; path: string; body?: unknown }[] = [];
@@ -41,6 +43,10 @@ export function mockScim(o: { token?: string; requireNames?: boolean } = {}) {
     if (gate) await gate;
 
     const fault = faults.shift();
+    if (fault && "lostReply" in fault) {
+      await answer(url, method, path, body, init);
+      throw new TypeError("network connection lost");
+    }
     if (fault && "timeout" in fault) {
       // Never answer: the client's AbortSignal ends the wait.
       return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)));
@@ -50,7 +56,11 @@ export function mockScim(o: { token?: string; requireNames?: boolean } = {}) {
       if (fault.retryAfter) res.headers.set("retry-after", fault.retryAfter);
       return res;
     }
+    return answer(url, method, path, body, init);
+  };
 
+  async function answer(url: URL, method: string, path: string, body: Record<string, unknown> | undefined, init: RequestInit | undefined): Promise<Response> {
+    if (body && o.keepsExternalId === false) delete body.externalId;
     if ((init?.headers as Record<string, string> | undefined)?.authorization !== `Bearer ${token}`) return error(401, "bad token");
 
     const m = /^\/Users(?:\/([^/?]+))?$/.exec(path);
@@ -96,7 +106,7 @@ export function mockScim(o: { token?: string; requireNames?: boolean } = {}) {
       return reply(204);
     }
     return error(405, "method not allowed");
-  };
+  }
 
   return {
     fetch: handler,
