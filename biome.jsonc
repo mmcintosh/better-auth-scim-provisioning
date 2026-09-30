@@ -1,0 +1,39 @@
+{
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+	"files": {
+		"includes": [
+			"src/**",
+			"test/**",
+			"scripts/**/*.mjs",
+			"e2e/**/*.mjs",
+			"examples/workers-hono/src/**",
+			"examples/nextjs/src/**",
+			"examples/nextjs/scripts/**",
+			"examples/nextjs/next.config.ts",
+			"!src/saml/schemas.generated.ts"
+		]
+	},
+	"formatter": { "enabled": false },
+	"assist": { "enabled": false },
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"security": {
+				"preset": "recommended",
+				// 60, not the default 41: at 41 it flags XML namespace URIs and XPath. Checked at 60: still
+				// catches an RSA private-key body and an AWS-style key. gitleaks (CI) covers the rest.
+				"noSecrets": { "level": "error", "options": { "entropyThreshold": 60 } }
+			},
+			"suspicious": { "noExplicitAny": "off" }
+		}
+	},
+	"overrides": [
+		{
+			// Tests assert first, then dereference; `!` after an expect() is the idiom.
+			"includes": ["test/**", "e2e/**"],
+			"linter": { "rules": { "style": { "noNonNullAssertion": "off" } } }
+		}
+	]
+}
