@@ -2,6 +2,8 @@
 // userName, create, replace, set active, delete. Every failure is a ScimError that says whether
 // retrying later can help (429, 5xx, 401/403, timeouts, network errors) or not (other 4xx).
 
+import { credentials, type ScimAuth } from "./credentials";
+
 export const SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User";
 const PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
@@ -18,8 +20,10 @@ export interface ScimUser {
 export interface ScimEndpoint {
   /** The SCIM base URL, without /Users (for example https://scim.us-east-2.amazonaws.com/<id>/scim/v2). */
   url: string;
+  /** How requests are authorised; `token` is short for `{ type: "bearer", token }`. */
+  auth?: ScimAuth | undefined;
   /** Bearer token. */
-  token: string;
+  token?: string | undefined;
   /** Per request; default 10 seconds. */
   timeoutMs?: number | undefined;
   /** For tests. */
@@ -59,14 +63,17 @@ export function scimClient(endpoint: ScimEndpoint) {
   const base = endpoint.url.replace(/\/+$/, "");
   const doFetch = endpoint.fetch ?? fetch;
   const timeoutMs = endpoint.timeoutMs ?? 10_000;
+  const auth: ScimAuth = endpoint.auth ?? { type: "bearer", token: endpoint.token ?? "" };
+  const creds = credentials(auth, { fetch: doFetch, timeoutMs });
 
-  async function request(method: string, path: string, body?: unknown): Promise<{ status: number; json: unknown }> {
+  async function request(method: string, path: string, body?: unknown, retried = false): Promise<{ status: number; json: unknown }> {
     let res: Response;
+    const authorization = await creds.headers();
     try {
       res = await doFetch(`${base}${path}`, {
         method,
         headers: {
-          authorization: `Bearer ${endpoint.token}`,
+          ...authorization,
           accept: "application/scim+json, application/json",
           ...(body === undefined ? {} : { "content-type": "application/scim+json" }),
         },
@@ -89,6 +96,8 @@ export function scimClient(endpoint: ScimEndpoint) {
       }
     }
     if (res.ok) return { status: res.status, json };
+    // A cached OAuth token the app no longer accepts: once, with a new one.
+    if (res.status === 401 && !retried && creds.rejected()) return request(method, path, body, true);
     if (res.status >= 300 && res.status < 400) {
       const to = res.headers.get("location");
       throw new ScimError(`${method} ${path}: redirected (${res.status})${to ? ` to ${to.slice(0, 200)}` : ""}; use the final URL as the target's url`, res.status, false);
