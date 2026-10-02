@@ -86,3 +86,11 @@ describe("scimClient", () => {
     expect(retryAfterMs("soon")).toBeUndefined();
   });
 });
+
+it("trims trailing slashes quickly, even a long run of them", async () => {
+  const { trimSlashes } = await import("../src/scim-client");
+  expect(trimSlashes("https://x.test/scim/v2///")).toBe("https://x.test/scim/v2");
+  const started = performance.now();
+  expect(trimSlashes(`https://x.test${"/".repeat(100_000)}a`)).toBe(`https://x.test${"/".repeat(100_000)}a`);
+  expect(performance.now() - started).toBeLessThan(100);
+});
