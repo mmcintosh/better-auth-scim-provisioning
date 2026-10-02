@@ -64,6 +64,7 @@ const optionsSchema = z.object({
     )
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
   retry: z.object({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
+  concurrency: z.number().int().min(1).max(32).optional(),
 });
 
 /** Ids per `in` query: D1 allows 100 bound parameters per statement. */

@@ -57,6 +57,11 @@ export interface ScimTarget {
 
 export interface ScimProvisioningOptions {
   targets: ScimTarget[];
+  /**
+   * Deliveries at once in the scheduled run (`scimProvisioningRun`); default 4, 1 for one at a
+   * time. Higher is faster, but every target sees that many requests at once.
+   */
+  concurrency?: number | undefined;
   retry?: {
     /**
      * Attempts at the normal backoff; default 8. After that, a failure that can fix itself (429,
