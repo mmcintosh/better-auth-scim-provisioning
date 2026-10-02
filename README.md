@@ -88,6 +88,8 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `include` | | `(user) => boolean`: who else to leave out. Only `true` includes; anything else deprovisions a provisioned user at their next delivery. |
 | `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. An account that already exists at the app is still only taken over for a verified email. |
 | `mapUser` | see below | `(user) => ScimUser`: what's sent. |
+| `groups` | `false` | Organizations as groups at the app (see [Groups](#groups)). |
+| `groupName` | the organization's name | `(organization) => string`: the group's name. |
 | `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
 | `timeoutMs` | `10000` | Per request. |
 
@@ -109,6 +111,21 @@ By default the app gets:
 - **`active`**.
 
 Override it per target with `mapUser`, for example to take `userName` from an employee id. `defaultScimUser(user)` is exported to build on.
+
+## Groups
+
+With `groups: true`, each organization (Better Auth's organization plugin) is a group at the app, or only `organizationId`'s when that's set. The group's members are the organization's members who are provisioned and active at that target, so a banned or unverified member isn't in it.
+
+- **When it changes:**
+  - members join or leave (add, remove, accepting an invitation, leaving);
+  - a member is provisioned or deprovisioned;
+  - the organization is renamed (the group is renamed) or deleted (the group is removed at the app);
+  - a reconcile runs.
+- **Rebuilt each time:** the group is recomputed from the database on every delivery, so it converges whatever order changes arrive in. A change made in the app is delivered at once; a reconcile updates each group a few times, not once per member.
+- **Never taken over:** a group of the same name that isn't the organization's (another `externalId`, or one made by hand) is refused, because replacing it would rewrite its members. Rename one of them, or set `groupName`.
+- **Verified live** against Cloudflare Access (D-008).
+
+Most apps grant access by group: assign the group to the app or role there (AWS permission sets, Atlassian products, Cloudflare Access policies).
 
 ## How it holds up
 
@@ -163,7 +180,7 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested
 
 ## Not yet
 
-- **Groups** aren't provisioned, only users.
+- **Groups from anything but organizations:** teams and roles aren't pushed as groups yet.
 - **Apps that don't speak SCIM**, such as Google Workspace (its Directory API).
 
 ## Development

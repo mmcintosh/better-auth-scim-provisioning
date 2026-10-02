@@ -137,3 +137,32 @@ The package ran in a real Better Auth app for the first time: the better-auth-sa
   - "busy" counts showed the cron and a manual run contending, with no double delivery;
   - no Workers limit errors.
 - **Then:** `concurrency` (default 4) delivers several jobs at once. The same 200 users went from about 36 s per 50-job run to 7 to 9 s, about 0.17 s a user, with no lease contention.
+
+## D-008: Groups: organizations as SCIM groups (2026-10-02)
+
+Most apps grant access by group (AWS permission sets, Atlassian products, Slack user groups, Cloudflare Access policies), so pushing users alone isn't enough.
+
+- **Model:** an organization (Better Auth's organization plugin) is a group at each target with `groups: true` (all organizations, or only `organizationId`). Its members are the organization's members who are provisioned and active at that target. `groupName` overrides the name, which is the organization's by default. Teams and roles as groups can come later through the same path.
+- **Same outbox:** group jobs share the queue (`kind: "group"`, key `<target>:group:<organization>`), with leases, retries and backoff as for users. Group links are their own table (`scimProvisioningGroupLink`).
+- **Rebuilt, not patched:** each delivery recomputes the members from the database and replaces the group. Changes can arrive in any order, and every delivery converges, so there are no add/remove operations to get wrong.
+- **When groups are queued:**
+  - a membership write or an organization's create, update or delete (from the organization plugin's endpoints);
+  - every user delivery, for that user's organizations;
+  - reconcile, for every organization and every linked group whose organization is gone.
+
+  Only queued after a user delivery, so reconciling a whole organization updates its group a few times, not once per member. A single change made in the app is delivered at once.
+- **Taking over is never silent:**
+  - An existing group with the same name is updated only if it carries this organization's `externalId`, or it has none and our own pending create may have made it: a create whose reply was lost, as for users (S2-2).
+  - Anything else fails the job with a message: replacing someone's hand-made group would rewrite its members.
+  - The 404 rule from D-007 applies: a 404 is believed only when the app's list agrees.
+- **Tests:**
+  - the mock app gained strict `/Groups` (unique names, known members only);
+  - eight tests cover joins and leaves, deprovisioning, rename and delete, `groupName`, `organizationId`, refusing a stranger's group, a lost create reply, a reconcile of a 13-member organization, and a wrong URL;
+  - the takeover and lost-reply tests were checked by breaking the code on purpose;
+  - an adapter test runs on PostgreSQL, MySQL and MongoDB.
+- **Live against Cloudflare Access:**
+  - an organization's group appeared with our `externalId`;
+  - added members appeared; a removed or banned member left, and an unbanned one came back;
+  - a member banned earlier was correctly absent;
+  - deleting the organization removed the group.
+- **Limits:** a group is sent whole, so one request carries every member's id. Very large organizations at apps with request size limits may need PATCH batches; not seen yet.
