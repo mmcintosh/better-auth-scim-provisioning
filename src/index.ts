@@ -47,6 +47,9 @@ const optionsSchema = z.object({
   retry: z.object({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
 });
 
+/** Ids per `in` query: D1 allows 100 bound parameters per statement. */
+const IN_BATCH = 50;
+
 /**
  * The organization plugin's endpoints that change a membership. Server-side `addMember` has no
  * path, so a path-less call is taken too. Reads (getActiveMember, …) also return member rows and
@@ -252,9 +255,13 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               const size = page();
               const linked = await b.linkedUsers(t, last, size);
               if (linked.length) {
-                const existing = new Set(
-                  ((await ctx.context.adapter.findMany({ model: "user", where: [{ field: "id", value: linked, operator: "in" }], limit: linked.length })) as { id: string }[]).map((u) => u.id),
-                );
+                // D1 allows 100 bound parameters per query: look the ids up in batches.
+                const existing = new Set<string>();
+                for (let i = 0; i < linked.length; i += IN_BATCH) {
+                  const ids = linked.slice(i, i + IN_BATCH);
+                  const found = (await ctx.context.adapter.findMany({ model: "user", where: [{ field: "id", value: ids, operator: "in" }], limit: ids.length })) as { id: string }[];
+                  for (const u of found) existing.add(u.id);
+                }
                 for (const userId of linked) {
                   if (!existing.has(userId)) {
                     await b.enqueue(t, userId, { now: true });
