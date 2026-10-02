@@ -199,6 +199,24 @@ describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
     expect(await h.jobs()).toEqual([expect.objectContaining({ userId: b.id, failed: true })]);
   });
 
+  it("groups: an organization's group with its members, following a leave (gt, in, kind)", async () => {
+    const h = await host({ targets: [{ id: "app", groups: true }] });
+    const signUp = await h.auth.api.signUpEmail({ body: { email: "owner@example.com", password: "correct-horse-battery", name: "Olive Owner" } });
+    await h.ctx.internalAdapter.updateUser(signUp.user.id, { emailVerified: true });
+    await h.settle();
+    const res = await h.auth.api.signInEmail({ body: { email: "owner@example.com", password: "correct-horse-battery" }, asResponse: true });
+    const headers = { cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") };
+    const org = await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers });
+    const ada = await h.user("Ada Lovelace");
+    await h.auth.api.addMember({ body: { userId: ada.id, organizationId: org!.id, role: "member" } });
+    await h.settle();
+    const members = () => [...h.app.groups.values()].map((g) => [g.displayName, g.members.length]);
+    expect(members()).toEqual([["Acme", 2]]);
+    await h.auth.api.removeMember({ body: { memberIdOrEmail: ada.email, organizationId: org!.id }, headers });
+    await h.settle();
+    expect(members()).toEqual([["Acme", 1]]);
+  });
+
   it("a timed ban is lifted when it runs out (S2-7)", async () => {
     const h = await host();
     const u = await h.user();

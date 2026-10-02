@@ -9,11 +9,12 @@
 // A link is written before an account is created at the app (remoteId empty: "pending"), so an
 // account whose create reply was lost can still be found, and undone, later (S2-2).
 import { defaultScimUser, isBanned } from "./mapping";
-import { ScimError, scimClient } from "./scim-client";
+import { SCIM_GROUP_SCHEMA, ScimError, scimClient } from "./scim-client";
 import type { ProvisionedUser, ScimProvisioningOptions, ScimTarget } from "./types";
 
 export const JOB_MODEL = "scimProvisioningJob";
 export const LINK_MODEL = "scimProvisioningLink";
+export const GROUP_LINK_MODEL = "scimProvisioningGroupLink";
 
 type Where = { field: string; value: unknown; operator?: "eq" | "lt" | "gt" | "in" };
 export interface Adapter {
@@ -38,6 +39,8 @@ export interface Job {
   lastError?: string | null;
   /** The app's HTTP status for the last failure, if it answered. */
   lastStatus?: number | null;
+  /** "group" for an organization's group (`userId` then holds the organization's id). */
+  kind?: string | null;
 }
 
 export interface Link {
@@ -69,8 +72,24 @@ const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
 /** Page size for walking links. */
 const PAGE = 500;
+/** Ids per `in` query: D1 allows 100 bound parameters per statement. */
+export const IN_BATCH = 50;
 /** Target ids are [A-Za-z0-9_-], so ":" can't be ambiguous. */
 export const keyOf = (targetId: string, userId: string) => `${targetId}:${userId}`;
+/** An organization's group at a target. User ids never contain ":group:". */
+export const groupKeyOf = (targetId: string, organizationId: string) => `${targetId}:group:${organizationId}`;
+export type Kind = "user" | "group";
+const keyFor = (kind: Kind, targetId: string, id: string) => (kind === "group" ? groupKeyOf(targetId, id) : keyOf(targetId, id));
+
+export interface GroupLink {
+  id: string;
+  key: string;
+  targetId: string;
+  organizationId: string;
+  /** The app's id for the group; empty while its create is pending. */
+  remoteId: string;
+  displayName: string;
+}
 
 export type Outcome = "done" | "retry" | "failed" | "busy";
 
@@ -99,8 +118,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * asked for (S2-9), unless `now` (reconcile, after fixing a target). A job deleted between the read and the bump (its delivery
    * just finished) is created again, so the change isn't lost (S2-1).
    */
-  async function enqueue(targetId: string, userId: string, o: { now?: boolean } = {}): Promise<void> {
-    const key = keyOf(targetId, userId);
+  async function enqueue(targetId: string, userId: string, o: { now?: boolean; kind?: Kind } = {}): Promise<void> {
+    const kind = o.kind ?? "user";
+    const key = keyFor(kind, targetId, userId);
     for (let i = 0; i < 3; i++) {
       const now = new Date();
       const fresh = { attempts: 0, nextAttemptAt: now, failed: false, lastError: null, lastStatus: null, updatedAt: now };
@@ -112,7 +132,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         continue; // deleted meanwhile: look again, and create it
       }
       try {
-        await adapter.create({ model: JOB_MODEL, data: { key, targetId, userId, version: 1, lockedUntil: RELEASED, createdAt: now, ...fresh } });
+        await adapter.create({ model: JOB_MODEL, data: { key, targetId, userId, ...(kind === "group" ? { kind } : {}), version: 1, lockedUntil: RELEASED, createdAt: now, ...fresh } });
         return;
       } catch (e) {
         // Created meanwhile (the UNIQUE key): bump that one instead.
@@ -322,8 +342,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "id", value: j.id }, { field: "lockedUntil", value: new Date(now), operator: "lt" }] });
     }
     let recheckAt: Date | null;
+    const isGroup = current.kind === "group";
     try {
-      recheckAt = await deliver(target, current.userId);
+      recheckAt = isGroup ? await deliverGroup(target, current.userId) : await deliver(target, current.userId);
     } catch (e) {
       const attempts = current.attempts + 1;
       const err = e instanceof ScimError ? e : new ScimError((e as Error).message, null, true);
@@ -360,7 +381,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     // Bumped during delivery: keep the job, free it; then deliver whatever is still due for this
     // user (the bumped job, or a duplicate), so the latest change goes out now.
     if (settled === 0) await release(current.id);
-    return (await nextFor(current.key, round)) ?? "done";
+    const outcome = (await nextFor(current.key, round)) ?? "done";
+    // The user's groups follow: added once they exist at the app, left once they don't.
+    if (!isGroup && target.groups) await syncGroupsOf(target, current.userId);
+    return outcome;
   }
 
   /** Another delivery for the same (target, user), if one is free and due and rounds remain. */
@@ -396,8 +420,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   /** Deliver (target, user) now if due, e.g. right after enqueue. */
-  async function runFor(targetId: string, userId: string): Promise<Outcome | null> {
-    const jobs = await jobsFor(keyOf(targetId, userId));
+  async function runFor(targetId: string, userId: string, kind: Kind = "user"): Promise<Outcome | null> {
+    const jobs = await jobsFor(keyFor(kind, targetId, userId));
     const job = jobs.find((j) => free(j));
     if (!job) return jobs.length ? "busy" : null;
     return run(job);
@@ -422,5 +446,137 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     }
   }
 
-  return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, targets };
+
+  // Groups: an organization is a group at a target with `groups: true`, its members the
+  // organization's members who are provisioned and active there. A group is recomputed from the
+  // database on each delivery, so it converges whatever order changes arrive in.
+
+  /** Is this organization's group wanted at this target? */
+  const groupWanted = (target: ScimTarget, organizationId: string) => target.groups === true && (!target.organizationId || target.organizationId === organizationId);
+
+  /** The organization's members' ids at the app: provisioned, active, in id order. */
+  async function groupMembers(target: ScimTarget, organizationId: string): Promise<{ value: string }[]> {
+    const values: string[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const where: Where[] = [{ field: "organizationId", value: organizationId }];
+      if (after !== null) where.push({ field: "userId", value: after, operator: "gt" });
+      const members = (await adapter.findMany({ model: "member", where, limit: PAGE, sortBy: { field: "userId", direction: "asc" } })) as { userId: string; organizationId: string }[];
+      const ids = members.filter((m) => m.organizationId === organizationId).map((m) => m.userId);
+      for (let i = 0; i < ids.length; i += IN_BATCH) {
+        const batch = ids.slice(i, i + IN_BATCH);
+        const links = (await adapter.findMany({ model: LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "userId", value: batch, operator: "in" }], limit: batch.length })) as Link[];
+        for (const l of links) if (l.targetId === target.id && batch.includes(l.userId) && l.active && l.remoteId) values.push(l.remoteId);
+      }
+      if (members.length < PAGE) break;
+      after = (members[members.length - 1] as { userId: string }).userId;
+    }
+    return [...new Set(values)].sort().map((value) => ({ value }));
+  }
+
+  async function findGroupLink(key: string): Promise<GroupLink | null> {
+    const link = (await adapter.findOne({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }] })) as GroupLink | null;
+    return link && link.key === key ? link : null;
+  }
+
+  async function saveGroupLink(target: ScimTarget, organizationId: string, fields: { remoteId: string; displayName: string }) {
+    const key = groupKeyOf(target.id, organizationId);
+    const update = { ...fields, syncedAt: new Date() };
+    if ((await adapter.updateMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }], update })) > 0) return;
+    await adapter.create({ model: GROUP_LINK_MODEL, data: { key, targetId: target.id, organizationId, ...update } });
+  }
+
+  /** Make the app's group match the organization: create, update, adopt, or remove. */
+  async function deliverGroup(target: ScimTarget, organizationId: string): Promise<null> {
+    const client = scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
+    const key = groupKeyOf(target.id, organizationId);
+    const link = await findGroupLink(key);
+    const org = (await adapter.findOne({ model: "organization", where: [{ field: "id", value: organizationId }] })) as { id: string; name: string; slug?: string } | null;
+
+    if (!org || org.id !== organizationId || !groupWanted(target, organizationId)) {
+      if (!link) return null;
+      if (link.remoteId) {
+        try {
+          await client.removeGroup(link.remoteId);
+        } catch (e) {
+          if (!notFound(e)) throw e;
+          // Gone, or a wrong URL: the list tells (and throws if the app can't be asked).
+          const found = await client.findGroupByName(link.displayName);
+          if (found && found.externalId === organizationId) await client.removeGroup(found.id);
+        }
+      }
+      await adapter.deleteMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }] });
+      return null;
+    }
+
+    const displayName = target.groupName ? target.groupName({ id: org.id, name: org.name, slug: org.slug ?? null }) : org.name;
+    const group = { schemas: [SCIM_GROUP_SCHEMA], externalId: organizationId, displayName, members: await groupMembers(target, organizationId) };
+    if (link?.remoteId) {
+      try {
+        await client.replaceGroup(link.remoteId, group);
+        await saveGroupLink(target, organizationId, { remoteId: link.remoteId, displayName });
+        return null;
+      } catch (e) {
+        if (!notFound(e)) throw e;
+        // Removed at the app since, or a wrong URL: asking the list tells which.
+        const found = await client.findGroupByName(link.displayName);
+        if (found && found.externalId === organizationId) {
+          await client.replaceGroup(found.id, group);
+          await saveGroupLink(target, organizationId, { remoteId: found.id, displayName });
+          return null;
+        }
+      }
+    }
+    // Pending first, as for users: a create whose reply is lost is ours to adopt later.
+    const pendingBefore = link !== null && !link.remoteId;
+    await saveGroupLink(target, organizationId, { remoteId: "", displayName });
+    let remoteId: string;
+    try {
+      remoteId = await client.createGroup(group);
+    } catch (e) {
+      if (!(e instanceof ScimError && e.status === 409)) throw e;
+      // A group with this name exists. Ours (our externalId, or no externalId after our own create
+      // whose reply was lost) is updated; anyone else's is never taken over: replacing it would
+      // rewrite its members.
+      const found = await client.findGroupByName(displayName);
+      const owner = found ? ((await adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "remoteId", value: found.id }], limit: 2 })) as GroupLink[]).find((l) => l.remoteId === found.id && l.organizationId !== organizationId) : undefined;
+      const ours = found !== null && !owner && (found.externalId === organizationId || (found.externalId === null && pendingBefore));
+      if (!found || !ours) {
+        await adapter.deleteMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }] });
+        throw new ScimError(`group ${displayName}: a group with this name already exists at the app and isn't this organization's; rename one of them, or set groupName`, 409, false);
+      }
+      await client.replaceGroup(found.id, group);
+      remoteId = found.id;
+    }
+    await saveGroupLink(target, organizationId, { remoteId, displayName });
+    return null;
+  }
+
+  /** The organizations whose groups at this target include (or may include) this user. */
+  async function groupsOf(target: ScimTarget, userId: string): Promise<string[]> {
+    if (!target.groups) return [];
+    const memberships = (await adapter.findMany({ model: "member", where: [{ field: "userId", value: userId }], limit: 1000 })) as { userId: string; organizationId: string }[];
+    return [...new Set(memberships.filter((m) => m.userId === userId && groupWanted(target, m.organizationId)).map((m) => m.organizationId))];
+  }
+
+  /**
+   * After a user's delivery: queue their organizations' groups. Only queued, so a reconcile of a
+   * whole organization updates its group a few times, not once per member; the host delivers it
+   * at once for a single change (see index.ts). Never fails the user's job.
+   */
+  async function syncGroupsOf(target: ScimTarget, userId: string): Promise<void> {
+    try {
+      for (const org of await groupsOf(target, userId)) await enqueue(target.id, org, { kind: "group" });
+    } catch (e) {
+      log.error(`[scim] ${target.id}: user ${userId}: could not update their groups: ${(e as Error).message}`);
+    }
+  }
+
+  /** Organizations with a group linked at a target (for reconcile: groups of deleted organizations). */
+  async function linkedGroups(targetId: string): Promise<string[]> {
+    const links = (await adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: targetId }], limit: 10_000 })) as GroupLink[];
+    return links.filter((l) => l.targetId === targetId).map((l) => l.organizationId);
+  }
+
+  return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, targets };
 }

@@ -13,6 +13,13 @@ export interface StoredUser {
 }
 
 /** A reply instead of the real one, no reply at all, or the real work done and the reply lost. */
+export interface StoredGroup {
+  id: string;
+  displayName: string;
+  externalId?: string;
+  members: { value: string }[];
+}
+
 export type Fault = { status: number; retryAfter?: string; detail?: string } | { timeout: true } | { lostReply: true };
 
 /**
@@ -22,6 +29,7 @@ export type Fault = { status: number; retryAfter?: string; detail?: string } | {
 export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
+  const groups = new Map<string, StoredGroup>();
   const requests: { method: string; path: string; body?: unknown }[] = [];
   const faults: Fault[] = [];
   let next = 1;
@@ -65,6 +73,9 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
   async function answer(url: URL, method: string, path: string, body: Record<string, unknown> | undefined, init: RequestInit | undefined): Promise<Response> {
     if (body && o.keepsExternalId === false) delete body.externalId;
     if ((init?.headers as Record<string, string> | undefined)?.authorization !== `Bearer ${token}`) return error(401, "bad token");
+
+    const g = /^\/Groups(?:\/([^/?]+))?$/.exec(path);
+    if (g) return group(url, method, g[1] ? decodeURIComponent(g[1]) : undefined, body);
 
     const m = /^\/Users(?:\/([^/?]+))?$/.exec(path);
     if (!m) return error(404, "no such endpoint");
@@ -118,6 +129,67 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     }
     if (method === "DELETE") {
       users.delete(existing.id);
+      // A deleted user leaves every group, as real apps do.
+      for (const gr of groups.values()) gr.members = gr.members.filter((x) => x.value !== existing.id);
+      return reply(204);
+    }
+    return error(405, "method not allowed");
+  }
+
+  /** /Groups: displayName unique (case-insensitive), members must be known users, PATCH members. */
+  function group(url: URL, method: string, id: string | undefined, body: Record<string, unknown> | undefined): Response {
+    const view = (gr: StoredGroup) => ({ schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"], ...gr });
+    const named = (name: string, except?: string) => [...groups.values()].some((x) => x.id !== except && x.displayName.toLowerCase() === name.toLowerCase());
+    const membersOf = (v: unknown) => {
+      const list = Array.isArray(v) ? (v as { value?: unknown }[]) : [];
+      if (list.some((x) => typeof x.value !== "string" || !users.has(x.value))) return null;
+      return list.map((x) => ({ value: x.value as string }));
+    };
+    if (method === "GET" && !id) {
+      const f = /^displayName eq "(.*)"$/.exec(url.searchParams.get("filter") ?? "");
+      const want = f ? (JSON.parse(`"${f[1]}"`) as string).toLowerCase() : null;
+      const hits = [...groups.values()].filter((x) => want === null || x.displayName.toLowerCase() === want).map(view);
+      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults: hits.length, Resources: hits });
+    }
+    if (method === "POST" && !id) {
+      const displayName = body?.displayName;
+      if (typeof displayName !== "string" || !displayName) return error(400, "displayName is required", "invalidValue");
+      if (named(displayName)) return error(409, "displayName already exists", "uniqueness");
+      const members = membersOf(body?.members ?? []);
+      if (!members) return error(400, "unknown member", "invalidValue");
+      const gr: StoredGroup = { id: `g${next++}`, displayName, members, ...(typeof body?.externalId === "string" ? { externalId: body.externalId } : {}) };
+      groups.set(gr.id, gr);
+      return reply(201, view(gr));
+    }
+    const existing = id ? groups.get(id) : undefined;
+    if (!existing) return error(404, "no such group");
+    if (method === "GET") return reply(200, view(existing));
+    if (method === "PUT") {
+      const displayName = body?.displayName;
+      if (typeof displayName !== "string" || !displayName) return error(400, "displayName is required", "invalidValue");
+      if (named(displayName, existing.id)) return error(409, "displayName already exists", "uniqueness");
+      const members = membersOf(body?.members ?? []);
+      if (!members) return error(400, "unknown member", "invalidValue");
+      Object.assign(existing, { displayName, members, ...(typeof body?.externalId === "string" ? { externalId: body.externalId } : {}) });
+      return reply(200, view(existing));
+    }
+    if (method === "PATCH") {
+      for (const op of (body?.Operations as { op: string; path?: string; value?: unknown }[]) ?? []) {
+        const kind = op.op.toLowerCase();
+        if (op.path === "members" || (kind === "replace" && !op.path && (op.value as { members?: unknown })?.members !== undefined)) {
+          const members = membersOf(op.path ? op.value : (op.value as { members?: unknown }).members);
+          if (!members) return error(400, "unknown member", "invalidValue");
+          if (kind === "add") existing.members = [...existing.members, ...members.filter((x) => !existing.members.some((y) => y.value === x.value))];
+          else if (kind === "remove") existing.members = existing.members.filter((y) => !members.some((x) => x.value === y.value));
+          else existing.members = members;
+        }
+        const dn = (op.value as { displayName?: unknown } | undefined)?.displayName;
+        if (kind === "replace" && typeof dn === "string") existing.displayName = dn;
+      }
+      return reply(200, view(existing));
+    }
+    if (method === "DELETE") {
+      groups.delete(existing.id);
       return reply(204);
     }
     return error(405, "method not allowed");
@@ -126,6 +198,7 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
   return {
     fetch: handler,
     users,
+    groups,
     requests,
     /** Answer the next requests with these instead (one fault per request, in order). */
     fail: (...f: Fault[]) => void faults.push(...f),
