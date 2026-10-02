@@ -91,9 +91,9 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
 | `timeoutMs` | `10000` | Per request. |
 
-Retries are shared by all targets: `retry: { maxAttempts: 8, baseDelayMs: 30000 }`. The delay doubles each attempt, or is longer if the app's `Retry-After` asks for it (up to a day). After `maxAttempts`, failures that can fix themselves are retried every 6 hours.
+The scheduled run delivers 4 jobs at once by default: `concurrency: 4` (1 to 32), shared by all targets. Retries are shared too: `retry: { maxAttempts: 8, baseDelayMs: 30000 }`. The delay doubles each attempt, or is longer if the app's `Retry-After` asks for it (up to a day). After `maxAttempts`, failures that can fix themselves are retried every 6 hours.
 
-A change to a target (`include`, `organizationId`, `deprovision`) applies to each user at their next change: run a reconcile to apply it to everyone. Do the same after an app's outage or a token fix, to deliver what's waiting now rather than at its next retry.
+A change to a target (`include`, `organizationId`, `deprovision`) applies to each user at their next change: run a reconcile to apply it to everyone, once the new version is fully deployed (on Workers, old and new run side by side for a few seconds). Do the same after an app's outage or a token fix, to deliver what's waiting now rather than at its next retry.
 
 ## Who is provisioned, and what's sent
 
@@ -115,15 +115,22 @@ Override it per target with `mapUser`, for example to take `userName` from an em
 - **An outbox in your database.** A change queues one job per user and target. The job carries no user data: delivery reads the user as they are then, so quick changes collapse into one request with the latest state.
 - **Never in the way.** Provisioning never fails the user's own write. A failure to queue is logged, and the next reconcile catches up.
 - **Leases.** A job is claimed before delivery, so two workers never deliver it at once. A change that arrives during a delivery goes out straight after it.
-- **Retries.** 429 (honouring `Retry-After`), 5xx, timeouts, network errors, and 401/403 (an expired token is the host's problem, not the user's) are retried with backoff, for as long as it takes. Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
+- **Retries.** 429 (honouring `Retry-After`), 5xx, timeouts, network errors, 401/403 (an expired token is the host's problem, not the user's), and a wrong target URL are retried with backoff, for as long as it takes. The job's last error says which: "check the target's token", "check the target's url". Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
 - **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off.
 - **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, and the user's email is verified. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
+- **A 404 is checked, not believed.** A user is taken as gone at the app only when the app's own list agrees. A wrong URL answers 404 for everything, and believing it would mark people deactivated here while they stay active there.
 - **Reconcile** covers every user, and every user still linked at a target, so deleted users whose deprovisioning was lost are cleaned up too.
 - **No redirects.** The token only goes to the target's URL: a redirect fails the request, with the new location in the error.
 
 ## Apps
 
-- **Cloudflare Access** (verified live). Zero Trust → Integrations → Identity providers → your identity provider → turn on **Enable SCIM** (and **Enable user deprovisioning**), **save**, then copy the SCIM endpoint and secret. The secret only works once the provider is saved: if you copied it before saving, regenerate it, copy it, and save. Cloudflare creates a user when they first sign in; SCIM keeps them up to date and switches them off.
+- **Cloudflare Access** (verified live). Zero Trust → Integrations → Identity providers → your identity provider → turn on **Enable SCIM** (and **Enable user deprovisioning**), **save**, then copy the SCIM endpoint and secret. The secret only works once the provider is saved: if you copied it before saving, regenerate it, copy it, and save. With SCIM, a user exists at Cloudflare before their first sign-in, and that sign-in lands on the same account. Verified live (DECISIONS.md D-007):
+  - a ban revoked the user's live Access session within 35 seconds;
+  - a timed ban was lifted by the scheduled run within a minute of ending.
+
+  Two things to know:
+  - turn on **seat deprovisioning** too, or a deactivated user keeps their seat;
+  - Cloudflare's Users list shows the name from the last sign-in, not the latest SCIM update.
 - **AWS IAM Identity Center.** IAM Identity Center → Settings → Identity source → **Automatic provisioning**. Its tokens last a year. Users need a given name, a family name and a display name (the defaults always send them), and your identity provider's SAML NameID must be the same value as the SCIM `userName` (the email, by default).
 - **Anything else that speaks SCIM 2.0**, with a bearer token, Basic auth, an API-key header or OAuth 2.0 client credentials: Auth0 (enterprise connections), Okta, Salesforce, your own apps.
 
@@ -150,7 +157,9 @@ For other auth methods, `--auth auth.json` with an `auth` object as in the table
 
 ## Databases and runtimes
 
-Tested on SQLite (`node:sqlite`), PostgreSQL 17, MySQL 8.4 and MongoDB 8.2 (Better Auth's Kysely and MongoDB adapters), with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24. It uses only `fetch` and Web APIs, so it also runs on Cloudflare Workers.
+Tested on SQLite (`node:sqlite`), PostgreSQL 17, MySQL 8.4 and MongoDB 8.2 (Better Auth's Kysely and MongoDB adapters), with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24.
+
+It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested there in a real app, with D1, `waitUntil` and a Cron Trigger, against Cloudflare Access (D-007): 200 users were reconciled and delivered at about 6 users a second with the default concurrency.
 
 ## Not yet
 
