@@ -47,6 +47,13 @@ export interface ScimTarget {
    * app accepts with `npx better-auth-scim-provisioning check`.
    */
   update?: "put" | "patch" | undefined;
+  /**
+   * Organizations (Better Auth's organization plugin) as groups at the app, their provisioned
+   * members as the group's members. Every organization, or only `organizationId` when set.
+   */
+  groups?: boolean | undefined;
+  /** The group's displayName; default the organization's name. */
+  groupName?: ((organization: { id: string; name: string; slug: string | null }) => string) | undefined;
   /** What leaving means at the app: `deactivate` (active=false, the default) or `delete`. */
   deprovision?: "deactivate" | "delete" | undefined;
   /** Per request; default 10 seconds. */

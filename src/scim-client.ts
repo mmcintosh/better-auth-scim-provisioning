@@ -5,6 +5,7 @@
 import { credentials, type ScimAuth } from "./credentials";
 
 export const SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User";
+export const SCIM_GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group";
 const PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
 export interface ScimUser {
@@ -15,6 +16,14 @@ export interface ScimUser {
   displayName?: string | undefined;
   emails?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
   active: boolean;
+}
+
+export interface ScimGroup {
+  schemas: string[];
+  externalId?: string | undefined;
+  displayName: string;
+  /** The members' ids at the app. */
+  members: { value: string }[];
 }
 
 export interface ScimEndpoint {
@@ -114,7 +123,7 @@ export function scimClient(endpoint: ScimEndpoint) {
     // 401/403 are the host's token, not the user: retried, so jobs recover once it's fixed (S1-4).
     const auth = res.status === 401 || res.status === 403;
     // /Users itself can't be missing: a 404 there is a wrong URL, the host's to fix, like a token.
-    const misplaced = res.status === 404 && (path === "/Users" || path.startsWith("/Users?"));
+    const misplaced = res.status === 404 && /^\/(Users|Groups)(\?|$)/.test(path);
     const retryable = res.status === 429 || res.status >= 500 || auth || misplaced;
     throw new ScimError(
       `${method} ${path}: ${res.status}${auth ? " (check the target's token)" : misplaced ? " (check the target's url)" : ""}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
@@ -164,6 +173,26 @@ export function scimClient(endpoint: ScimEndpoint) {
     /** A 404 is left to the caller: it can mean gone, or a wrong URL. */
     async remove(id: string): Promise<void> {
       await request("DELETE", `/Users/${encodeURIComponent(id)}`);
+    },
+    /** The group with this displayName (its id and externalId), or null. */
+    async findGroupByName(displayName: string): Promise<{ id: string; externalId: string | null } | null> {
+      const { json } = await request("GET", `/Groups?filter=${encodeURIComponent(`displayName eq ${scimString(displayName)}`)}&count=2`);
+      const list = json as { Resources?: unknown; totalResults?: unknown } | null;
+      if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number"))
+        throw new ScimError("GET /Groups: not a SCIM ListResponse (check the target's url)", null, true);
+      const resources = Array.isArray(list.Resources) ? (list.Resources as { id?: unknown; displayName?: unknown; externalId?: unknown }[]) : [];
+      const hit = resources.find((r) => typeof r.displayName === "string" && r.displayName.toLowerCase() === displayName.toLowerCase());
+      return hit ? { id: idOf(hit, "GET /Groups"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null } : null;
+    },
+    async createGroup(group: ScimGroup): Promise<string> {
+      return idOf((await request("POST", "/Groups", group)).json, "POST /Groups");
+    },
+    async replaceGroup(id: string, group: ScimGroup): Promise<void> {
+      await request("PUT", `/Groups/${encodeURIComponent(id)}`, { ...group, id });
+    },
+    /** A 404 is left to the caller. */
+    async removeGroup(id: string): Promise<void> {
+      await request("DELETE", `/Groups/${encodeURIComponent(id)}`);
     },
   };
 }

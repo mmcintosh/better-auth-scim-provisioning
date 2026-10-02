@@ -4,7 +4,7 @@
 import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import * as z from "zod";
-import { type Adapter, JOB_MODEL, LINK_MODEL, outbox } from "./outbox";
+import { type Adapter, GROUP_LINK_MODEL, IN_BATCH, JOB_MODEL, LINK_MODEL, outbox } from "./outbox";
 import type { ScimProvisioningOptions } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
@@ -58,6 +58,8 @@ const optionsSchema = z.object({
         mapUser: z.function().optional(),
         deprovision: z.enum(["deactivate", "delete"]).optional(),
         update: z.enum(["put", "patch"]).optional(),
+        groups: z.boolean().optional(),
+        groupName: z.function().optional(),
         timeoutMs: z.number().int().min(100).max(120_000).optional(),
         fetch: z.function().optional(),
       }).refine((t) => (t.token === undefined) !== (t.auth === undefined), "give either token or auth"),
@@ -66,9 +68,6 @@ const optionsSchema = z.object({
   retry: z.object({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
   concurrency: z.number().int().min(1).max(32).optional(),
 });
-
-/** Ids per `in` query: D1 allows 100 bound parameters per statement. */
-const IN_BATCH = 50;
 
 /**
  * The organization plugin's endpoints that change a membership. Server-side `addMember` has no
@@ -83,6 +82,9 @@ const MEMBERSHIP_WRITES = new Set([
   "/organization/leave",
   "/organization/delete",
 ]);
+
+/** Endpoints that change an organization itself (its group's name, or its existence). */
+const ORGANIZATION_WRITES = new Set(["/organization/create", "/organization/update", "/organization/delete"]);
 
 /** A member row (organization plugin) in an endpoint's result: `{ member }`, or the member itself. */
 function membersIn(returned: unknown): { userId: string; organizationId: string }[] {
@@ -100,13 +102,32 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
   let box: ReturnType<typeof outbox> | undefined;
   let background: (p: Promise<unknown>) => void = (p) => void p.catch(() => {});
 
-  /** Queue (target, user) and try to deliver it right away, in the background. */
+  /**
+   * Queue (target, user) and try to deliver it right away, in the background; then, for targets
+   * with groups, the user's organizations' groups, so a new user shows up in them at once.
+   */
   async function changed(userId: string, targetIds = options.targets.map((t) => t.id)) {
     if (!box) return;
     const b = box;
     for (const targetId of targetIds) {
       await b.enqueue(targetId, userId);
-      background(b.runFor(targetId, userId));
+      const target = options.targets.find((t) => t.id === targetId);
+      background(
+        (async () => {
+          await b.runFor(targetId, userId);
+          if (target?.groups) for (const org of await b.groupsOf(target, userId)) await b.runFor(targetId, org, "group");
+        })(),
+      );
+    }
+  }
+
+  /** Queue an organization's group at every target that has it, and deliver it in the background. */
+  async function groupChanged(organizationId: string) {
+    if (!box) return;
+    const b = box;
+    for (const t of options.targets.filter((x) => x.groups && (!x.organizationId || x.organizationId === organizationId))) {
+      await b.enqueue(t.id, organizationId, { kind: "group" });
+      background(b.runFor(t.id, organizationId, "group"));
     }
   }
 
@@ -125,6 +146,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           failed: { type: "boolean", required: true },
           lastError: { type: "string", required: false },
           lastStatus: { type: "number", required: false },
+          kind: { type: "string", required: false },
           createdAt: { type: "date", required: true },
           updatedAt: { type: "date", required: true },
         },
@@ -138,6 +160,16 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           userName: { type: "string", required: true },
           externalId: { type: "string", required: false },
           active: { type: "boolean", required: true },
+          syncedAt: { type: "date", required: true },
+        },
+      },
+      [GROUP_LINK_MODEL]: {
+        fields: {
+          key: { type: "string", required: true, unique: true },
+          targetId: { type: "string", required: true, index: true },
+          organizationId: { type: "string", required: true },
+          remoteId: { type: "string", required: true, index: true },
+          displayName: { type: "string", required: true },
           syncedAt: { type: "date", required: true },
         },
       },
@@ -172,7 +204,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           // Better Auth's database hooks don't see. So after a membership write, look at what it
           // returned: a member row names the user whose membership changed. Queue them for the
           // targets of that organization.
-          matcher: (ctx) => options.targets.some((t) => t.organizationId) && (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path)),
+          matcher: (ctx) =>
+            options.targets.some((t) => t.organizationId || t.groups) && (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path) || ORGANIZATION_WRITES.has(ctx.path)),
           handler: createAuthMiddleware(async (ctx) => {
             const returned = (ctx.context as { returned?: unknown }).returned;
             if (!returned || returned instanceof Error || !box) return;
@@ -184,8 +217,24 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                 ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
               }
             };
-            for (const m of membersIn(returned)) {
+            const members = membersIn(returned);
+            for (const m of members) {
               await queue(m.userId, options.targets.filter((t) => t.organizationId === m.organizationId).map((t) => t.id));
+            }
+            // Groups: the organization whose membership, name or existence changed.
+            if (options.targets.some((t) => t.groups)) {
+              const orgIds = new Set(members.map((m) => m.organizationId));
+              const own = (returned as { id?: unknown } | null)?.id;
+              if (ctx.path === "/organization/create" || ctx.path === "/organization/update") if (typeof own === "string") orgIds.add(own);
+              const bodyOrg = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
+              if (ctx.path === "/organization/delete" && typeof bodyOrg === "string") orgIds.add(bodyOrg);
+              for (const orgId of orgIds) {
+                try {
+                  await groupChanged(orgId);
+                } catch (e) {
+                  ctx.context.logger.error(`[scim] could not queue the group of organization ${orgId}`, e);
+                }
+              }
             }
             // A deleted organization takes its members with it: deprovision everyone linked
             // through its targets. In the background, one user at a time: never in the way of
@@ -293,6 +342,22 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               budget -= linked.length;
               if (linked.length < size) break;
               if (budget <= 0) return ctx.json({ queued, next: `l:${t}:${last}` });
+            }
+          }
+          // Groups: every organization at targets with groups, and every linked group whose
+          // organization is gone (removed at the app).
+          for (const t of options.targets.filter((x) => targetIds.includes(x.id) && x.groups)) {
+            const orgIds = new Set<string>();
+            for (let after: string | null = null; ; ) {
+              const orgs = (await ctx.context.adapter.findMany({ model: "organization", where: after === null ? [] : [{ field: "id", value: after, operator: "gt" }], limit: 500, sortBy: { field: "id", direction: "asc" } })) as { id: string }[];
+              for (const o of orgs) if (!t.organizationId || t.organizationId === o.id) orgIds.add(o.id);
+              if (orgs.length < 500) break;
+              after = (orgs[orgs.length - 1] as { id: string }).id;
+            }
+            for (const orgId of await b.linkedGroups(t.id)) orgIds.add(orgId);
+            for (const orgId of orgIds) {
+              await b.enqueue(t.id, orgId, { kind: "group", now: true });
+              queued++;
             }
           }
           return ctx.json({ queued, next: null as string | null });
