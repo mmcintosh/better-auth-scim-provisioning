@@ -11,5 +11,6 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 - Auth methods per target (`auth`): Basic, an API-key header, and OAuth 2.0 client credentials, alongside bearer tokens (D-006).
 - `update: "patch"` per target, which keeps attributes set at the app (D-006).
 - `npx better-auth-scim-provisioning check` and `checkScimTarget()`: what an app's SCIM supports, tested on a throwaway user (D-006).
+- Verified in a real app on Cloudflare Workers, D1 and Cron, live against Cloudflare Access (D-007).
 - `scimProvisioningReconcile` in pages (`limit`, `after` → `next`), for Workers and large user bases.
 - Reviewed twice before release (D-002, D-005), tested on SQLite, PostgreSQL, MySQL and MongoDB (D-004), and verified live against Cloudflare Access (D-003).

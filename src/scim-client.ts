@@ -113,9 +113,11 @@ export function scimClient(endpoint: ScimEndpoint) {
     const scimType = (json as { scimType?: unknown } | null)?.scimType;
     // 401/403 are the host's token, not the user: retried, so jobs recover once it's fixed (S1-4).
     const auth = res.status === 401 || res.status === 403;
-    const retryable = res.status === 429 || res.status >= 500 || auth;
+    // /Users itself can't be missing: a 404 there is a wrong URL, the host's to fix, like a token.
+    const misplaced = res.status === 404 && (path === "/Users" || path.startsWith("/Users?"));
+    const retryable = res.status === 429 || res.status >= 500 || auth || misplaced;
     throw new ScimError(
-      `${method} ${path}: ${res.status}${auth ? " (check the target's token)" : ""}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
+      `${method} ${path}: ${res.status}${auth ? " (check the target's token)" : misplaced ? " (check the target's url)" : ""}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
       res.status,
       retryable,
       retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
@@ -133,7 +135,10 @@ export function scimClient(endpoint: ScimEndpoint) {
     /** The user with this userName (its id and externalId), or null. */
     async findByUserName(userName: string): Promise<{ id: string; externalId: string | null } | null> {
       const { json } = await request("GET", `/Users?filter=${encodeURIComponent(`userName eq ${scimString(userName)}`)}&count=2`);
-      const list = json as { schemas?: unknown; Resources?: unknown } | null;
+      const list = json as { schemas?: unknown; Resources?: unknown; totalResults?: unknown } | null;
+      // A page that isn't a SCIM list (a wrong URL that answers 200): never read as "no such user".
+      if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number"))
+        throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, true);
       const resources = Array.isArray(list?.Resources) ? (list.Resources as { id?: unknown; userName?: unknown; externalId?: unknown }[]) : [];
       // SCIM compares userName case-insensitively; so do we, but only an exact hit is ours.
       const hit = resources.find((r) => typeof r.userName === "string" && r.userName.toLowerCase() === userName.toLowerCase());
@@ -156,14 +161,9 @@ export function scimClient(endpoint: ScimEndpoint) {
         Operations: [{ op: "replace", value: { active } }],
       });
     },
+    /** A 404 is left to the caller: it can mean gone, or a wrong URL. */
     async remove(id: string): Promise<void> {
-      try {
-        await request("DELETE", `/Users/${encodeURIComponent(id)}`);
-      } catch (e) {
-        // Already gone is what we wanted.
-        if (e instanceof ScimError && e.status === 404) return;
-        throw e;
-      }
+      await request("DELETE", `/Users/${encodeURIComponent(id)}`);
     },
   };
 }
