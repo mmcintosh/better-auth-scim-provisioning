@@ -13,9 +13,15 @@ updates:
       - dependency-name: better-auth
       - dependency-name: "@better-auth/*"
   # The npm CLI the release job stages with (pinned by integrity; npm stage needs >= 11.15).
+  # Only npm itself: its dependencies are bundled inside it, so updating one alone always fails.
+  # Fixes for those arrive as a newer npm (alerts dismissed as tolerable risk, 2026-10-02).
   - package-ecosystem: npm
     directory: /.github/npm-cli
     schedule: { interval: weekly }
+    ignore:
+      - dependency-name: undici
+      - dependency-name: brace-expansion
+      - dependency-name: ip-address
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
