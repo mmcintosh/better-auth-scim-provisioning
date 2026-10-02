@@ -3,7 +3,7 @@
 // delete. The test user is always removed (or at least deactivated) at the end. Behind
 // `npx better-auth-scim-provisioning check`, and usable from an admin page ("test connection").
 import { credentials, type ScimAuth } from "./credentials";
-import { SCIM_USER_SCHEMA, scimString } from "./scim-client";
+import { SCIM_USER_SCHEMA, scimString, trimSlashes } from "./scim-client";
 
 export interface CheckResult {
   name: string;
@@ -24,7 +24,7 @@ export interface CheckOptions {
 const PATCH_OP = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
 export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
-  const base = o.url.replace(/\/+$/, "");
+  const base = trimSlashes(o.url);
   const doFetch = o.fetch ?? fetch;
   const creds = credentials(o.auth ?? { type: "bearer", token: o.token ?? "" }, { fetch: doFetch, timeoutMs: o.timeoutMs });
   const results: CheckResult[] = [];

@@ -56,11 +56,18 @@ export function retryAfterMs(header: string | null, now = Date.now()): number | 
   return Number.isNaN(at) ? undefined : Math.min(DAY_MS, Math.max(0, at - now));
 }
 
+/** `s` without trailing slashes (a loop, not /\/+$/, which is slow on long runs of slashes). */
+export function trimSlashes(s: string): string {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === "/") end--;
+  return s.slice(0, end);
+}
+
 /** A SCIM filter string literal: quotes and backslashes escaped (RFC 7644 §3.4.2.2, JSON rules). */
 export const scimString = (value: string) => JSON.stringify(value);
 
 export function scimClient(endpoint: ScimEndpoint) {
-  const base = endpoint.url.replace(/\/+$/, "");
+  const base = trimSlashes(endpoint.url);
   const doFetch = endpoint.fetch ?? fetch;
   const timeoutMs = endpoint.timeoutMs ?? 10_000;
   const auth: ScimAuth = endpoint.auth ?? { type: "bearer", token: endpoint.token ?? "" };
