@@ -130,4 +130,10 @@ The package ran in a real Better Auth app for the first time: the better-auth-sa
   - Its Users list shows the name from the last sign-in, not the SCIM record.
   - A deactivated user keeps their seat unless the identity provider's SCIM "seat deprovisioning" is on.
   - A config change rolls out over a few seconds, so for a moment old and new versions both run: run a reconcile after changing a target.
-- **Not covered yet:** a real outage and recovery driven only by the Cron Trigger (the 503 stand-in needs a second Worker), and a large reconcile on D1.
+- **An outage, recovered by the Cron Trigger alone:** the target URL was pointed somewhere unreachable while a ban was queued. Each retry said `404 (check the target's url)`, the link stayed active, and nothing was marked done. Once the URL was restored, the next scheduled retry delivered the ban, with no reconcile. (A Worker can't reach another Worker of the same account by URL; both "down" stand-ins answered 404, so this ran as the wrong-URL case. The 503 path is covered by the unit tests.)
+- **Scale on D1:**
+  - 208 users reconciled in 3 calls of up to 100 (about 6 s each), then delivered by `scimProvisioningRun` and the Cron Trigger together;
+  - about 45 users per 50-job run, 36 s per run, so about 0.7 s per user, sequentially;
+  - "busy" counts showed the cron and a manual run contending, with no double delivery;
+  - no Workers limit errors.
+- **Next:** deliver a few jobs at once (a small concurrency in `runDue`), since one user at a time is the bottleneck at scale.
