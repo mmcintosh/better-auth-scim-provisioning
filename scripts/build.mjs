@@ -17,6 +17,18 @@ await build({
   sourcemap: true,
   logLevel: "warning",
 });
+// The `check` command (Node only).
+await build({
+  absWorkingDir: root,
+  entryPoints: ["src/cli.ts"],
+  outdir: "dist",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node22",
+  packages: "external",
+  logLevel: "warning",
+});
 execFileSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: root, stdio: "inherit" });
 
 // Sources use extensionless relative imports (moduleResolution "Bundler"). Consumers on

@@ -28,6 +28,9 @@
     "README.md",
     "LICENSE"
   ],
+  "bin": {
+    "better-auth-scim-provisioning": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

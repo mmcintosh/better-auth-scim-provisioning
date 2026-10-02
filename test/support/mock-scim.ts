@@ -85,6 +85,7 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     }
     const existing = id ? users.get(id) : undefined;
     if (!existing) return error(404, "no such user");
+    if (method === "GET") return reply(200, view(existing));
     if (method === "PUT") {
       const u = body as Partial<StoredUser>;
       const bad = invalid(u);
