@@ -57,6 +57,7 @@ const optionsSchema = z.object({
         organizationId: z.string().min(1).optional(),
         mapUser: z.function().optional(),
         deprovision: z.enum(["deactivate", "delete"]).optional(),
+        update: z.enum(["put", "patch"]).optional(),
         timeoutMs: z.number().int().min(100).max(120_000).optional(),
         fetch: z.function().optional(),
       }).refine((t) => (t.token === undefined) !== (t.auth === undefined), "give either token or auth"),

@@ -138,6 +138,11 @@ export function scimClient(endpoint: ScimEndpoint) {
     async replace(id: string, user: ScimUser): Promise<void> {
       await request("PUT", `/Users/${encodeURIComponent(id)}`, { ...user, id });
     },
+    /** Like replace, but only the attributes we send change: anything set at the app is kept. */
+    async patch(id: string, user: ScimUser): Promise<void> {
+      const { schemas: _, ...value } = user;
+      await request("PATCH", `/Users/${encodeURIComponent(id)}`, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "replace", value }] });
+    },
     async setActive(id: string, active: boolean): Promise<void> {
       await request("PATCH", `/Users/${encodeURIComponent(id)}`, {
         schemas: [PATCH_OP_SCHEMA],

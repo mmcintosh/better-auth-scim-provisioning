@@ -41,6 +41,12 @@ export interface ScimTarget {
   organizationId?: string | undefined;
   /** The SCIM user sent; default: userName = email, names split from `name`, one primary email. */
   mapUser?: ((user: ProvisionedUser) => ScimUser) | undefined;
+  /**
+   * How a change is sent: `put` (the default) replaces the whole user at the app, including
+   * attributes set there by hand; `patch` replaces only the attributes we send. Check what the
+   * app accepts with `npx better-auth-scim-provisioning check`.
+   */
+  update?: "put" | "patch" | undefined;
   /** What leaving means at the app: `deactivate` (active=false, the default) or `delete`. */
   deprovision?: "deactivate" | "delete" | undefined;
   /** Per request; default 10 seconds. */
