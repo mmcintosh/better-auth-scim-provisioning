@@ -156,7 +156,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * look again without a change, if ever: the end of a timed ban (S2-7).
    */
   async function deliver(target: ScimTarget, userId: string): Promise<Date | null> {
-    const client = scimClient({ url: target.url, token: target.token, timeoutMs: target.timeoutMs, fetch: target.fetch });
+    const client = scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
     const user = (await adapter.findOne({ model: "user", where: [{ field: "id", value: userId }] })) as ProvisionedUser | null;
     const key = keyOf(target.id, userId);
     let link = await findLink(key);

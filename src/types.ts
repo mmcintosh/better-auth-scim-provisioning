@@ -1,3 +1,4 @@
+import type { ScimAuth } from "./credentials";
 import type { ScimUser } from "./scim-client";
 
 /** The Better Auth user as the provisioning sees it (admin plugin fields when present). */
@@ -16,8 +17,13 @@ export interface ScimTarget {
   id: string;
   /** The app's SCIM base URL, without /Users. */
   url: string;
-  /** Its bearer token. */
-  token: string;
+  /** Its bearer token. Or `auth`, for anything else. */
+  token?: string | undefined;
+  /**
+   * How requests are authorised, when it isn't a bearer token: `basic`, a `header` of the app's
+   * own (an API key), or `oauth2` client credentials (tokens fetched, cached and renewed).
+   */
+  auth?: ScimAuth | undefined;
   /**
    * Who is provisioned to this target, beyond the defaults (a verified email unless
    * `requireVerifiedEmail: false`, and not banned). Only `true` includes. Anything else, and a

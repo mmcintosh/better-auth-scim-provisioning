@@ -9,6 +9,7 @@ import type { ScimProvisioningOptions } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
 export { SCIM_USER_SCHEMA, ScimError, type ScimUser } from "./scim-client";
+export type { ScimAuth } from "./credentials";
 export type { ProvisionedUser, ScimProvisioningOptions, ScimTarget } from "./types";
 
 /**
@@ -33,7 +34,23 @@ const optionsSchema = z.object({
       z.object({
         id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
         url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment"),
-        token: z.string().min(1),
+        token: z.string().min(1).optional(),
+        auth: z
+          .discriminatedUnion("type", [
+            z.object({ type: z.literal("bearer"), token: z.string().min(1) }),
+            z.object({ type: z.literal("basic"), username: z.string().min(1), password: z.string().min(1) }),
+            z.object({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,64}$/), value: z.string().min(1) }),
+            z.object({
+              type: z.literal("oauth2"),
+              tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment"),
+              clientId: z.string().min(1),
+              clientSecret: z.string().min(1),
+              scope: z.string().optional(),
+              clientAuth: z.enum(["body", "basic"]).optional(),
+              params: z.record(z.string(), z.string()).optional(),
+            }),
+          ])
+          .optional(),
         include: z.function().optional(),
         requireVerifiedEmail: z.boolean().optional(),
         organizationId: z.string().min(1).optional(),
@@ -41,7 +58,7 @@ const optionsSchema = z.object({
         deprovision: z.enum(["deactivate", "delete"]).optional(),
         timeoutMs: z.number().int().min(100).max(120_000).optional(),
         fetch: z.function().optional(),
-      }),
+      }).refine((t) => (t.token === undefined) !== (t.auth === undefined), "give either token or auth"),
     )
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
   retry: z.object({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
