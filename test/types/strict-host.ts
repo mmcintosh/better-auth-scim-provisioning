@@ -46,3 +46,7 @@ export const oauthTarget: ScimTarget = {
   update: "patch",
 };
 export const checked = () => checkScimTarget({ url: target.url, token, userName: undefined });
+
+// Groups, with a host's own optional values.
+declare const maybeGroups: boolean | undefined;
+export const groupTarget: ScimTarget = { id: "aws-groups", url: target.url, token, groups: maybeGroups, groupName: (org) => `team-${org.slug ?? org.id}` };
