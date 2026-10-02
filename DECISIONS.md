@@ -136,4 +136,4 @@ The package ran in a real Better Auth app for the first time: the better-auth-sa
   - about 45 users per 50-job run, 36 s per run, so about 0.7 s per user, sequentially;
   - "busy" counts showed the cron and a manual run contending, with no double delivery;
   - no Workers limit errors.
-- **Next:** deliver a few jobs at once (a small concurrency in `runDue`), since one user at a time is the bottleneck at scale.
+- **Then:** `concurrency` (default 4) delivers several jobs at once. The same 200 users went from about 36 s per 50-job run to 7 to 9 s, about 0.17 s a user, with no lease contention.

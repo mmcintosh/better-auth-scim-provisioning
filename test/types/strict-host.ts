@@ -21,7 +21,7 @@ const target: ScimTarget = {
 };
 
 // It is a BetterAuthPlugin…
-export const assignable: BetterAuthPlugin = scimProvisioning({ targets: [target], retry: { maxAttempts: 8, baseDelayMs: undefined } });
+export const assignable: BetterAuthPlugin = scimProvisioning({ targets: [target], concurrency: 4, retry: { maxAttempts: 8, baseDelayMs: undefined } });
 // …and, passed inline as apps do, its endpoints are typed on auth.api.
 const auth = betterAuth({ plugins: [organization(), scimProvisioning({ targets: [target] })] });
 
