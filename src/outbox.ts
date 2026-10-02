@@ -374,7 +374,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   const release = (id: string) => adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: id }], update: { lockedUntil: RELEASED } });
 
-  /** Deliver the jobs that are due, oldest first. */
+  /**
+   * Deliver the jobs that are due, oldest first, `concurrency` at a time (default 4): one at a
+   * time was the bottleneck at scale (about 0.7 s a user on Workers and D1, D-007). Each job's
+   * lease still keeps two deliveries for one user apart.
+   */
   async function runDue(limit = 50): Promise<Record<Outcome, number>> {
     const due = (await adapter.findMany({
       model: JOB_MODEL,
@@ -383,7 +387,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       limit,
     })) as Job[];
     const tally: Record<Outcome, number> = { done: 0, retry: 0, failed: 0, busy: 0 };
-    for (const job of due) tally[await run(job)]++;
+    let next = 0;
+    const worker = async () => {
+      while (next < due.length) tally[await run(due[next++] as Job)]++;
+    };
+    await Promise.all(Array.from({ length: Math.min(options.concurrency ?? 4, due.length) }, worker));
     return tally;
   }
 

@@ -17,7 +17,7 @@ export interface HostDatabase {
   migrate: boolean;
 }
 
-export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; database?: HostDatabase } = {}) {
+export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; concurrency?: number; database?: HostDatabase } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
   const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false })]));
   const pending = new Set<Promise<unknown>>();
@@ -43,6 +43,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
       scimProvisioning({
         targets: specs.map(({ requireNames: _, keepsExternalId: __, patch: ___, ...s }) => ({ ...s, url: apps[s.id]!.url, token: apps[s.id]!.token, fetch: apps[s.id]!.fetch })),
         ...(o.retry ? { retry: o.retry } : {}),
+        ...(o.concurrency ? { concurrency: o.concurrency } : {}),
       }),
     ],
   });
