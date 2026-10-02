@@ -15,8 +15,11 @@ export interface StoredUser {
 /** A reply instead of the real one, no reply at all, or the real work done and the reply lost. */
 export type Fault = { status: number; retryAfter?: string; detail?: string } | { timeout: true } | { lostReply: true };
 
-/** `keepsExternalId: false`: an app that ignores externalId, as many do. */
-export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean } = {}) {
+/**
+ * `keepsExternalId: false`: an app that ignores externalId, as many do. `patch: true`: PATCH can
+ * replace any attribute (without a path, or a top-level path); otherwise only `active`.
+ */
+export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
   const requests: { method: string; path: string; body?: unknown }[] = [];
@@ -97,8 +100,19 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
       return reply(200, view(stored));
     }
     if (method === "PATCH") {
-      for (const op of (body?.Operations as { op: string; value?: { active?: boolean } }[]) ?? []) {
-        if (op.op.toLowerCase() === "replace" && typeof op.value?.active === "boolean") existing.active = op.value.active;
+      for (const op of (body?.Operations as { op: string; path?: string; value?: unknown }[]) ?? []) {
+        if (op.op.toLowerCase() !== "replace") continue;
+        const value = op.value as Record<string, unknown> | undefined;
+        if (!o.patch) {
+          if (typeof value?.active === "boolean") existing.active = value.active;
+          continue;
+        }
+        const changes = op.path ? { [op.path]: op.value } : { ...value };
+        delete changes.id;
+        delete changes.schemas;
+        if (o.keepsExternalId === false) delete changes.externalId;
+        if (typeof changes.userName === "string" && taken(changes.userName, existing.id)) return error(409, "userName already exists", "uniqueness");
+        Object.assign(existing, changes);
       }
       return reply(200, view(existing));
     }

@@ -34,7 +34,7 @@ describe.skipIf(!url || !token)("live SCIM lifecycle", () => {
           },
         },
       },
-      plugins: [admin(), scimProvisioning({ targets: [{ id: "live", url: url!, token: token! }], retry: { baseDelayMs: 1000 } })],
+      plugins: [admin(), scimProvisioning({ targets: [{ id: "live", url: url!, token: token!, update: process.env.SCIM_UPDATE === "patch" ? "patch" : "put" }], retry: { baseDelayMs: 1000 } })],
     });
     const ctx = await auth.$context;
     await (await getMigrations(ctx.options)).runMigrations();

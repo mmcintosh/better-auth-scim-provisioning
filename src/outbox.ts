@@ -166,7 +166,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const externalId = scim.externalId ?? null;
       if (link?.remoteId) {
         try {
-          await client.replace(link.remoteId, scim);
+          await (target.update === "patch" ? client.patch : client.replace)(link.remoteId, scim);
           await saveLink(target, userId, { remoteId: link.remoteId, userName: scim.userName, externalId, active: true });
           return null;
         } catch (e) {
@@ -205,7 +205,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // Nobody's: only for an address the user has shown they own (S2-5).
           if ((user as ProvisionedUser).emailVerified !== true) return refuse("an account with this userName exists at the app, and the user's email is not verified");
         }
-        await client.replace(found.id, scim);
+        await (target.update === "patch" ? client.patch : client.replace)(found.id, scim);
         remoteId = found.id;
       }
       await saveLink(target, userId, { remoteId, userName: scim.userName, externalId, active: true });
