@@ -81,7 +81,9 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 |---|---|---|
 | `id` | required | Stable id: letters, digits, `-`, `_`. Jobs, links and logs use it. |
 | `url` | required | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
-| `token` | required | Its bearer token. |
+| `token` | | Its bearer token. Or `auth`, for anything else: one of the two is required. |
+| `auth` | | `{ type: "basic", username, password }`, `{ type: "header", name, value }` (an API key), or `{ type: "oauth2", tokenUrl, clientId, clientSecret, scope?, clientAuth?, params? }` (client credentials; tokens cached and renewed before they expire). |
+| `update` | `"put"` | `"put"` replaces the whole user at the app; `"patch"` changes only the attributes we send, keeping what an admin set there. |
 | `organizationId` | | Only members of this organization (Better Auth's organization plugin). |
 | `include` | | `(user) => boolean`: who else to leave out. Only `true` includes; anything else deprovisions a provisioned user at their next delivery. |
 | `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. An account that already exists at the app is still only taken over for a verified email. |
@@ -123,7 +125,28 @@ Override it per target with `mapUser`, for example to take `userName` from an em
 
 - **Cloudflare Access** (verified live). Zero Trust → Integrations → Identity providers → your identity provider → turn on **Enable SCIM** (and **Enable user deprovisioning**), **save**, then copy the SCIM endpoint and secret. The secret only works once the provider is saved: if you copied it before saving, regenerate it, copy it, and save. Cloudflare creates a user when they first sign in; SCIM keeps them up to date and switches them off.
 - **AWS IAM Identity Center.** IAM Identity Center → Settings → Identity source → **Automatic provisioning**. Its tokens last a year. Users need a given name, a family name and a display name (the defaults always send them), and your identity provider's SAML NameID must be the same value as the SCIM `userName` (the email, by default).
-- **Anything else that speaks SCIM 2.0 with a bearer token**, such as Auth0 (enterprise connections), Okta, or your own apps.
+- **Anything else that speaks SCIM 2.0**, with a bearer token, Basic auth, an API-key header or OAuth 2.0 client credentials: Auth0 (enterprise connections), Okta, Salesforce, your own apps.
+
+### Check an app first
+
+`check` asks an app what its SCIM supports: its ServiceProviderConfig, then a throwaway user taken through create, find, replace, both PATCH forms, deactivate and delete (removed at the end):
+
+```sh
+SCIM_TOKEN=… npx better-auth-scim-provisioning check --url https://example.com/scim/v2 --user-name check@your-domain.com
+```
+
+```
+✓ create a user: 201, id 4bb3b660-…
+✓ keeps externalId
+✓ find by userName, any case
+✓ duplicate userName refused (409)
+✓ update with PUT
+✓ update with PATCH (no path)
+✓ deactivate (PATCH active false)
+✓ delete
+```
+
+For other auth methods, `--auth auth.json` with an `auth` object as in the table above. From code (an admin page's "test connection"), `checkScimTarget({ url, token | auth })` returns the same results.
 
 ## Databases and runtimes
 
@@ -132,8 +155,7 @@ Tested on SQLite (`node:sqlite`), PostgreSQL 17, MySQL 8.4 and MongoDB 8.2 (Bett
 ## Not yet
 
 - **Groups** aren't provisioned, only users.
-- **OAuth-authenticated apps**: Salesforce, for one, takes OAuth 2.0 client credentials rather than a bearer token.
-- **PATCH updates.** Updates use `PUT`, which replaces the whole user at the app, including attributes an admin set there.
+- **Apps that don't speak SCIM**, such as Google Workspace (its Directory API).
 
 ## Development
 
