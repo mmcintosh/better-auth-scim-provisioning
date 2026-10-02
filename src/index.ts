@@ -10,6 +10,7 @@ import type { ScimProvisioningOptions } from "./types";
 export { defaultScimUser, splitName } from "./mapping";
 export { SCIM_USER_SCHEMA, ScimError, type ScimUser } from "./scim-client";
 export type { ScimAuth } from "./credentials";
+export { type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export type { ProvisionedUser, ScimProvisioningOptions, ScimTarget } from "./types";
 
 /**
