@@ -93,3 +93,17 @@ A review by a new agent with no history in the project, looking for what's wrong
   - Fix: parsed with `URL`; https, or http to a loopback address; no credentials, query or fragment. Redirects are never followed: a 3xx fails with the location, to put the final URL in the target.
 - **S2-14 (Low): the release checked CHANGELOG.md after staging on npm,** so a missing section would stage a version and then fail. Now checked before anything is built. Leftovers from better-auth-saml-idp in comments and the lint config are gone.
 - **Checked and fine:** server-only endpoints have no HTTP route; hooks run after commit and keep the host's own hooks; the membership matcher; the SCIM filter and path encoding; tokens never logged; the release pipeline's pinning, permissions and provenance.
+
+## D-006: Reaching more apps: auth methods, PATCH, and `check` (2026-10-02)
+
+The goal is every app a Better Auth identity provider might provision into. The outbox (queue, retries, links, adoption rules, reconcile) is shared, so reaching more apps means thin layers on it, not a package per app.
+
+- **Auth methods.** Bearer (`token`) stays the common case. `auth` adds Basic, a header of the app's own (API keys), and OAuth 2.0 client credentials (Salesforce, Zoom server-to-server through `params`, Microsoft Graph).
+  - OAuth tokens are cached per isolate, keyed by endpoint, client, scope and params, and renewed a minute before expiry (halfway, for short ones). Concurrent requests share one token request, and a failed one isn't cached.
+  - A 401 drops the cached token and retries once.
+  - Token endpoint errors carry the status and the `error` code only, never the body, which could echo a secret. Like S1-4, they're retried: a misconfigured client is the host's problem, not the user's.
+- **`update: "patch"`.** One path-less `replace` with our attributes, so attributes set at the app survive. PUT stays the default: it's the most widely supported, and the open question from D-002 is now the app's to answer, through `check`. Cloudflare Access accepts both, verified live, and the live lifecycle passes in either mode.
+- **`check`.** A doctor for one app: its ServiceProviderConfig, then a throwaway user through create, externalId kept, find (exact and any case), duplicate 409, PUT, PATCH without and with a path, deactivate, delete and gone. The token comes from `SCIM_TOKEN` or an `--auth` file, never the command line. `checkScimTarget()` is exported for admin pages.
+  - Against Cloudflare Access: everything passes. Its ServiceProviderConfig advertises only HTTP Basic, yet it takes bearer tokens.
+- **Found by the Workers field test:** reconcile's `in` lookup of a page of linked users broke D1's 100-parameter limit. Batches of 50 now, with a test that fails on any longer list.
+- **Next:** groups (most apps grant access by group), app profiles once each app is checked, and connectors for apps without SCIM (Google Workspace's Directory API; a signed webhook as the general escape hatch).

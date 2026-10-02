@@ -3,7 +3,7 @@
 // optional options must accept `undefined` from a host's own optional values.
 import { type BetterAuthPlugin, betterAuth } from "better-auth";
 import { organization } from "better-auth/plugins";
-import { type ScimTarget, scimProvisioning } from "better-auth-scim-provisioning";
+import { checkScimTarget, type ScimTarget, scimProvisioning } from "better-auth-scim-provisioning";
 
 declare const token: string;
 declare const maybeOrg: string | undefined;
@@ -36,3 +36,13 @@ export async function reconcileInPages() {
     ({ next } = await auth.api.scimProvisioningReconcile({ body: { limit: 200, after: next ?? undefined } }));
   } while (next);
 }
+
+// Other auth methods and PATCH updates, with a host's own optional values.
+declare const maybeScope: string | undefined;
+export const oauthTarget: ScimTarget = {
+  id: "salesforce",
+  url: "https://example.my.salesforce.com/services/scim/v2",
+  auth: { type: "oauth2", tokenUrl: "https://example.my.salesforce.com/services/oauth2/token", clientId: "id", clientSecret: "secret", scope: maybeScope },
+  update: "patch",
+};
+export const checked = () => checkScimTarget({ url: target.url, token, userName: undefined });
