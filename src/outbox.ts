@@ -74,6 +74,8 @@ export const keyOf = (targetId: string, userId: string) => `${targetId}:${userId
 
 export type Outcome = "done" | "retry" | "failed" | "busy";
 
+const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
+
 export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }) {
   const targets = new Map(options.targets.map((t) => [t.id, t]));
   const maxAttempts = options.retry?.maxAttempts ?? 8;
@@ -170,8 +172,15 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           await saveLink(target, userId, { remoteId: link.remoteId, userName: scim.userName, externalId, active: true });
           return null;
         } catch (e) {
-          // Removed at the app since: create it again.
-          if (!(e instanceof ScimError && e.status === 404)) throw e;
+          if (!notFound(e)) throw e;
+          // Removed at the app since (create it again), or listed under another id now: only the
+          // app's list can tell, and asking it also catches a wrong URL, which 404s for everything.
+          const other = await stillThere(target, client, userId, link.userName, link.externalId ?? null);
+          if (other) {
+            await (target.update === "patch" ? client.patch : client.replace)(other, scim);
+            await saveLink(target, userId, { remoteId: other, userName: scim.userName, externalId, active: true });
+            return null;
+          }
         }
       }
       // Pending first: if the reply to the create is lost, we still know to look for it.
@@ -216,21 +225,47 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const recheckAt = user && isBanned(user) && user.banExpires != null ? new Date(user.banExpires) : null;
     if (link && !link.remoteId) link = await settlePending(target, client, link);
     if (!link) return recheckAt;
+    const externalId = link.externalId ?? null;
     if ((target.deprovision ?? "deactivate") === "delete") {
       // Inactive links too: a target switched from deactivate to delete (S2-8).
-      await client.remove(link.remoteId);
+      try {
+        await client.remove(link.remoteId);
+      } catch (e) {
+        if (!notFound(e)) throw e;
+        const other = await stillThere(target, client, userId, link.userName, externalId);
+        if (other) await client.remove(other);
+      }
       await dropLink(key);
       return recheckAt;
     }
     if (link.active) {
+      let remoteId = link.remoteId;
       try {
-        await client.setActive(link.remoteId, false);
+        await client.setActive(remoteId, false);
       } catch (e) {
-        if (!(e instanceof ScimError && e.status === 404)) throw e;
+        if (!notFound(e)) throw e;
+        const other = await stillThere(target, client, userId, link.userName, externalId);
+        if (other) {
+          await client.setActive(other, false);
+          remoteId = other;
+        }
       }
-      await saveLink(target, userId, { remoteId: link.remoteId, userName: link.userName, externalId: link.externalId ?? null, active: false });
+      await saveLink(target, userId, { remoteId, userName: link.userName, externalId, active: false });
     }
     return recheckAt;
+  }
+
+  /**
+   * After a 404 for one user: is the account still at the app, under another id? Asks the app's
+   * list, which throws (retryably) if the app can't be asked at all: a wrong URL 404s for
+   * everything, and taking that 404 as "gone" left users active at the app (found in the field
+   * test). Returns the account's id if it's ours, or null when it's gone.
+   */
+  async function stillThere(target: ScimTarget, client: ReturnType<typeof scimClient>, userId: string, userName: string, externalId: string | null): Promise<string | null> {
+    const found = await client.findByUserName(userName);
+    if (!found) return null;
+    if (found.externalId !== null && found.externalId === externalId) return found.id;
+    return found.externalId === null && (await ownerOf(target, found.id)) === userId ? found.id : null;
   }
 
   /**

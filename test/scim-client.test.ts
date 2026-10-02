@@ -38,7 +38,8 @@ describe("scimClient", () => {
     expect(sp.users.get(id)?.active).toBe(false);
     await client.remove(id);
     expect(sp.users.size).toBe(0);
-    await client.remove(id); // already gone: fine
+    // Already gone: a 404, left to the caller, which asks the app's list before believing it.
+    await expect(client.remove(id)).rejects.toMatchObject({ status: 404 });
     expect(await client.findByUserName(ada.userName)).toBeNull();
   });
 

@@ -107,3 +107,27 @@ The goal is every app a Better Auth identity provider might provision into. The 
   - Against Cloudflare Access: everything passes. Its ServiceProviderConfig advertises only HTTP Basic, yet it takes bearer tokens.
 - **Found by the Workers field test:** reconcile's `in` lookup of a page of linked users broke D1's 100-parameter limit. Batches of 50 now, with a test that fails on any longer list.
 - **Next:** groups (most apps grant access by group), app profiles once each app is checked, and connectors for apps without SCIM (Google Workspace's Directory API; a signed webhook as the general escape hatch).
+
+## D-007: The field test: a real app on Workers, live against Cloudflare Access (2026-10-02)
+
+The package ran in a real Better Auth app for the first time: the better-auth-saml-idp Workers example with D1, `waitUntil` and a Cron Trigger, deployed to Cloudflare. It provisioned into Cloudflare Access, through a SAML identity provider that is that same app.
+
+- **What held up, live:**
+  - **Pre-provisioning:** a user created in the app existed at Cloudflare before she ever signed in, and her first SAML sign-in landed on that same account.
+  - **Rename:** reached Cloudflare at once.
+  - **Ban:** deactivated at once. Cloudflare revoked her live session within 35 seconds, and a browser refresh was sent back to sign in.
+  - **Unban:** active again.
+  - **Timed ban:** lifted by the Cron Trigger 46 seconds after it ran out.
+  - **Delete:** deactivated.
+  - **An organization-scoped target:** add provisions; remove, or delete the organization, deprovisions.
+  - **A wrong token:** 401s with "check the target's token", jobs kept for retry, nothing sent. After the fix and one reconcile, all delivered.
+- **Found and fixed:**
+  - **Reconcile broke D1's 100-parameter limit** (an `in` query over a page of linked users). Now in batches of 50.
+  - **A wrong target URL made deprovisioning look done.** A URL that 404s for everything (in the test, a Worker calling its own workers.dev address) had every "deactivate" answer 404, read as "already gone at the app". The user was marked deactivated here and stayed active there, beyond the reach of reconcile.
+    - A 404 for one user now counts as gone only when the app's list agrees. A 404 on `/Users` itself, or a 200 that isn't a SCIM list, is a retryable "check the target's url".
+    - An update that 404s follows the account if the app lists it under another id.
+- **Learned about Cloudflare Access:**
+  - Its Users list shows the name from the last sign-in, not the SCIM record.
+  - A deactivated user keeps their seat unless the identity provider's SCIM "seat deprovisioning" is on.
+  - A config change rolls out over a few seconds, so for a moment old and new versions both run: run a reconcile after changing a target.
+- **Not covered yet:** a real outage and recovery driven only by the Cron Trigger (the 503 stand-in needs a second Worker), and a large reconcile on D1.
