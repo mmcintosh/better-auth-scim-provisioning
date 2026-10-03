@@ -33,8 +33,8 @@ export interface ScimTarget {
   include?: ((user: ProvisionedUser) => boolean | Promise<boolean>) | undefined;
   /**
    * Only users with a verified email (the default). Set false where the sign-in provider leaves
-   * `emailVerified` false but the address is trusted, e.g. some SSO and OAuth setups (S1-6). An
-   * account that already exists at the app is still adopted only for a verified email (S2-5).
+   * `emailVerified` false but the address is trusted, e.g. some SSO and OAuth setups. An
+   * account that already exists at the app is still adopted only for a verified email.
    */
   requireVerifiedEmail?: boolean | undefined;
   /** Only members of this organization (Better Auth's organization plugin). */

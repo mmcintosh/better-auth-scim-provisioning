@@ -56,7 +56,7 @@ const DAY_MS = 86_400_000;
 
 /**
  * `Retry-After` as milliseconds: delay-seconds or an HTTP date, at most a day (a huge value would
- * park the job for years, or make an invalid date, S2-9); undefined if absent or unreadable.
+ * park the job for years, or make an invalid date); undefined if absent or unreadable.
  */
 export function retryAfterMs(header: string | null, now = Date.now()): number | undefined {
   if (!header) return undefined;
@@ -94,7 +94,7 @@ export function scimClient(endpoint: ScimEndpoint) {
           ...(body === undefined ? {} : { "content-type": "application/scim+json" }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        // Never follow: a redirect would replay the token and body to wherever it points (S2-13).
+        // Never follow: a redirect would replay the token and body to wherever it points.
         redirect: "manual",
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -120,7 +120,7 @@ export function scimClient(endpoint: ScimEndpoint) {
     }
     const detail = (json as { detail?: unknown } | null)?.detail;
     const scimType = (json as { scimType?: unknown } | null)?.scimType;
-    // 401/403 are the host's token, not the user: retried, so jobs recover once it's fixed (S1-4).
+    // 401/403 are the host's token, not the user: retried, so jobs recover once it's fixed.
     const auth = res.status === 401 || res.status === 403;
     // /Users itself can't be missing: a 404 there is a wrong URL, the host's to fix, like a token.
     const misplaced = res.status === 404 && /^\/(Users|Groups)(\?|$)/.test(path);

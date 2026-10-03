@@ -1,9 +1,9 @@
-// Review S1-6 (Low): provisioning required a verified email, with no way out, so users whose
+// Provisioning required a verified email, with no way out, so users whose
 // sign-in provider leaves emailVerified false (some SSO and OAuth setups) were never provisioned.
 import { describe, expect, it } from "vitest";
 import { createHost } from "../support/host";
 
-describe("S1-6: requireVerifiedEmail: false", () => {
+describe("requireVerifiedEmail: false", () => {
   it("provisions an unverified user when the target allows it", async () => {
     const h = await createHost({ targets: [{ id: "app", requireVerifiedEmail: false }] });
     const u = await h.user("Unverified Person", false);

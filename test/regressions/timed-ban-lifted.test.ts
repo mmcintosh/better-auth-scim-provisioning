@@ -1,9 +1,9 @@
-// Review S2 F-7 (Low): a timed ban deactivated the user at the app, and nothing reactivated them
+// A timed ban deactivated the user at the app, and nothing reactivated them
 // when it ran out: Better Auth clears an expired ban only when they next sign in.
 import { expect, it } from "vitest";
 import { createHost } from "../support/host";
 
-it("S2-7: a timed ban is lifted at the app when it runs out", async () => {
+it("a timed ban is lifted at the app when it runs out", async () => {
   const h = await createHost();
   const u = await h.user();
   await h.ctx.internalAdapter.updateUser(u.id, { banned: true, banExpires: new Date(Date.now() + 300) });

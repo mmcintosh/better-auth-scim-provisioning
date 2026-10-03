@@ -111,7 +111,7 @@ describe.skipIf(!url || !token)("live SCIM lifecycle", () => {
     log("6 deleted", r);
     expect(r.body?.active).toBe(false);
 
-    // 7. Someone new signs up with that email: refused, not given the old account (S1-1).
+    // 7. Someone new signs up with that email: refused, not given the old account.
     const other = await ctx.internalAdapter.createUser({ email: email2, name: "Someone Else", emailVerified: true }, { method: "admin" });
     await settle();
     r = await remote(l.remoteId);

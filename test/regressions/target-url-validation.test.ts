@@ -1,4 +1,4 @@
-// Review S2 F-13 (Low): the target URL check could be fooled (`http://localhost:80@evil.example`
+// The target URL check could be fooled (`http://localhost:80@evil.example`
 // sent the token in cleartext to evil.example), accepted query strings that broke every path, and
 // fetch followed redirects, replaying the bearer token and request body to wherever they pointed.
 import { describe, expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { ScimError, scimClient } from "../../src/scim-client";
 
 const target = (url: string) => () => scimProvisioning({ targets: [{ id: "a", url, token: "t" }] });
 
-describe("S2-13: target URLs", () => {
+describe("target URLs", () => {
   it("refuses credentials, queries, fragments and non-loopback http", () => {
     expect(target("http://localhost:80@evil.example/scim/v2")).toThrow(/url/);
     expect(target("https://user:pw@scim.example/scim/v2")).toThrow(/url/);

@@ -1,10 +1,10 @@
-// Review S2 F-4 (Medium): retryable failures (5xx, timeouts, 401/403) counted toward maxAttempts
+// Retryable failures (5xx, timeouts, 401/403) counted toward maxAttempts
 // and then failed the job for good. An outage or expired token longer than about an hour
 // dropped every change in it, deprovisioning included, until a manual reconcile.
 import { expect, it } from "vitest";
 import { createHost } from "../support/host";
 
-it("S2-4: a job keeps retrying through an outage longer than maxAttempts, then delivers", async () => {
+it("a job keeps retrying through an outage longer than maxAttempts, then delivers", async () => {
   const h = await createHost({ retry: { baseDelayMs: 0, maxAttempts: 3 } });
   const u = await h.user();
   h.app.fail(...Array.from({ length: 6 }, () => ({ status: 503 })));
@@ -24,7 +24,7 @@ it("S2-4: a job keeps retrying through an outage longer than maxAttempts, then d
   expect([...h.app.users.values()][0]).toMatchObject({ active: false });
 });
 
-it("S2-4: past maxAttempts, retries slow to the 6-hour cap", async () => {
+it("past maxAttempts, retries slow to the 6-hour cap", async () => {
   const h = await createHost({ retry: { baseDelayMs: 1000, maxAttempts: 2 } });
   h.app.fail(...Array.from({ length: 3 }, () => ({ status: 503 })));
   await h.user();

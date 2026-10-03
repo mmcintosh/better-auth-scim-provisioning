@@ -7,7 +7,7 @@
 // deletes the job if the version is still the one it claimed, so that change is delivered too.
 //
 // A link is written before an account is created at the app (remoteId empty: "pending"), so an
-// account whose create reply was lost can still be found, and undone, later (S2-2).
+// account whose create reply was lost can still be found, and undone, later.
 import { defaultScimUser, isBanned } from "./mapping";
 import { SCIM_GROUP_SCHEMA, ScimError, scimClient } from "./scim-client";
 import type { ProvisionedUser, ScimProvisioningOptions, ScimTarget } from "./types";
@@ -64,7 +64,7 @@ const RELEASED = new Date("2000-01-01T00:00:00.000Z");
 /**
  * How long a claimed job is held: a delivery makes at most four requests (replace, create, find,
  * replace), each up to the target's timeout, plus a margin. Shorter, and a second worker could
- * claim a job still being delivered (S1-3).
+ * claim a job still being delivered.
  */
 const leaseFor = (target: ScimTarget | undefined) => 4 * (target?.timeoutMs ?? 10_000) + 30_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
@@ -115,8 +115,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   /**
    * Ask for (target, user) to be synced; an existing job is bumped rather than duplicated. A job
    * the app rate-limited (429) keeps its wait, so a busy user doesn't cut short the pause the app
-   * asked for (S2-9), unless `now` (reconcile, after fixing a target). A job deleted between the read and the bump (its delivery
-   * just finished) is created again, so the change isn't lost (S2-1).
+   * asked for, unless `now` (reconcile, after fixing a target). A job deleted between the read and the bump (its delivery
+   * just finished) is created again, so the change isn't lost.
    */
   async function enqueue(targetId: string, userId: string, o: { now?: boolean; kind?: Kind } = {}): Promise<void> {
     const kind = o.kind ?? "user";
@@ -156,7 +156,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   const dropLink = (key: string) => adapter.deleteMany({ model: LINK_MODEL, where: [{ field: "key", value: key }] });
 
-  /** The user another link at this target already ties the app's account to, if any (S2-3). */
+  /** The user another link at this target already ties the app's account to, if any. */
   async function ownerOf(target: ScimTarget, remoteId: string): Promise<string | null> {
     const rows = (await adapter.findMany({ model: LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "remoteId", value: remoteId }], limit: 2 })) as Link[];
     return rows.find((l) => l.targetId === target.id && l.remoteId === remoteId)?.userId ?? null;
@@ -175,7 +175,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   /**
    * Make the app match the user: create, update, adopt, reactivate or deprovision. Returns when to
-   * look again without a change, if ever: the end of a timed ban (S2-7).
+   * look again without a change, if ever: the end of a timed ban.
    */
   async function deliver(target: ScimTarget, userId: string): Promise<Date | null> {
     const client = scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
@@ -227,11 +227,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         const ours = found.externalId !== null && found.externalId === externalId;
         if (!ours) {
           // Tied to another user, such as a deleted user whose email was reused: never handed
-          // over (S1-1 by the app's externalId, S2-3 by our own links, for apps that don't keep it).
+          // over (by the app's externalId, or by our own links for apps that don't keep it).
           if (found.externalId !== null) return refuse(`the app's account belongs to another user (externalId ${found.externalId})`);
           const owner = await ownerOf(target, found.id);
           if (owner && owner !== userId) return refuse("the app's account is linked to another user");
-          // Nobody's: only for an address the user has shown they own (S2-5).
+          // Nobody's: only for an address the user has shown they own.
           if ((user as ProvisionedUser).emailVerified !== true) return refuse("an account with this userName exists at the app, and the user's email is not verified");
         }
         await (target.update === "patch" ? client.patch : client.replace)(found.id, scim);
@@ -241,13 +241,13 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       return null;
     }
 
-    // Leaving. A timed ban ends by itself: look again then (S2-7).
+    // Leaving. A timed ban ends by itself: look again then.
     const recheckAt = user && isBanned(user) && user.banExpires != null ? new Date(user.banExpires) : null;
     if (link && !link.remoteId) link = await settlePending(target, client, link);
     if (!link) return recheckAt;
     const externalId = link.externalId ?? null;
     if ((target.deprovision ?? "deactivate") === "delete") {
-      // Inactive links too: a target switched from deactivate to delete (S2-8).
+      // Inactive links too: a target switched from deactivate to delete.
       try {
         await client.remove(link.remoteId);
       } catch (e) {
@@ -290,7 +290,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   /**
    * A pending create for a user who is now leaving: find out whether the account exists at the app,
-   * and return it as a real link to deprovision, or drop the link (S2-2).
+   * and return it as a real link to deprovision, or drop the link.
    */
   async function settlePending(target: ScimTarget, client: ReturnType<typeof scimClient>, link: Link): Promise<Link | null> {
     const found = await client.findByUserName(link.userName);
@@ -325,7 +325,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }] });
       return "done";
     }
-    // Duplicates (a database without the UNIQUE key): one delivery per user at a time (S2-11).
+    // Duplicates (a database without the UNIQUE key): one delivery per user at a time.
     // Free ones are covered by this delivery, which reads the user after this. Of the held ones,
     // the one claimed first goes ahead (then the lower id, for claims at the same moment), and
     // the others wait their turn: they're delivered after it, by nextFor.
@@ -350,7 +350,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const err = e instanceof ScimError ? e : new ScimError((e as Error).message, null, true);
       // Only an error that won't fix itself fails the job. Anything else (an outage, an expired
       // token) keeps retrying, every 6 hours once past maxAttempts, so it recovers when the app
-      // does (S2-4).
+      // does.
       const giveUp = !err.retryable;
       const wait = Math.max(err.retryAfterMs ?? 0, attempts >= maxAttempts ? MAX_DELAY_MS : backoff(attempts));
       const loud = giveUp || attempts === maxAttempts;
@@ -400,7 +400,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   /**
    * Deliver the jobs that are due, oldest first, `concurrency` at a time (default 4): one at a
-   * time was the bottleneck at scale (about 0.7 s a user on Workers and D1, D-007). Each job's
+   * time was the bottleneck at scale (about 0.7 s a user on Workers and D1). Each job's
    * lease still keeps two deliveries for one user apart.
    */
   async function runDue(limit = 50): Promise<Record<Outcome, number>> {

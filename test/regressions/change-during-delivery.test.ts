@@ -1,4 +1,4 @@
-// Review S2 F-1 (High): a change could be lost when its enqueue raced the end of a delivery. The
+// A change could be lost when its enqueue raced the end of a delivery. The
 // hook read the job, the finished delivery deleted it, then the bump updated nothing and nothing
 // was queued: the app kept the old state until a reconcile.
 import { expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { createHost } from "../support/host";
 
 const log = { warn() {}, error() {} };
 
-it("S2-1: a change whose job is deleted between read and bump is still queued and delivered", async () => {
+it("a change whose job is deleted between read and bump is still queued and delivered", async () => {
   const h = await createHost();
   const u = await h.user("Before Change");
   // The same tables through an adapter whose next job lookup can be held, to line up the race.

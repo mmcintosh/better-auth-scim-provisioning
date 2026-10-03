@@ -1,10 +1,10 @@
-// Review S2 F-9 (Low): every change reset a job's backoff, so a busy user kept hitting an app that
+// Every change reset a job's backoff, so a busy user kept hitting an app that
 // asked for a pause; and a huge Retry-After made an invalid date, leaving the job wedged.
 import { describe, expect, it } from "vitest";
 import { retryAfterMs } from "../../src/scim-client";
 import { createHost } from "../support/host";
 
-describe("S2-9: backoff", () => {
+describe("backoff", () => {
   it("a change doesn't cut short the pause an app asked for", async () => {
     const h = await createHost();
     h.app.fail({ status: 429, retryAfter: "3600" });

@@ -25,11 +25,11 @@ jobs:
       - run: scripts/use-better-auth.sh ${{ matrix.better-auth }}
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: pnpm test # SQLite (node:sqlite), the mock SCIM app, the review regressions
+      - run: pnpm test # SQLite (node:sqlite), the mock SCIM app, the regression tests
       - run: pnpm pack:check # dist build, strict host under TypeScript 5.9 and 7, publint, Are the Types Wrong
 
   # The outbox on real databases: its leases, version checks, dates and booleans are what differ
-  # (D-004 found a MySQL and a MongoDB bug that SQLite and Postgres don't show).
+  # (real MySQL and MongoDB have shown bugs that SQLite and Postgres don't).
   adapters:
     runs-on: ubuntu-24.04
     strategy:

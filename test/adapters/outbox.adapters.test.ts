@@ -137,7 +137,7 @@ describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
     expect(await h2.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 0 });
   });
 
-  it("adoption refuses another user's account (S1-1)", async () => {
+  it("adoption refuses another user's account", async () => {
     const h = await host();
     const a = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "First Owner", emailVerified: true }, { method: "admin" });
     await h.settle();
@@ -149,7 +149,7 @@ describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
     expect(await h.jobs()).toEqual([expect.objectContaining({ userId: b.id, failed: true })]);
   });
 
-  it("reconcile covers existing and deleted users (S1-5)", async () => {
+  it("reconcile covers existing and deleted users", async () => {
     const h = await host();
     const kept = await h.user("Kept Person");
     const gone = await h.user("Gone Person");
@@ -161,7 +161,7 @@ describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
     );
   });
 
-  it("reconcile in pages (id order, gt and in queries) (S2-6)", async () => {
+  it("reconcile in pages (id order, gt and in queries)", async () => {
     const h = await host();
     const users = [await h.user("One Person"), await h.user("Two Person"), await h.user("Three Person")];
     const gone = await h.user("Gone Person");
@@ -177,7 +177,7 @@ describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
     expect((await h.jobs()).map((j) => j.userId).sort()).toEqual([...users.map((u) => u.id), gone.id].sort());
   });
 
-  it("a lost create reply, then a ban: the pending link finds the account (S2-2)", async () => {
+  it("a lost create reply, then a ban: the pending link finds the account", async () => {
     const h = await host({ retry: { baseDelayMs: 60_000 } });
     h.app.fail({ lostReply: true });
     const u = await h.user();
@@ -187,7 +187,7 @@ describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
     expect(appUsers(h.app)).toEqual([expect.objectContaining({ externalId: u.id, active: false })]);
   });
 
-  it("adoption refuses an account linked to another user, by remoteId (S2-3)", async () => {
+  it("adoption refuses an account linked to another user, by remoteId", async () => {
     const h = await host({ targets: [{ id: "app", keepsExternalId: false }] });
     const a = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "First Owner", emailVerified: true }, { method: "admin" });
     await h.settle();
@@ -217,7 +217,7 @@ describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
     expect(members()).toEqual([["Acme", 1]]);
   });
 
-  it("a timed ban is lifted when it runs out (S2-7)", async () => {
+  it("a timed ban is lifted when it runs out", async () => {
     const h = await host();
     const u = await h.user();
     await h.ctx.internalAdapter.updateUser(u.id, { banned: true, banExpires: new Date(Date.now() + 1500) });
