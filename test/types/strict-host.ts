@@ -3,7 +3,7 @@
 // optional options must accept `undefined` from a host's own optional values.
 import { type BetterAuthPlugin, betterAuth } from "better-auth";
 import { organization } from "better-auth/plugins";
-import { checkScimTarget, type GoogleWorkspaceTarget, type ScimTarget, scimProvisioning } from "better-auth-scim-provisioning";
+import { awsIamIdentityCenter, checkScimTarget, githubEnterprise, type GoogleWorkspaceTarget, type ScimTarget, scimProvisioning, slack } from "better-auth-scim-provisioning";
 
 declare const token: string;
 declare const maybeOrg: string | undefined;
@@ -69,3 +69,11 @@ export const googleTarget: GoogleWorkspaceTarget = {
 };
 // Both kinds in one targets list, as a host with a SCIM app and Google Workspace would write it.
 export const both = scimProvisioning({ targets: [target, googleTarget] });
+// Profiles take and return a ScimTarget, with a host's own optional values.
+export const profiled = scimProvisioning({
+  targets: [
+    awsIamIdentityCenter({ ...target, groups: true, compat: { maxGroupMembersPerRequest: maybeTimeout } }),
+    slack({ id: "slack", url: "https://api.slack.com/scim/v2", token }),
+    githubEnterprise({ id: "gh", url: "https://api.github.com/scim/v2/enterprises/acme", token }),
+  ],
+});

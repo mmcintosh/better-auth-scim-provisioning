@@ -10,7 +10,7 @@ import type { ScimProvisioningOptions, Target, TargetOptions } from "../../src/t
 import { mockGoogle } from "./mock-google";
 import { mockScim } from "./mock-scim";
 
-type TargetSpec = Omit<TargetOptions, "fetch"> & { type?: "scim" | "google-workspace"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean };
+type TargetSpec = Omit<TargetOptions, "fetch"> & { type?: "scim" | "google-workspace"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number };
 
 /** A database for Better Auth's `database` option, and whether it needs Better Auth's migrations. */
 export interface HostDatabase {
@@ -20,7 +20,7 @@ export interface HostDatabase {
 
 export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; concurrency?: number; database?: HostDatabase } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
-  const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false })]));
+  const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}) })]));
   // A Google Workspace target gets a mock Directory API instead (one per host).
   const google = specs.some((s) => s.type === "google-workspace") ? await mockGoogle() : undefined;
   const pending = new Set<Promise<unknown>>();
@@ -45,7 +45,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
       // Teams on, so team groups can be tested; nothing else changes without teamGroups.
       organization({ teams: { enabled: true } }),
       scimProvisioning({
-        targets: specs.map(({ requireNames: _, keepsExternalId: __, patch: ___, ...s }) =>
+        targets: specs.map(({ requireNames: _, keepsExternalId: __, patch: ___, like: ____, pageSize: _____, ...s }) =>
           s.type === "google-workspace" && google
             ? { ...s, type: "google-workspace", url: google.url, google: { clientEmail: google.clientEmail, privateKey: google.privateKey, adminEmail: google.admin, tokenUrl: google.tokenUrl }, fetch: google.fetch }
             : { ...s, type: "scim", url: apps[s.id]!.url, token: apps[s.id]!.token, fetch: apps[s.id]!.fetch },

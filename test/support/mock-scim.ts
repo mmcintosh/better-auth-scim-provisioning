@@ -26,7 +26,13 @@ export type Fault = { status: number; retryAfter?: string; detail?: string } | {
  * `keepsExternalId: false`: an app that ignores externalId, as many do. `patch: true`: PATCH can
  * replace any attribute (without a path, or a top-level path); otherwise only `active`.
  */
-export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean } = {}) {
+/**
+ * `like`: behave as a specific app documents. "aws" (IAM Identity Center): no PUT for groups; a
+ * group's GET shows no members (they're listed with `Users?filter=groups.value eq "…"`, a cursor
+ * page at a time); at most 100 members on create and 100 member changes per PATCH; no member
+ * "replace" and no empty member lists. "atlassian": groups can't be renamed.
+ */
+export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
   const groups = new Map<string, StoredGroup>();
@@ -81,6 +87,14 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     if (!m) return error(404, "no such endpoint");
     const id = m[1] ? decodeURIComponent(m[1]) : undefined;
 
+    if (method === "GET" && !id && o.like === "aws" && /^groups\.value eq "/.test(url.searchParams.get("filter") ?? "")) {
+      const gid = JSON.parse((url.searchParams.get("filter") ?? "").replace(/^groups\.value eq /, "")) as string;
+      const ids = groups.get(gid)?.members.map((m) => m.value) ?? [];
+      const size = o.pageSize ?? 100;
+      const start = Number(url.searchParams.get("cursor") || 0);
+      const page = ids.slice(start, start + size).map((uid) => users.get(uid)).filter(Boolean).map((x) => view(x as StoredUser));
+      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], itemsPerPage: page.length, ...(start + size < ids.length ? { nextCursor: String(start + size) } : {}), Resources: page });
+    }
     if (method === "GET" && !id) {
       const f = /^userName eq "(.*)"$/.exec(url.searchParams.get("filter") ?? "");
       const want = f ? (JSON.parse(`"${f[1]}"`) as string).toLowerCase() : null;
@@ -138,7 +152,7 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
 
   /** /Groups: displayName unique (case-insensitive), members must be known users, PATCH members. */
   function group(url: URL, method: string, id: string | undefined, body: Record<string, unknown> | undefined): Response {
-    const view = (gr: StoredGroup) => ({ schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"], ...gr });
+    const view = (gr: StoredGroup) => ({ schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"], ...gr, ...(o.like === "aws" ? { members: [] } : {}) });
     const named = (name: string, except?: string) => [...groups.values()].some((x) => x.id !== except && x.displayName.toLowerCase() === name.toLowerCase());
     const membersOf = (v: unknown) => {
       const list = Array.isArray(v) ? (v as { value?: unknown }[]) : [];
@@ -157,6 +171,7 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
       if (named(displayName)) return error(409, "displayName already exists", "uniqueness");
       const members = membersOf(body?.members ?? []);
       if (!members) return error(400, "unknown member", "invalidValue");
+      if (o.like === "aws" && members.length > 100) return error(400, "A maximum of 100 members can be added in a single request", "invalidValue");
       const gr: StoredGroup = { id: `g${next++}`, displayName, members, ...(typeof body?.externalId === "string" ? { externalId: body.externalId } : {}) };
       groups.set(gr.id, gr);
       return reply(201, view(gr));
@@ -164,6 +179,9 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     const existing = id ? groups.get(id) : undefined;
     if (!existing) return error(404, "no such group");
     if (method === "GET") return reply(200, view(existing));
+    if (method === "PUT" && o.like === "aws") return error(400, "ValidationException: the operation is unsupported", "invalidValue");
+    if (method === "PUT" && o.like === "atlassian" && typeof body?.displayName === "string" && body.displayName !== existing.displayName)
+      return error(400, "Renaming groups after they've synced isn't supported", "mutability");
     if (method === "PUT") {
       const displayName = body?.displayName;
       if (typeof displayName !== "string" || !displayName) return error(400, "displayName is required", "invalidValue");
@@ -174,8 +192,25 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
       return reply(200, view(existing));
     }
     if (method === "PATCH") {
-      for (const op of (body?.Operations as { op: string; path?: string; value?: unknown }[]) ?? []) {
+      const ops = (body?.Operations as { op: string; path?: string; value?: unknown }[]) ?? [];
+      if (o.like === "aws") {
+        const changes = ops.filter((x) => x.path === "members").reduce((n, x) => n + (Array.isArray(x.value) ? x.value.length : 0), 0);
+        if (changes > 100) return error(400, "A maximum of 100 membership changes are allowed in a single request", "invalidValue");
+        if (ops.some((x) => x.path === "members" && (x.op.toLowerCase() === "replace" || !Array.isArray(x.value) || x.value.length === 0)))
+          return error(400, "Replacing or removing all group memberships in a single request isn't supported", "invalidValue");
+        if (ops.some((x) => !x.path)) return error(400, "Only displayName, members and externalId are allowed", "invalidPath");
+      }
+      for (const op of ops) {
         const kind = op.op.toLowerCase();
+        if (op.path === "displayName" && kind === "replace" && typeof op.value === "string") {
+          if (o.like === "atlassian" && op.value !== existing.displayName) return error(400, "Renaming groups after they've synced isn't supported", "mutability");
+          existing.displayName = op.value;
+          continue;
+        }
+        if (op.path === "externalId" && kind === "replace" && typeof op.value === "string") {
+          existing.externalId = op.value;
+          continue;
+        }
         if (op.path === "members" || (kind === "replace" && !op.path && (op.value as { members?: unknown })?.members !== undefined)) {
           const members = membersOf(op.path ? op.value : (op.value as { members?: unknown }).members);
           if (!members) return error(400, "unknown member", "invalidValue");

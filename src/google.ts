@@ -127,5 +127,7 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     createGroup: noGroups,
     replaceGroup: noGroups,
     removeGroup: noGroups,
+    patchGroup: noGroups,
+    createGroupInBatches: noGroups,
   };
 }
