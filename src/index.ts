@@ -11,7 +11,7 @@ export { defaultScimUser, splitName } from "./mapping";
 export { SCIM_USER_SCHEMA, ScimError, type ScimUser } from "./scim-client";
 export type { ScimAuth } from "./credentials";
 export { type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
-export type { ProvisionedUser, ScimProvisioningOptions, ScimTarget } from "./types";
+export type { GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions } from "./types";
 
 /**
  * A SCIM base URL: https, or http to a loopback address; no credentials, query or fragment, which
@@ -34,7 +34,17 @@ const optionsSchema = z.object({
     .array(
       z.object({
         id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
-        url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment"),
+        type: z.enum(["scim", "google-workspace"]).optional(),
+        url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment").optional(),
+        google: z
+          .object({
+            clientEmail: z.string().min(1),
+            privateKey: z.string().includes("PRIVATE KEY", { message: "must be the service account's PEM private key" }),
+            adminEmail: z.string().min(1),
+            orgUnitPath: z.string().startsWith("/").optional(),
+            tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
+          })
+          .optional(),
         token: z.string().min(1).optional(),
         auth: z
           .discriminatedUnion("type", [
@@ -66,7 +76,11 @@ const optionsSchema = z.object({
         roleGroupName: z.function().optional(),
         timeoutMs: z.number().int().min(100).max(120_000).optional(),
         fetch: z.function().optional(),
-      }).refine((t) => (t.token === undefined) !== (t.auth === undefined), "give either token or auth"),
+      })
+        .refine((t) => t.type === "google-workspace" || t.url !== undefined, { message: "url is required", path: ["url"] })
+        .refine((t) => t.type === "google-workspace" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
+        .refine((t) => t.type !== "google-workspace" || (t.google !== undefined && t.token === undefined && t.auth === undefined), "a google-workspace target takes google, not token or auth")
+        .refine((t) => t.type !== "google-workspace" || !(t.groups || t.teamGroups || t.roleGroups), "Google Workspace targets don't provision groups yet"),
     )
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
   retry: z.object({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),

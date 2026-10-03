@@ -12,18 +12,10 @@ export interface ProvisionedUser {
   [field: string]: unknown;
 }
 
-export interface ScimTarget {
+/** What every target has, whatever kind of app it is. */
+export interface TargetOptions {
   /** Stable id: jobs, links and logs use it. Letters, digits, - and _. */
   id: string;
-  /** The app's SCIM base URL, without /Users. */
-  url: string;
-  /** Its bearer token. Or `auth`, for anything else. */
-  token?: string | undefined;
-  /**
-   * How requests are authorised, when it isn't a bearer token: `basic`, a `header` of the app's
-   * own (an API key), or `oauth2` client credentials (tokens fetched, cached and renewed).
-   */
-  auth?: ScimAuth | undefined;
   /**
    * Who is provisioned to this target, beyond the defaults (a verified email unless
    * `requireVerifiedEmail: false`, and not banned). Only `true` includes. Anything else, and a
@@ -78,8 +70,48 @@ export interface ScimTarget {
   fetch?: typeof fetch | undefined;
 }
 
+/** An app that speaks SCIM 2.0 (the default). */
+export interface ScimTarget extends TargetOptions {
+  type?: "scim" | undefined;
+  /** The app's SCIM base URL, without /Users. */
+  url: string;
+  /** Its bearer token. Or `auth`, for anything else. */
+  token?: string | undefined;
+  /**
+   * How requests are authorised, when it isn't a bearer token: `basic`, a `header` of the app's
+   * own (an API key), or `oauth2` client credentials (tokens fetched, cached and renewed).
+   */
+  auth?: ScimAuth | undefined;
+  google?: undefined;
+}
+
+/** Google Workspace, through its Directory API (users only, for now). */
+export interface GoogleWorkspaceTarget extends TargetOptions {
+  type: "google-workspace";
+  /** For tests; default the Directory API. */
+  url?: string | undefined;
+  /** Google Workspace: a service account with domain-wide delegation, acting as a Workspace admin. */
+  google: {
+    /** The service account's email (`client_email` in its JSON key file). */
+    clientEmail: string;
+    /** Its private key (`private_key`), PEM. */
+    privateKey: string;
+    /** The Workspace admin it acts as. */
+    adminEmail: string;
+    /** Where new users go, e.g. "/Provisioned"; default the root. */
+    orgUnitPath?: string | undefined;
+    /** For tests: the token endpoint. */
+    tokenUrl?: string | undefined;
+  };
+  token?: undefined;
+  auth?: undefined;
+}
+
+/** A target: an app that speaks SCIM, or Google Workspace. */
+export type Target = ScimTarget | GoogleWorkspaceTarget;
+
 export interface ScimProvisioningOptions {
-  targets: ScimTarget[];
+  targets: Target[];
   /**
    * Deliveries at once in the scheduled run (`scimProvisioningRun`); default 4, 1 for one at a
    * time. Higher is faster, but every target sees that many requests at once.

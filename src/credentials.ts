@@ -18,6 +18,20 @@ export type ScimAuth =
       clientAuth?: "body" | "basic" | undefined;
       /** Extra form fields, e.g. Zoom's `{ grant_type: "account_credentials", account_id }`. */
       params?: Record<string, string> | undefined;
+    }
+  | {
+      /**
+       * A Google service account with domain-wide delegation (Google Workspace): a JWT signed with
+       * its key is exchanged for an access token acting as `subject`, a Workspace admin.
+       */
+      type: "google";
+      clientEmail: string;
+      /** The service account's private key (PEM, PKCS #8), as in its JSON key file. */
+      privateKey: string;
+      subject: string;
+      scopes: string[];
+      /** For tests; default Google's token endpoint. */
+      tokenUrl?: string | undefined;
     };
 
 export interface Credentials {
@@ -43,13 +57,17 @@ export function credentials(auth: ScimAuth, o: { fetch?: typeof fetch | undefine
       return { headers: async () => ({ authorization: `Basic ${base64(`${auth.username}:${auth.password}`)}` }), rejected: () => false };
     case "header":
       return { headers: async () => ({ [auth.name.toLowerCase()]: auth.value }), rejected: () => false };
-    case "oauth2": {
-      const key = `${auth.tokenUrl}\n${auth.clientId}\n${auth.scope ?? ""}\n${JSON.stringify(auth.params ?? {})}`;
+    case "oauth2":
+    case "google": {
+      const key =
+        auth.type === "oauth2"
+          ? `${auth.tokenUrl}\n${auth.clientId}\n${auth.scope ?? ""}\n${JSON.stringify(auth.params ?? {})}`
+          : `google\n${auth.tokenUrl ?? ""}\n${auth.clientEmail}\n${auth.subject}\n${auth.scopes.join(" ")}`;
       return {
         async headers() {
           let cached = tokens.get(key);
           if (!cached || cached.renewAt <= Date.now()) {
-            const fetched = fetchToken(auth, o);
+            const fetched = auth.type === "oauth2" ? fetchToken(auth, o) : fetchGoogleToken(auth, o);
             // Until it arrives, everyone waits for this one request; a failure isn't kept.
             cached = { token: fetched.then((t) => t.token), renewAt: Number.POSITIVE_INFINITY };
             tokens.set(key, cached);
@@ -75,7 +93,6 @@ export function credentials(auth: ScimAuth, o: { fetch?: typeof fetch | undefine
 }
 
 async function fetchToken(auth: Extract<ScimAuth, { type: "oauth2" }>, o: { fetch?: typeof fetch | undefined; timeoutMs?: number | undefined }) {
-  const host = new URL(auth.tokenUrl).host;
   const form = new URLSearchParams({ grant_type: "client_credentials", ...(auth.scope ? { scope: auth.scope } : {}), ...(auth.params ?? {}) });
   const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded", accept: "application/json" };
   if (auth.clientAuth === "basic") headers.authorization = `Basic ${base64(`${encodeURIComponent(auth.clientId)}:${encodeURIComponent(auth.clientSecret)}`)}`;
@@ -83,9 +100,34 @@ async function fetchToken(auth: Extract<ScimAuth, { type: "oauth2" }>, o: { fetc
     form.set("client_id", auth.clientId);
     form.set("client_secret", auth.clientSecret);
   }
+  return requestToken(auth.tokenUrl, headers, form, o, "the target's OAuth client");
+}
+
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+
+/** A JWT signed with the service account's key, exchanged for a token acting as `subject`. */
+async function fetchGoogleToken(auth: Extract<ScimAuth, { type: "google" }>, o: { fetch?: typeof fetch | undefined; timeoutMs?: number | undefined }) {
+  const tokenUrl = auth.tokenUrl ?? GOOGLE_TOKEN_URL;
+  const now = Math.floor(Date.now() / 1000);
+  const encode = (v: unknown) => base64url(new TextEncoder().encode(JSON.stringify(v)));
+  const unsigned = `${encode({ alg: "RS256", typ: "JWT" })}.${encode({ iss: auth.clientEmail, sub: auth.subject, scope: auth.scopes.join(" "), aud: tokenUrl, iat: now, exp: now + 3600 })}`;
+  let key: CryptoKey;
+  try {
+    const der = Uint8Array.from(atob(auth.privateKey.replace(/-----(BEGIN|END) PRIVATE KEY-----|\\n|\s/g, "")), (c) => c.charCodeAt(0));
+    key = await crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  } catch {
+    throw new ScimError("google: the service account's private key can't be read (a PKCS #8 PEM, as in its JSON key file)", null, false);
+  }
+  const signature = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(unsigned)));
+  const form = new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${unsigned}.${base64url(signature)}` });
+  return requestToken(tokenUrl, { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, form, o, "the service account and its domain-wide delegation");
+}
+
+async function requestToken(tokenUrl: string, headers: Record<string, string>, form: URLSearchParams, o: { fetch?: typeof fetch | undefined; timeoutMs?: number | undefined }, check: string) {
+  const host = new URL(tokenUrl).host;
   let res: Response;
   try {
-    res = await (o.fetch ?? fetch)(auth.tokenUrl, { method: "POST", headers, body: form.toString(), redirect: "manual", signal: AbortSignal.timeout(o.timeoutMs ?? 10_000) });
+    res = await (o.fetch ?? fetch)(tokenUrl, { method: "POST", headers, body: form.toString(), redirect: "manual", signal: AbortSignal.timeout(o.timeoutMs ?? 10_000) });
   } catch (e) {
     throw new ScimError(`token request to ${host}: ${(e as Error).name === "TimeoutError" ? "no response" : (e as Error).message}`, null, true);
   }
@@ -94,7 +136,7 @@ async function fetchToken(auth: Extract<ScimAuth, { type: "oauth2" }>, o: { fetc
     // The error code only: never the response body, which could echo credentials.
     const code = typeof json?.error === "string" ? ` ${json.error.slice(0, 100)}` : "";
     // A refused client is the host's configuration, like a bad token: retried until fixed.
-    throw new ScimError(`token request to ${host}: ${res.status}${code} (check the target's OAuth client)`, res.status, true);
+    throw new ScimError(`token request to ${host}: ${res.status}${code} (check ${check})`, res.status, true);
   }
   if (typeof json.token_type === "string" && json.token_type.toLowerCase() !== "bearer")
     throw new ScimError(`token request to ${host}: token_type ${json.token_type.slice(0, 40)}, not Bearer`, null, false);
@@ -103,6 +145,7 @@ async function fetchToken(auth: Extract<ScimAuth, { type: "oauth2" }>, o: { fetc
 }
 
 const base64 = (s: string) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 /** For tests: forget every cached token. */
 export const forgetTokens = () => tokens.clear();

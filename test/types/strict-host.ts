@@ -3,7 +3,7 @@
 // optional options must accept `undefined` from a host's own optional values.
 import { type BetterAuthPlugin, betterAuth } from "better-auth";
 import { organization } from "better-auth/plugins";
-import { checkScimTarget, type ScimTarget, scimProvisioning } from "better-auth-scim-provisioning";
+import { checkScimTarget, type GoogleWorkspaceTarget, type ScimTarget, scimProvisioning } from "better-auth-scim-provisioning";
 
 declare const token: string;
 declare const maybeOrg: string | undefined;
@@ -60,3 +60,12 @@ export const teamAndRoleGroups: ScimTarget = {
   roleGroups: ["admin"],
   roleGroupName: (role, org) => `${org.slug ?? org.id}-${role}`,
 };
+declare const maybeOrgUnit: string | undefined;
+export const googleTarget: GoogleWorkspaceTarget = {
+  id: "google",
+  type: "google-workspace",
+  google: { clientEmail: "svc@project.iam.gserviceaccount.com", privateKey: token, adminEmail: "admin@example.com", orgUnitPath: maybeOrgUnit },
+  deprovision: "delete",
+};
+// Both kinds in one targets list, as a host with a SCIM app and Google Workspace would write it.
+export const both = scimProvisioning({ targets: [target, googleTarget] });

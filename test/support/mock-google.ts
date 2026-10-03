@@ -1,0 +1,105 @@
+// An in-memory Google Workspace Directory API (users) and token endpoint, as a fetch function,
+// behaving like the real one where it matters: the service account's JWT is verified (signature,
+// iss, sub, scope, aud), users are found by id, primary email or alias, primary emails and aliases
+// are unique (409), only the Workspace's domains are accepted (400), a password and both names are
+// required to create, and "not found" is Google's JSON error. Anything else gets a plain 404.
+
+export interface GoogleStoredUser {
+  id: string;
+  primaryEmail: string;
+  name: { givenName?: string; familyName?: string };
+  suspended: boolean;
+  externalIds?: { value: string; type: string; customType?: string }[] | undefined;
+  aliases?: string[];
+  orgUnitPath?: string;
+  password?: string;
+}
+
+export async function mockGoogle(o: { domains?: string[]; admin?: string } = {}) {
+  const domains = o.domains ?? ["example.com"];
+  const admin = o.admin ?? "admin@example.com";
+  const keys = (await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", keys.privateKey));
+  const privateKey = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...pkcs8)).replace(/.{64}/g, "$&\n")}\n-----END PRIVATE KEY-----\n`;
+  const clientEmail = "provisioner@project.iam.gserviceaccount.com";
+  const url = "https://admin.google.test/admin/directory/v1";
+  const tokenUrl = "https://oauth2.google.test/token";
+  const users = new Map<string, GoogleStoredUser>();
+  const tokens = new Set<string>();
+  const requests: { method: string; path: string; body?: unknown }[] = [];
+  const tokenRequests: { claims: Record<string, unknown> }[] = [];
+  let next = 1;
+
+  const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const gerror = (code: number, message: string) => json(code, { error: { code, message, errors: [{ message, reason: code === 404 ? "notFound" : code === 409 ? "duplicate" : "invalid" }] } });
+  const b64 = (s: string) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+  const find = (key: string) => {
+    const k = key.toLowerCase();
+    return [...users.values()].find((u) => u.id === key || u.primaryEmail.toLowerCase() === k || (u.aliases ?? []).some((a) => a.toLowerCase() === k));
+  };
+  const taken = (email: string, except?: string) => [...users.values()].some((u) => u.id !== except && (u.primaryEmail.toLowerCase() === email.toLowerCase() || (u.aliases ?? []).some((a) => a.toLowerCase() === email.toLowerCase())));
+
+  async function token(body: URLSearchParams) {
+    if (body.get("grant_type") !== "urn:ietf:params:oauth:grant-type:jwt-bearer") return json(400, { error: "unsupported_grant_type" });
+    const [h, c, sig] = (body.get("assertion") ?? "").split(".");
+    if (!h || !c || !sig) return json(400, { error: "invalid_grant" });
+    const valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", keys.publicKey, b64(sig), new TextEncoder().encode(`${h}.${c}`));
+    const claims = JSON.parse(new TextDecoder().decode(b64(c))) as Record<string, unknown>;
+    tokenRequests.push({ claims });
+    const now = Math.floor(Date.now() / 1000);
+    if (!valid || claims.iss !== clientEmail || claims.aud !== tokenUrl || typeof claims.exp !== "number" || claims.exp < now) return json(400, { error: "invalid_grant" });
+    if (claims.sub !== admin || claims.scope !== "https://www.googleapis.com/auth/admin.directory.user") return json(401, { error: "unauthorized_client" });
+    const t = `ya29.mock-${next++}`;
+    tokens.add(t);
+    return json(200, { access_token: t, token_type: "Bearer", expires_in: 3600 });
+  }
+
+  const handler: typeof fetch = async (input, init) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const method = init?.method ?? "GET";
+    if (u.href === tokenUrl) return token(new URLSearchParams(String(init?.body ?? "")));
+    const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+    const path = u.pathname.replace(/^\/admin\/directory\/v1/, "");
+    requests.push({ method, path, ...(body ? { body } : {}) });
+    const m = u.href.startsWith(url) ? /^\/users(?:\/([^/]+))?$/.exec(path) : null;
+    if (!m) return new Response("<html>Not Found</html>", { status: 404, headers: { "content-type": "text/html" } });
+    const bearer = ((init?.headers as Record<string, string> | undefined)?.authorization ?? "").replace(/^Bearer /, "");
+    if (!tokens.has(bearer)) return gerror(401, "Invalid Credentials");
+    const key = m[1] ? decodeURIComponent(m[1]) : undefined;
+
+    if (method === "POST" && !key) {
+      const email = String(body?.primaryEmail ?? "");
+      const name = (body?.name ?? {}) as { givenName?: string; familyName?: string };
+      if (!email || !name.givenName || !name.familyName || !body?.password) return gerror(400, "Invalid Input: missing required field");
+      if (!domains.includes(email.split("@")[1] ?? "")) return gerror(400, "Domain not found.");
+      if (taken(email)) return gerror(409, "Entity already exists.");
+      const stored: GoogleStoredUser = { id: `g${next++}`, primaryEmail: email, name, suspended: body.suspended === true, password: String(body.password), ...(body.externalIds ? { externalIds: body.externalIds as GoogleStoredUser["externalIds"] } : {}), ...(body.orgUnitPath ? { orgUnitPath: String(body.orgUnitPath) } : {}) };
+      users.set(stored.id, stored);
+      const { password: _, ...view } = stored;
+      return json(200, view);
+    }
+    const existing = key ? find(key) : undefined;
+    if (!existing) return gerror(404, "Resource Not Found: userKey");
+    if (method === "GET") {
+      const { password: _, ...view } = existing;
+      return json(200, view);
+    }
+    if (method === "PATCH") {
+      if (typeof body?.primaryEmail === "string" && body.primaryEmail.toLowerCase() !== existing.primaryEmail.toLowerCase()) {
+        if (!domains.includes(body.primaryEmail.split("@")[1] ?? "")) return gerror(400, "Domain not found.");
+        if (taken(body.primaryEmail, existing.id)) return gerror(409, "Entity already exists.");
+      }
+      if (body?.name) existing.name = { ...existing.name, ...(body.name as object) };
+      for (const k of ["primaryEmail", "suspended", "externalIds", "orgUnitPath"] as const) if (body && k in body) (existing as unknown as Record<string, unknown>)[k] = body[k];
+      const { password: _, ...view } = existing;
+      return json(200, view);
+    }
+    if (method === "DELETE") {
+      users.delete(existing.id);
+      return new Response(null, { status: 204 });
+    }
+    return gerror(405, "method not allowed");
+  };
+
+  return { fetch: handler, users, requests, tokenRequests, url, tokenUrl, clientEmail, privateKey, admin };
+}
