@@ -23,6 +23,27 @@ export interface CheckOptions {
 
 const PATCH_OP = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
+/**
+ * The `--auth` file for `check`: the auth object itself, or `{ "auth": { … } }`, checked so a
+ * wrong file is a clear message rather than a crash.
+ */
+export function parseAuthFile(text: string): ScimAuth {
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error("--auth: the file isn't valid JSON");
+  }
+  const raw = (json && typeof json === "object" && "auth" in json ? (json as { auth: unknown }).auth : json) as Record<string, unknown> | null;
+  const needs: Record<string, string[]> = { bearer: ["token"], basic: ["username", "password"], header: ["name", "value"], oauth2: ["tokenUrl", "clientId", "clientSecret"] };
+  const type = raw && typeof raw.type === "string" ? raw.type : "";
+  const fields = needs[type];
+  if (!fields) throw new Error(`--auth: "type" must be one of ${Object.keys(needs).join(", ")}`);
+  const missing = fields.filter((f) => typeof raw?.[f] !== "string" || !raw[f]);
+  if (missing.length) throw new Error(`--auth: ${type} needs ${missing.join(", ")}`);
+  return raw as unknown as ScimAuth;
+}
+
 export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   const base = trimSlashes(o.url);
   const doFetch = o.fetch ?? fetch;

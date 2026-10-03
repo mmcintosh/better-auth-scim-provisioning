@@ -41,7 +41,7 @@ export const auth = betterAuth({
 
 Then:
 
-1. **Create its two tables** (`scimProvisioningJob`, `scimProvisioningLink`) with your usual migration: `npx auth migrate`, or `npx auth generate` for Drizzle and Prisma.
+1. **Create its tables** (`scimProvisioningJob`, `scimProvisioningLink`, and `scimProvisioningGroupLink` for groups) with your usual migration: `npx auth migrate`, or `npx auth generate` for Drizzle and Prisma.
 2. **Run the queue on a schedule**, every minute for example. Deliveries start right away in the background; the scheduled run is what retries the ones that failed.
    ```ts
    await auth.api.scimProvisioningRun({ body: {} }); // { done, retry, failed, busy }
@@ -88,7 +88,7 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `include` | | `(user) => boolean`: who else to leave out. Only `true` includes; anything else deprovisions a provisioned user at their next delivery. |
 | `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. An account that already exists at the app is still only taken over for a verified email. |
 | `mapUser` | see below | `(user) => ScimUser`: what's sent. |
-| `groups` | `false` | Organizations as groups at the app (see [Groups](#groups)). |
+| `groups` | `false` | Organizations as groups at the app: `true`, or `(organization) => boolean` to choose which (see [Groups](#groups)). |
 | `groupName` | the organization's name | `(organization) => string`: the group's name. |
 | `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
 | `timeoutMs` | `10000` | Per request. |
@@ -114,7 +114,9 @@ Override it per target with `mapUser`, for example to take `userName` from an em
 
 ## Groups
 
-With `groups: true`, each organization (Better Auth's organization plugin) is a group at the app, or only `organizationId`'s when that's set. The group's members are the organization's members who are provisioned and active at that target, so a banned or unverified member isn't in it.
+With `groups: true`, each organization (Better Auth's organization plugin) is a group at the app, or only `organizationId`'s when that's set. With a function, only the organizations it returns true for: `groups: (org) => org.slug.startsWith("team-")`.
+
+> **Who can name a group?** Better Auth lets any signed-in user create organizations by default, and each organization becomes a group at the app. A user could then create one called "Administrators", with themselves in it. Some apps match access rules by group name. Restrict who creates and renames organizations (the organization plugin's `allowUserToCreateOrganization` and roles), or choose groups with a function. The group's members are the organization's members who are provisioned and active at that target, so a banned or unverified member isn't in it.
 
 - **When it changes:**
   - members join or leave (add, remove, accepting an invitation, leaving);
@@ -122,7 +124,7 @@ With `groups: true`, each organization (Better Auth's organization plugin) is a 
   - the organization is renamed (the group is renamed) or deleted (the group is removed at the app);
   - a reconcile runs.
 - **Rebuilt each time:** the group is recomputed from the database on every delivery, so it converges whatever order changes arrive in. A change made in the app is delivered at once; a reconcile updates each group a few times, not once per member.
-- **Never taken over:** a group of the same name that isn't the organization's (another `externalId`, or one made by hand) is refused, because replacing it would rewrite its members. Rename one of them, or set `groupName`.
+- **Never taken over:** a group of the same name that isn't the organization's (another `externalId`, or one made by hand) is refused, because replacing it would rewrite its members. The name is looked up before the first create, so a hand-made group is refused even when that create times out. Rename one of them, or set `groupName`.
 - **Verified live** against Cloudflare Access.
 
 Most apps grant access by group: assign the group to the app or role there (AWS permission sets, Atlassian products, Cloudflare Access policies).
@@ -133,8 +135,8 @@ Most apps grant access by group: assign the group to the app or role there (AWS 
 - **Never in the way.** Provisioning never fails the user's own write. A failure to queue is logged, and the next reconcile catches up.
 - **Leases.** A job is claimed before delivery, so two workers never deliver it at once. A change that arrives during a delivery goes out straight after it.
 - **Retries.** 429 (honouring `Retry-After`), 5xx, timeouts, network errors, 401/403 (an expired token is the host's problem, not the user's), and a wrong target URL are retried with backoff, for as long as it takes. The job's last error says which: "check the target's token", "check the target's url". Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
-- **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off.
-- **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, and the user's email is verified. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
+- **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off. At apps that don't keep `externalId`, we can't tell that account from one made by hand in the meantime, so the job fails with a message instead of guessing.
+- **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, the user's email verified, and the account's userName that same email. With a custom `mapUser` userName (an employee id, a handle), accounts made by hand at the app are therefore never taken over: give them our `externalId` at the app, or remove them, first. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
 - **A 404 is checked, not believed.** A user is taken as gone at the app only when the app's own list agrees. A wrong URL answers 404 for everything, and believing it would mark people deactivated here while they stay active there.
 - **Reconcile** covers every user, and every user still linked at a target, so deleted users whose deprovisioning was lost are cleaned up too.
 - **No redirects.** The token only goes to the target's URL: a redirect fails the request, with the new location in the error.
@@ -170,7 +172,13 @@ SCIM_TOKEN=… npx better-auth-scim-provisioning check --url https://example.com
 ✓ delete
 ```
 
-For other auth methods, `--auth auth.json` with an `auth` object as in the table above. From code (an admin page's "test connection"), `checkScimTarget({ url, token | auth })` returns the same results.
+For other auth methods, `--auth auth.json`, a file holding the `auth` object as in the table above (or `{ "auth": { … } }`):
+
+```json
+{ "type": "oauth2", "tokenUrl": "https://login.example.com/oauth2/token", "clientId": "…", "clientSecret": "…" }
+```
+
+ From code (an admin page's "test connection"), `checkScimTarget({ url, token | auth })` returns the same results.
 
 ## Databases and runtimes
 

@@ -66,7 +66,7 @@ const RELEASED = new Date("2000-01-01T00:00:00.000Z");
  * replace), each up to the target's timeout, plus a margin. Shorter, and a second worker could
  * claim a job still being delivered.
  */
-const leaseFor = (target: ScimTarget | undefined) => 4 * (target?.timeoutMs ?? 10_000) + 30_000;
+const leaseFor = (target: ScimTarget | undefined) => 12 * (target?.timeoutMs ?? 10_000) + 30_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
 const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
@@ -231,8 +231,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           if (found.externalId !== null) return refuse(`the app's account belongs to another user (externalId ${found.externalId})`);
           const owner = await ownerOf(target, found.id);
           if (owner && owner !== userId) return refuse("the app's account is linked to another user");
-          // Nobody's: only for an address the user has shown they own.
+          // Nobody's: only for an address the user has shown they own, and only when the
+          // account's userName is that address: a custom userName (mapUser) proves nothing about
+          // who the account was made for.
           if ((user as ProvisionedUser).emailVerified !== true) return refuse("an account with this userName exists at the app, and the user's email is not verified");
+          if (scim.userName.toLowerCase() !== (user as ProvisionedUser).email.toLowerCase())
+            return refuse("an account with this userName exists at the app, and its userName isn't the user's verified email, so it isn't taken over");
         }
         await (target.update === "patch" ? client.patch : client.replace)(found.id, scim);
         remoteId = found.id;
@@ -348,14 +352,15 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     } catch (e) {
       const attempts = current.attempts + 1;
       const err = e instanceof ScimError ? e : new ScimError((e as Error).message, null, true);
-      // Only an error that won't fix itself fails the job. Anything else (an outage, an expired
-      // token) keeps retrying, every 6 hours once past maxAttempts, so it recovers when the app
-      // does.
-      const giveUp = !err.retryable;
+      // Only an error that won't fix itself fails the job. The app's (an outage, an expired token)
+      // keeps retrying, every 6 hours once past maxAttempts, so it recovers when the app does.
+      // One from the host's own code or database (mapUser, include, a query) fails at
+      // maxAttempts: it won't fix itself on a timer.
+      const giveUp = !err.retryable || (!(e instanceof ScimError) && attempts >= maxAttempts);
       const wait = Math.max(err.retryAfterMs ?? 0, attempts >= maxAttempts ? MAX_DELAY_MS : backoff(attempts));
       const loud = giveUp || attempts === maxAttempts;
       (loud ? log.error : log.warn)(
-        `[scim] ${target.id}: user ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
+        `[scim] ${target.id}: ${isGroup ? "group" : "user"} ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
       );
       const recorded = await adapter.updateMany({
         model: JOB_MODEL,
@@ -451,8 +456,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   // organization's members who are provisioned and active there. A group is recomputed from the
   // database on each delivery, so it converges whatever order changes arrive in.
 
-  /** Is this organization's group wanted at this target? */
-  const groupWanted = (target: ScimTarget, organizationId: string) => target.groups === true && (!target.organizationId || target.organizationId === organizationId);
+  /** Could this organization have a group at this target? (`groups` set, and in scope.) */
+  const groupWanted = (target: ScimTarget, organizationId: string) => !!target.groups && (!target.organizationId || target.organizationId === organizationId);
+  /** Is the organization's group wanted: in scope, and through the `groups` filter if there is one. */
+  const groupIncluded = async (target: ScimTarget, org: { id: string; name: string; slug: string | null }) =>
+    groupWanted(target, org.id) && (typeof target.groups === "function" ? (await target.groups(org)) === true : target.groups === true);
 
   /** The organization's members' ids at the app: provisioned, active, in id order. */
   async function groupMembers(target: ScimTarget, organizationId: string): Promise<{ value: string }[]> {
@@ -493,7 +501,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const link = await findGroupLink(key);
     const org = (await adapter.findOne({ model: "organization", where: [{ field: "id", value: organizationId }] })) as { id: string; name: string; slug?: string } | null;
 
-    if (!org || org.id !== organizationId || !groupWanted(target, organizationId)) {
+    if (!org || org.id !== organizationId || !(await groupIncluded(target, { id: org.id, name: org.name, slug: org.slug ?? null }))) {
       if (!link) return null;
       if (link.remoteId) {
         try {
@@ -527,8 +535,26 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         }
       }
     }
-    // Pending first, as for users: a create whose reply is lost is ours to adopt later.
     const pendingBefore = link !== null && !link.remoteId;
+    const otherOwner = async (remoteId: string) =>
+      ((await adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "remoteId", value: remoteId }], limit: 2 })) as GroupLink[]).some((l) => l.remoteId === remoteId && l.organizationId !== organizationId);
+    const refuse = async (): Promise<never> => {
+      await adapter.deleteMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }] });
+      throw new ScimError(`group ${displayName}: a group with this name already exists at the app and isn't this organization's; rename one of them, or set groupName`, 409, false);
+    };
+    if (!pendingBefore) {
+      // Look before creating: a group of this name that isn't ours is refused here, before any
+      // pending link exists, so a pending link always means "our own create may have made it"
+      //.
+      const existing = await client.findGroupByName(displayName);
+      if (existing) {
+        if (existing.externalId !== organizationId || (await otherOwner(existing.id))) return refuse();
+        await client.replaceGroup(existing.id, group);
+        await saveGroupLink(target, organizationId, { remoteId: existing.id, displayName });
+        return null;
+      }
+    }
+    // Pending first, as for users: a create whose reply is lost is ours to adopt later.
     await saveGroupLink(target, organizationId, { remoteId: "", displayName });
     let remoteId: string;
     try {
@@ -539,12 +565,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       // whose reply was lost) is updated; anyone else's is never taken over: replacing it would
       // rewrite its members.
       const found = await client.findGroupByName(displayName);
-      const owner = found ? ((await adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "remoteId", value: found.id }], limit: 2 })) as GroupLink[]).find((l) => l.remoteId === found.id && l.organizationId !== organizationId) : undefined;
-      const ours = found !== null && !owner && (found.externalId === organizationId || (found.externalId === null && pendingBefore));
-      if (!found || !ours) {
-        await adapter.deleteMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }] });
-        throw new ScimError(`group ${displayName}: a group with this name already exists at the app and isn't this organization's; rename one of them, or set groupName`, 409, false);
-      }
+      const ours = found !== null && !(await otherOwner(found.id)) && (found.externalId === organizationId || (found.externalId === null && pendingBefore));
+      if (!found || !ours) return refuse();
       await client.replaceGroup(found.id, group);
       remoteId = found.id;
     }

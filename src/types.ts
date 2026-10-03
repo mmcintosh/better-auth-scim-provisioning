@@ -49,9 +49,11 @@ export interface ScimTarget {
   update?: "put" | "patch" | undefined;
   /**
    * Organizations (Better Auth's organization plugin) as groups at the app, their provisioned
-   * members as the group's members. Every organization, or only `organizationId` when set.
+   * members as the group's members. Every organization (or only `organizationId`'s), or those a
+   * filter accepts. Better Auth lets any user create organizations by default: restrict that, or
+   * filter here, so a user can't put themselves in a group named as they like.
    */
-  groups?: boolean | undefined;
+  groups?: boolean | ((organization: { id: string; name: string; slug: string | null }) => boolean | Promise<boolean>) | undefined;
   /** The group's displayName; default the organization's name. */
   groupName?: ((organization: { id: string; name: string; slug: string | null }) => string) | undefined;
   /** What leaving means at the app: `deactivate` (active=false, the default) or `delete`. */

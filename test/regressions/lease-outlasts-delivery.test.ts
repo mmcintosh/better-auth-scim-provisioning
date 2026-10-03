@@ -17,3 +17,17 @@ describe("the lease outlasts the slowest delivery", () => {
     await h.settle();
   });
 });
+
+// A delivery can make more than four requests: replace, find, create, find, replace; a 401 retry
+// doubles any of them, and an OAuth target adds a token request.
+it("the lease covers twelve requests' worth of the target's timeout", async () => {
+  const h = await createHost({ targets: [{ id: "app", timeoutMs: 60_000 }] });
+  const u = await h.user();
+  const release = h.app.hold();
+  await h.ctx.internalAdapter.updateUser(u.id, { name: "Changed Name" });
+  await new Promise((r) => setTimeout(r, 50));
+  const [job] = await h.jobs();
+  expect(new Date(job!.lockedUntil as Date).getTime() - Date.now()).toBeGreaterThan(12 * 60_000);
+  release();
+  await h.settle();
+});
