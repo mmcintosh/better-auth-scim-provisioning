@@ -90,6 +90,10 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `mapUser` | see below | `(user) => ScimUser`: what's sent. |
 | `groups` | `false` | Organizations as groups at the app: `true`, or `(organization) => boolean` to choose which (see [Groups](#groups)). |
 | `groupName` | the organization's name | `(organization) => string`: the group's name. |
+| `teamGroups` | `false` | Teams as groups: `true`, or `(team, organization) => boolean`. |
+| `teamGroupName` | "Org / Team" | `(team, organization) => string`. |
+| `roleGroups` | `false` | Roles as groups: `true` (every role held) or a list, `["admin"]`. |
+| `roleGroupName` | "Org / role" | `(role, organization) => string`. |
 | `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
 | `timeoutMs` | `10000` | Per request. |
 
@@ -116,12 +120,20 @@ Override it per target with `mapUser`, for example to take `userName` from an em
 
 With `groups: true`, each organization (Better Auth's organization plugin) is a group at the app, or only `organizationId`'s when that's set. With a function, only the organizations it returns true for: `groups: (org) => org.slug.startsWith("team-")`.
 
-> **Who can name a group?** Better Auth lets any signed-in user create organizations by default, and each organization becomes a group at the app. A user could then create one called "Administrators", with themselves in it. Some apps match access rules by group name. Restrict who creates and renames organizations (the organization plugin's `allowUserToCreateOrganization` and roles), or choose groups with a function. The group's members are the organization's members who are provisioned and active at that target, so a banned or unverified member isn't in it.
+> **Who can name a group?** Better Auth lets any signed-in user create organizations by default, and each organization becomes a group at the app. A user could then create one called "Administrators", with themselves in it. Some apps match access rules by group name. Restrict who creates and renames organizations (the organization plugin's `allowUserToCreateOrganization` and roles), or choose groups with a function.
+
+The group's members are the organization's members who are provisioned and active at that target, so a banned or unverified member isn't in it.
+
+**Teams and roles** can be groups too, the same way:
+- `teamGroups: true`: each team (the organization plugin's `teams`) is a group of its provisioned members, named "Acme / Red". A function chooses which: `teamGroups: (team, org) => team.name.startsWith("eng-")`. `teamGroupName: (team, org) => string` names them.
+- `roleGroups: ["admin"]`: the members holding that role in each organization are a group, named "Acme / admin"; `roleGroups: true` makes one for every role held. A member with several roles is in each role's group. `roleGroupName: (role, org) => string` names them.
+
+All three kinds can be used together. Any change in an organization (members, roles, teams, the organization itself) updates its groups; a removed team, or a role no one holds any more, has its group removed at the app.
 
 - **When it changes:**
-  - members join or leave (add, remove, accepting an invitation, leaving);
+  - members join or leave (add, remove, accepting an invitation, leaving), change role, or join or leave a team;
   - a member is provisioned or deprovisioned;
-  - the organization is renamed (the group is renamed) or deleted (the group is removed at the app);
+  - the organization or team is renamed (the group is renamed) or deleted (the group is removed at the app);
   - a reconcile runs.
 - **Rebuilt each time:** the group is recomputed from the database on every delivery, so it converges whatever order changes arrive in. A change made in the app is delivered at once; a reconcile updates each group a few times, not once per member.
 - **Never taken over:** a group of the same name that isn't the organization's (another `externalId`, or one made by hand) is refused, because replacing it would rewrite its members. The name is looked up before the first create, so a hand-made group is refused even when that create times out. Rename one of them, or set `groupName`.
@@ -188,7 +200,6 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested
 
 ## Not yet
 
-- **Groups from anything but organizations:** teams and roles aren't pushed as groups yet.
 - **Apps that don't speak SCIM**, such as Google Workspace (its Directory API).
 
 ## Development
