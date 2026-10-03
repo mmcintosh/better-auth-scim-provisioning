@@ -80,6 +80,7 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | Option | Default | |
 |---|---|---|
 | `id` | required | Stable id: letters, digits, `-`, `_`. Jobs, links and logs use it. |
+| `type` | `"scim"` | `"google-workspace"` for Google Workspace's Directory API (see [Google Workspace](#google-workspace)). |
 | `url` | required | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
 | `token` | | Its bearer token. Or `auth`, for anything else: one of the two is required. |
 | `auth` | | `{ type: "basic", username, password }`, `{ type: "header", name, value }` (an API key), or `{ type: "oauth2", tokenUrl, clientId, clientSecret, scope?, clientAuth?, params? }` (client credentials; tokens cached and renewed before they expire). |
@@ -163,7 +164,40 @@ Most apps grant access by group: assign the group to the app or role there (AWS 
   - turn on **seat deprovisioning** too, or a deactivated user keeps their seat;
   - Cloudflare's Users list shows the name from the last sign-in, not the latest SCIM update.
 - **AWS IAM Identity Center.** IAM Identity Center → Settings → Identity source → **Automatic provisioning**. Its tokens last a year. Users need a given name, a family name and a display name (the defaults always send them), and your identity provider's SAML NameID must be the same value as the SCIM `userName` (the email, by default).
+- **Google Workspace** (Directory API; tested against a model of it, not yet live). See [below](#google-workspace).
 - **Anything else that speaks SCIM 2.0**, with a bearer token, Basic auth, an API-key header or OAuth 2.0 client credentials: Auth0 (enterprise connections), Okta, Salesforce, your own apps.
+
+### Google Workspace
+
+Google doesn't accept SCIM, so Workspace is its own kind of target, through the Directory API. Users only, for now.
+
+```ts
+{
+  id: "google",
+  type: "google-workspace",
+  google: {
+    clientEmail: process.env.GOOGLE_CLIENT_EMAIL!, // the service account (client_email)
+    privateKey: process.env.GOOGLE_PRIVATE_KEY!,   // its key (private_key), PEM
+    adminEmail: "provisioning-admin@your-domain.com", // the Workspace admin it acts as
+    orgUnitPath: "/Provisioned",                   // optional: where new users go
+  },
+}
+```
+
+Setting it up:
+1. In Google Cloud, create or choose a project and enable the **Admin SDK API**.
+2. Create a **service account**, and a JSON key for it. `client_email` and `private_key` go in the options.
+3. In the Workspace Admin console, go to Security → Access and data control → API controls → **Domain-wide delegation** → Add new. Use the service account's client ID, with the scope `https://www.googleapis.com/auth/admin.directory.user`.
+4. Choose an **admin** for it to act as, with permission to manage users.
+
+How it maps:
+- the email (`userName`) becomes `primaryEmail`, which must be in one of the Workspace's domains;
+- the names map to `name`, and Google requires both;
+- deprovisioning suspends the user, or deletes them with `deprovision: "delete"`;
+- our user id is a custom entry in `externalIds`, and any other external ids an admin set are kept;
+- Google requires a password when a user is created, so a random one is set. Users sign in through your identity provider (with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) as Workspace's SAML identity provider), so it's never used.
+
+Adoption follows the same rules as SCIM, and an account that merely has the user's email as an *alias* is never taken over.
 
 ### Check an app first
 
@@ -200,7 +234,8 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested
 
 ## Not yet
 
-- **Apps that don't speak SCIM**, such as Google Workspace (its Directory API).
+- **Groups at Google Workspace targets** (Google Groups): users only for now.
+- **Other apps that don't speak SCIM**: a signed-webhook target is planned, to reach anything else.
 
 ## Development
 

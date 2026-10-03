@@ -6,6 +6,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Added
 
+- **Google Workspace targets** (`type: "google-workspace"`): users created, updated, suspended and deleted through the Directory API, as a service account with domain-wide delegation. Users only for now.
 - **Teams and roles as groups** (`teamGroups`, `roleGroups`, with `teamGroupName` and `roleGroupName`): each team, or each role in an organization, is a group of its provisioned members, kept in sync like organization groups.
 
 ## [0.1.0] - 2026-10-02

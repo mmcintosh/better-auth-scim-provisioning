@@ -9,8 +9,9 @@
 // A link is written before an account is created at the app (remoteId empty: "pending"), so an
 // account whose create reply was lost can still be found, and undone, later.
 import { defaultScimUser, isBanned } from "./mapping";
+import { googleWorkspaceClient } from "./google";
 import { SCIM_GROUP_SCHEMA, ScimError, scimClient } from "./scim-client";
-import type { ProvisionedUser, ScimProvisioningOptions, ScimTarget } from "./types";
+import type { ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
 
 export const JOB_MODEL = "scimProvisioningJob";
 export const LINK_MODEL = "scimProvisioningLink";
@@ -66,7 +67,7 @@ const RELEASED = new Date("2000-01-01T00:00:00.000Z");
  * replace), each up to the target's timeout, plus a margin. Shorter, and a second worker could
  * claim a job still being delivered.
  */
-const leaseFor = (target: ScimTarget | undefined) => 12 * (target?.timeoutMs ?? 10_000) + 30_000;
+const leaseFor = (target: Target | undefined) => 12 * (target?.timeoutMs ?? 10_000) + 30_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
 const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
@@ -100,6 +101,10 @@ export interface GroupLink {
 export type Outcome = "done" | "retry" | "failed" | "busy";
 
 const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
+
+/** The client for a target: SCIM, or Google Workspace's Directory API behind the same operations. */
+const clientFor = (target: Target) =>
+  target.type === "google-workspace" ? googleWorkspaceClient(target) : scimClient({ url: target.url ?? "", token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
 
 export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }) {
   const targets = new Map(options.targets.map((t) => [t.id, t]));
@@ -153,7 +158,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return link && link.key === key ? link : null;
   }
 
-  async function saveLink(target: ScimTarget, userId: string, fields: { remoteId: string; userName: string; externalId: string | null; active: boolean }) {
+  async function saveLink(target: Target, userId: string, fields: { remoteId: string; userName: string; externalId: string | null; active: boolean }) {
     const key = keyOf(target.id, userId);
     const update = { ...fields, syncedAt: new Date() };
     if ((await adapter.updateMany({ model: LINK_MODEL, where: [{ field: "key", value: key }], update })) > 0) return;
@@ -163,13 +168,13 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   const dropLink = (key: string) => adapter.deleteMany({ model: LINK_MODEL, where: [{ field: "key", value: key }] });
 
   /** The user another link at this target already ties the app's account to, if any. */
-  async function ownerOf(target: ScimTarget, remoteId: string): Promise<string | null> {
+  async function ownerOf(target: Target, remoteId: string): Promise<string | null> {
     const rows = (await adapter.findMany({ model: LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "remoteId", value: remoteId }], limit: 2 })) as Link[];
     return rows.find((l) => l.targetId === target.id && l.remoteId === remoteId)?.userId ?? null;
   }
 
   /** Should this user be at this target now? */
-  async function wanted(target: ScimTarget, user: ProvisionedUser | null): Promise<boolean> {
+  async function wanted(target: Target, user: ProvisionedUser | null): Promise<boolean> {
     if (!user || isBanned(user)) return false;
     if ((target.requireVerifiedEmail ?? true) && user.emailVerified !== true) return false;
     if (target.organizationId) {
@@ -183,8 +188,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * Make the app match the user: create, update, adopt, reactivate or deprovision. Returns when to
    * look again without a change, if ever: the end of a timed ban.
    */
-  async function deliver(target: ScimTarget, userId: string): Promise<Date | null> {
-    const client = scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
+  async function deliver(target: Target, userId: string): Promise<Date | null> {
+    const client = clientFor(target);
     const user = (await adapter.findOne({ model: "user", where: [{ field: "id", value: userId }] })) as ProvisionedUser | null;
     const key = keyOf(target.id, userId);
     let link = await findLink(key);
@@ -291,7 +296,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * everything, and taking that 404 as "gone" left users active at the app (found in the field
    * test). Returns the account's id if it's ours, or null when it's gone.
    */
-  async function stillThere(target: ScimTarget, client: ReturnType<typeof scimClient>, userId: string, userName: string, externalId: string | null): Promise<string | null> {
+  async function stillThere(target: Target, client: ReturnType<typeof scimClient>, userId: string, userName: string, externalId: string | null): Promise<string | null> {
     const found = await client.findByUserName(userName);
     if (!found) return null;
     if (found.externalId !== null && found.externalId === externalId) return found.id;
@@ -302,7 +307,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * A pending create for a user who is now leaving: find out whether the account exists at the app,
    * and return it as a real link to deprovision, or drop the link.
    */
-  async function settlePending(target: ScimTarget, client: ReturnType<typeof scimClient>, link: Link): Promise<Link | null> {
+  async function settlePending(target: Target, client: ReturnType<typeof scimClient>, link: Link): Promise<Link | null> {
     const found = await client.findByUserName(link.userName);
     const owner = found ? await ownerOf(target, found.id) : null;
     if (!found || (owner && owner !== link.userId) || (found.externalId !== null && found.externalId !== link.externalId)) {
@@ -463,9 +468,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   // active there. A group is recomputed from the database on each delivery, so it converges
   // whatever order changes arrive in.
 
-  const inScope = (target: ScimTarget, organizationId: string) => !target.organizationId || target.organizationId === organizationId;
+  const inScope = (target: Target, organizationId: string) => !target.organizationId || target.organizationId === organizationId;
   /** Does this target have groups of any kind? */
-  const hasGroups = (target: ScimTarget) => !!(target.groups || target.teamGroups || target.roleGroups);
+  const hasGroups = (target: Target) => !!(target.groups || target.teamGroups || target.roleGroups);
   /** The externalId a group carries at the app: the organization's id (as in 0.1.0), or the team's or role's. */
   const externalIdOf = (ref: GroupRef) => (ref.kind === "group" ? ref.id : `${ref.kind}:${ref.id}`);
   /** Roles on a member row: Better Auth keeps several as "admin,member". */
@@ -499,7 +504,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * What a group should be now: its organization, whether it's wanted, its name and its members'
    * user ids; null when its organization (or team) no longer exists.
    */
-  async function resolveGroup(target: ScimTarget, ref: GroupRef): Promise<{ organizationId: string; wanted: boolean; displayName: string; userIds: () => Promise<string[]> } | null> {
+  async function resolveGroup(target: Target, ref: GroupRef): Promise<{ organizationId: string; wanted: boolean; displayName: string; userIds: () => Promise<string[]> } | null> {
     if (ref.kind === "group") {
       const org = await organization(ref.id);
       if (!org) return null;
@@ -527,7 +532,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   /** The users' ids at the app: provisioned and active, sorted. */
-  async function remoteIdsOf(target: ScimTarget, userIds: string[]): Promise<{ value: string }[]> {
+  async function remoteIdsOf(target: Target, userIds: string[]): Promise<{ value: string }[]> {
     const values: string[] = [];
     for (let i = 0; i < userIds.length; i += IN_BATCH) {
       const batch = userIds.slice(i, i + IN_BATCH);
@@ -542,7 +547,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return link && link.key === key ? link : null;
   }
 
-  async function saveGroupLink(target: ScimTarget, ref: GroupRef, organizationId: string, fields: { remoteId: string; displayName: string }) {
+  async function saveGroupLink(target: Target, ref: GroupRef, organizationId: string, fields: { remoteId: string; displayName: string }) {
     const key = keyFor(ref.kind, target.id, ref.id);
     const update = { ...fields, syncedAt: new Date() };
     if ((await adapter.updateMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }], update })) > 0) return;
@@ -550,8 +555,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   /** Make the app's group match its organization, team or role: create, update, adopt, or remove. */
-  async function deliverGroup(target: ScimTarget, ref: GroupRef): Promise<null> {
-    const client = scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
+  async function deliverGroup(target: Target, ref: GroupRef): Promise<null> {
+    const client = clientFor(target);
     const key = keyFor(ref.kind, target.id, ref.id);
     const externalId = externalIdOf(ref);
     const link = await findGroupLink(key);
@@ -634,7 +639,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * Every group an organization may have at this target: its own, its teams', its roles', and any
    * still linked (a team removed, a role no longer held), so those are removed.
    */
-  async function groupsForOrganization(target: ScimTarget, organizationId: string): Promise<GroupRef[]> {
+  async function groupsForOrganization(target: Target, organizationId: string): Promise<GroupRef[]> {
     if (!hasGroups(target) || !inScope(target, organizationId)) return [];
     const refs: GroupRef[] = [];
     if (target.groups) refs.push({ kind: "group", id: organizationId });
@@ -663,7 +668,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   const uniqueRefs = (refs: GroupRef[]) => [...new Map(refs.map((r) => [`${r.kind}:${r.id}`, r])).values()];
 
   /** The groups at this target that include (or may include) this user. */
-  async function groupsOf(target: ScimTarget, userId: string): Promise<GroupRef[]> {
+  async function groupsOf(target: Target, userId: string): Promise<GroupRef[]> {
     if (!hasGroups(target)) return [];
     const refs: GroupRef[] = [];
     const memberships = (await adapter.findMany({ model: "member", where: [{ field: "userId", value: userId }], limit: 1000 })) as { userId: string; organizationId: string; role?: unknown }[];
@@ -684,7 +689,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * organization updates each group a few times, not once per member; the host delivers them at
    * once for a single change (see index.ts). Never fails the user's job.
    */
-  async function syncGroupsOf(target: ScimTarget, userId: string): Promise<void> {
+  async function syncGroupsOf(target: Target, userId: string): Promise<void> {
     try {
       for (const ref of await groupsOf(target, userId)) await enqueue(target.id, ref.id, { kind: ref.kind });
     } catch (e) {
