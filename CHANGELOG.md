@@ -12,7 +12,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 - `update: "patch"` per target, which keeps attributes set at the app.
 - `npx better-auth-scim-provisioning check` and `checkScimTarget()`: what an app's SCIM supports, tested on a throwaway user.
 - Verified in a real app on Cloudflare Workers, D1 and Cron, live against Cloudflare Access.
-- **Groups** (`groups: true`, `groupName`): organizations as SCIM groups, with their provisioned members, kept in sync.
+- **Groups** (`groups: true` or a filter function, `groupName`): organizations as SCIM groups, with their provisioned members, kept in sync.
 - `concurrency` (default 4): the scheduled run delivers several jobs at once; about four times faster than one at a time in the field test.
 - `scimProvisioningReconcile` in pages (`limit`, `after` → `next`), for Workers and large user bases.
-- Reviewed before release, tested on SQLite, PostgreSQL, MySQL and MongoDB, and verified live against Cloudflare Access.
+- Reviewed before release, including by an external reviewer, tested on SQLite, PostgreSQL, MySQL and MongoDB, and verified live against Cloudflare Access.
