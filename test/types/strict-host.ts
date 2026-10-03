@@ -3,7 +3,7 @@
 // optional options must accept `undefined` from a host's own optional values.
 import { type BetterAuthPlugin, betterAuth } from "better-auth";
 import { organization } from "better-auth/plugins";
-import { awsIamIdentityCenter, checkScimTarget, githubEnterprise, type GoogleWorkspaceTarget, type ScimTarget, scimProvisioning, slack } from "better-auth-scim-provisioning";
+import { awsIamIdentityCenter, checkScimTarget, githubEnterprise, type GoogleWorkspaceTarget, type ScimTarget, scimProvisioning, slack, verifyWebhookSignature, type WebhookTarget } from "better-auth-scim-provisioning";
 
 declare const token: string;
 declare const maybeOrg: string | undefined;
@@ -77,3 +77,10 @@ export const profiled = scimProvisioning({
     githubEnterprise({ id: "gh", url: "https://api.github.com/scim/v2/enterprises/acme", token }),
   ],
 });
+// A webhook target, and a receiver checking a request.
+export const hook: WebhookTarget = { id: "hook", type: "webhook", url: "https://hooks.example.com/x", secret: token, groups: maybeGroups };
+export const receive = async (request: Request) => {
+  const event = await verifyWebhookSignature({ body: await request.text(), signature: request.headers.get("x-scim-provisioning-signature"), secret: token });
+  return event.type === "user.upsert" ? event.user.userName : event.type;
+};
+export const all = scimProvisioning({ targets: [target, googleTarget, hook] });

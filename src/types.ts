@@ -98,6 +98,7 @@ export interface ScimTarget extends TargetOptions {
    */
   auth?: ScimAuth | undefined;
   google?: undefined;
+  secret?: undefined;
 }
 
 /** Google Workspace, through its Directory API (users only, for now). */
@@ -120,10 +121,26 @@ export interface GoogleWorkspaceTarget extends TargetOptions {
   };
   token?: undefined;
   auth?: undefined;
+  secret?: undefined;
 }
 
-/** A target: an app that speaks SCIM, or Google Workspace. */
-export type Target = ScimTarget | GoogleWorkspaceTarget;
+/**
+ * Signed webhooks: every change POSTed to a URL as a JSON event with the full current state,
+ * signed with HMAC-SHA256 (receivers check it with `verifyWebhookSignature`).
+ */
+export interface WebhookTarget extends TargetOptions {
+  type: "webhook";
+  /** Where events are POSTed (https; http only for localhost). */
+  url: string;
+  /** The key events are signed with, shared with the receiver; at least 32 characters. */
+  secret: string;
+  token?: undefined;
+  auth?: undefined;
+  google?: undefined;
+}
+
+/** A target: an app that speaks SCIM, Google Workspace, or a webhook. */
+export type Target = ScimTarget | GoogleWorkspaceTarget | WebhookTarget;
 
 export interface ScimProvisioningOptions {
   targets: Target[];

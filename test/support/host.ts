@@ -9,8 +9,9 @@ import { scimProvisioning } from "../../src";
 import type { ScimProvisioningOptions, Target, TargetOptions } from "../../src/types";
 import { mockGoogle } from "./mock-google";
 import { mockScim } from "./mock-scim";
+import { mockWebhook } from "./mock-webhook";
 
-type TargetSpec = Omit<TargetOptions, "fetch"> & { type?: "scim" | "google-workspace"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number };
+type TargetSpec = Omit<TargetOptions, "fetch"> & { type?: "scim" | "google-workspace" | "webhook"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number };
 
 /** A database for Better Auth's `database` option, and whether it needs Better Auth's migrations. */
 export interface HostDatabase {
@@ -23,6 +24,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
   const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}) })]));
   // A Google Workspace target gets a mock Directory API instead (one per host).
   const google = specs.some((s) => s.type === "google-workspace") ? await mockGoogle() : undefined;
+  const webhook = specs.some((s) => s.type === "webhook") ? mockWebhook() : undefined;
   const pending = new Set<Promise<unknown>>();
   const db = new DatabaseSync(":memory:");
   const database = o.database ?? { database: db, migrate: true };
@@ -46,7 +48,9 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
       organization({ teams: { enabled: true } }),
       scimProvisioning({
         targets: specs.map(({ requireNames: _, keepsExternalId: __, patch: ___, like: ____, pageSize: _____, ...s }) =>
-          s.type === "google-workspace" && google
+          s.type === "webhook" && webhook
+            ? { ...s, type: "webhook", url: webhook.url, secret: webhook.secret, fetch: webhook.fetch }
+            : s.type === "google-workspace" && google
             ? { ...s, type: "google-workspace", url: google.url, google: { clientEmail: google.clientEmail, privateKey: google.privateKey, adminEmail: google.admin, tokenUrl: google.tokenUrl }, fetch: google.fetch }
             : { ...s, type: "scim", url: apps[s.id]!.url, token: apps[s.id]!.token, fetch: apps[s.id]!.fetch },
         ) as Target[],
@@ -75,5 +79,5 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
 
   const jobs = () => ctx.adapter.findMany<Record<string, unknown>>({ model: "scimProvisioningJob" });
   const links = () => ctx.adapter.findMany<Record<string, unknown>>({ model: "scimProvisioningLink" });
-  return { auth, ctx, db, apps, app: apps[specs[0]!.id]!, google: google as NonNullable<typeof google>, settle, user, jobs, links };
+  return { auth, ctx, db, apps, app: apps[specs[0]!.id]!, google: google as NonNullable<typeof google>, webhook: webhook as NonNullable<typeof webhook>, settle, user, jobs, links };
 }

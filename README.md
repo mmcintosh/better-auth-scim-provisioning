@@ -80,7 +80,7 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | Option | Default | |
 |---|---|---|
 | `id` | required | Stable id: letters, digits, `-`, `_`. Jobs, links and logs use it. |
-| `type` | `"scim"` | `"google-workspace"` for Google Workspace's Directory API (see [Google Workspace](#google-workspace)). |
+| `type` | `"scim"` | `"google-workspace"` for Google Workspace's Directory API (see [Google Workspace](#google-workspace)), or `"webhook"` for signed webhooks (see [Webhooks](#webhooks)). |
 | `url` | required | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
 | `token` | | Its bearer token. Or `auth`, for anything else: one of the two is required. |
 | `auth` | | `{ type: "basic", username, password }`, `{ type: "header", name, value }` (an API key), or `{ type: "oauth2", tokenUrl, clientId, clientSecret, scope?, clientAuth?, params? }` (client credentials; tokens cached and renewed before they expire). |
@@ -175,6 +175,7 @@ scimProvisioning({
 | Atlassian | `atlassian` | documented | Groups can't be renamed, so a renamed group is created anew with its members, then the old one deleted. |
 | GitHub Enterprise Managed Users | `githubEnterprise` | documented | GitHub's DELETE permanently suspends an account, so this only deactivates, and refuses `deprovision: "delete"`. |
 | Google Workspace | `type: "google-workspace"` | documented | Not SCIM: see [Google Workspace](#google-workspace). |
+| Anything else | `type: "webhook"` | | Signed webhooks to your own code or an automation platform: see [Webhooks](#webhooks). |
 
 "Verified live" means tested against the app itself. "Documented" means built from the app's documentation and tested against a model of it. Run `check` against it first (below), and tell us what you find.
 
@@ -226,6 +227,42 @@ How it maps:
 
 Adoption follows the same rules as SCIM, and an account that merely has the user's email as an *alias* is never taken over.
 
+### Webhooks
+
+For anything that doesn't speak SCIM (your own apps, or automation platforms such as Zapier, Make and n8n), a webhook target POSTs every change as a JSON event, signed with HMAC-SHA256:
+
+```ts
+{ id: "my-app", type: "webhook", url: "https://my-app.example.com/hooks/provisioning", secret: process.env.PROVISIONING_WEBHOOK_SECRET! }
+```
+
+Each event holds the full current state, so applying one twice is harmless, and `occurredAt` lets a receiver ignore an older one:
+
+| `type` | Body |
+|---|---|
+| `user.upsert` | `user`: the SCIM user (as `mapUser` makes it), with `externalId` |
+| `user.deactivate` | `user: { externalId }` |
+| `user.delete` | `user: { externalId }` (with `deprovision: "delete"`) |
+| `group.upsert` | `group`: `displayName`, `externalId`, `members` (the users' `externalId`s); with `groups`, `teamGroups` or `roleGroups` |
+| `group.delete` | `group: { externalId }` |
+
+Every event also carries `id`, `target` and `occurredAt`. Check the signature on the receiving side with the raw body:
+
+```ts
+import { verifyWebhookSignature } from "better-auth-scim-provisioning";
+
+export async function POST(request: Request) {
+  const body = await request.text();
+  const event = await verifyWebhookSignature({ body, signature: request.headers.get("x-scim-provisioning-signature"), secret: process.env.PROVISIONING_WEBHOOK_SECRET! });
+  // event.type, event.user / event.group …
+  return new Response(null, { status: 204 });
+}
+```
+
+It throws on a wrong signature, or one more than 5 minutes old, which stops a captured request being replayed.
+- **Retried:** 5xx, 429, 408, timeouts, and 401/403 ("check the target's secret").
+- **Fails the job:** any other 4xx.
+- **A 404 is a wrong URL:** it's retried, and never read as "already gone".
+
 ### Check an app first
 
 `check` asks an app what its SCIM supports: its ServiceProviderConfig, then a throwaway user taken through create, find, replace, both PATCH forms, deactivate and delete (removed at the end):
@@ -262,7 +299,6 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested
 ## Not yet
 
 - **Groups at Google Workspace targets** (Google Groups): users only for now.
-- **Other apps that don't speak SCIM**: a signed-webhook target is planned, to reach anything else.
 
 ## Development
 
