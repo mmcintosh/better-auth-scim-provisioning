@@ -166,3 +166,35 @@ Most apps grant access by group (AWS permission sets, Atlassian products, Slack 
   - a member banned earlier was correctly absent;
   - deleting the organization removed the group.
 - **Limits:** a group is sent whole, so one request carries every member's id. Very large organizations at apps with request size limits may need PATCH batches; not seen yet.
+
+## D-009: The external review before 0.1.0 (2026-10-02)
+
+An independent review of `bcc7dd1` from outside the project, briefed without our earlier findings. It ran the suite (93 tests, the adapters on Postgres 17 and MySQL 8.4, `pack:check`), read the source, and proved four findings with tests of its own. Each finding here has a regression test that failed first (`test/review/x-external.test.ts`).
+
+- **X-1 (Medium): a hand-made group could be taken over after a timed-out create, at apps that drop `externalId`.** A pending link was written before every first create, including one bound to be refused, so a pending link didn't prove "our create may have made it".
+  - Fix: before a first create, the name is looked up. A group that isn't ours is refused there, before any pending link exists.
+- **X-2 (Medium): with a custom `mapUser`, adoption of unowned accounts wasn't protected by the verified email.** The email proves who owns the address, not the userName.
+  - Fix: an unowned account is adopted only when its userName is the user's verified email. With custom userNames, hand-made accounts aren't taken over.
+- **X-3 (Medium): with `groups: true` and no `organizationId`, any user who can create an organization creates a group of any name at the app.**
+  - Fix: `groups` also takes a filter, `(organization) => boolean`, and the README's Groups section warns hosts to restrict who creates and renames organizations.
+- **X-4 (Low): the lease assumed four requests.** Since D-007 a delivery can make five (PUT, find, POST, find, PUT); a 401 retry doubles each, and OAuth adds a token request.
+  - Fix: 12 × the timeout, plus 30 s. This supersedes S1-3's "four requests" (D-002).
+- **X-5 (Low): `check --auth` crashed on a file shaped as the README read** (`{ "auth": { … } }`).
+  - Fix: both shapes are accepted, the fields are checked with a clear message, and the README shows the file.
+- **X-6 (Info): an error from the host's own code was retried every 6 hours forever** (`mapUser`, `include`, a database error).
+  - Fix: such errors fail the job at `maxAttempts`. Errors from the app still retry indefinitely (S2-4).
+- **X-7 (Info): a group's failure was logged as "user <organization id>".** Now it's logged as "group …".
+- **Docs:**
+  - the README listed two tables, not three;
+  - it said lost replies are always recovered, but at apps without `externalId` the job fails with a message;
+  - it presented adoption without the custom-userName caveat.
+
+  All three are corrected.
+- **Checked and fine by the reviewer:**
+  - the outbox (lease, versions, duplicates, backoff, `Retry-After`, the 429 wait) on Postgres and MySQL;
+  - user adoption with the default mapping, including the reuse cases and pending-link recovery;
+  - the 404 rule, ListResponse check, redirects, URL validation, filter escaping and path encoding;
+  - credentials;
+  - the hooks: delete-after runs, after-commit queueing, server-only endpoints, membership return shapes, reads don't provision;
+  - Better Auth 1.7.6's change-email flows leave no unverified window;
+  - the release and CI setup.

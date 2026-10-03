@@ -4,7 +4,7 @@
 // environment variable, or `--auth` names a JSON file with an `auth` object (basic, header,
 // oauth2): never a secret on the command line, where it would land in shell history.
 import { readFileSync } from "node:fs";
-import { checkScimTarget } from "./doctor";
+import { checkScimTarget, parseAuthFile } from "./doctor";
 
 const usage = `Usage: SCIM_TOKEN=… npx better-auth-scim-provisioning check --url <SCIM base URL> [--user-name <email>]
        npx better-auth-scim-provisioning check --url <SCIM base URL> --auth <auth.json>
@@ -20,7 +20,13 @@ if (command !== "check" || !flags.url) {
   console.log(usage);
   process.exit(command === "check" || command === undefined ? 1 : 0);
 }
-const auth = flags.auth ? JSON.parse(readFileSync(flags.auth, "utf8")) : undefined;
+let auth: ReturnType<typeof parseAuthFile> | undefined;
+try {
+  auth = flags.auth ? parseAuthFile(readFileSync(flags.auth, "utf8")) : undefined;
+} catch (e) {
+  console.error((e as Error).message);
+  process.exit(1);
+}
 if (!auth && !process.env.SCIM_TOKEN) {
   console.error("Set SCIM_TOKEN, or pass --auth <file.json>.");
   process.exit(1);

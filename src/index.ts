@@ -58,7 +58,7 @@ const optionsSchema = z.object({
         mapUser: z.function().optional(),
         deprovision: z.enum(["deactivate", "delete"]).optional(),
         update: z.enum(["put", "patch"]).optional(),
-        groups: z.boolean().optional(),
+        groups: z.union([z.boolean(), z.function()]).optional(),
         groupName: z.function().optional(),
         timeoutMs: z.number().int().min(100).max(120_000).optional(),
         fetch: z.function().optional(),
