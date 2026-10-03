@@ -56,6 +56,20 @@ export interface ScimTarget {
   groups?: boolean | ((organization: { id: string; name: string; slug: string | null }) => boolean | Promise<boolean>) | undefined;
   /** The group's displayName; default the organization's name. */
   groupName?: ((organization: { id: string; name: string; slug: string | null }) => string) | undefined;
+  /**
+   * Teams (the organization plugin's `teams`) as groups, their provisioned members as the group's
+   * members: every team of an organization in scope, or those a filter accepts.
+   */
+  teamGroups?: boolean | ((team: { id: string; name: string; organizationId: string }, organization: { id: string; name: string; slug: string | null }) => boolean | Promise<boolean>) | undefined;
+  /** A team group's displayName; default "<organization> / <team>". */
+  teamGroupName?: ((team: { id: string; name: string; organizationId: string }, organization: { id: string; name: string; slug: string | null }) => string) | undefined;
+  /**
+   * Roles in an organization as groups: every role its members hold (`true`), or these roles
+   * (`["admin"]`). A member with several roles is in each role's group.
+   */
+  roleGroups?: boolean | string[] | undefined;
+  /** A role group's displayName; default "<organization> / <role>". */
+  roleGroupName?: ((role: string, organization: { id: string; name: string; slug: string | null }) => string) | undefined;
   /** What leaving means at the app: `deactivate` (active=false, the default) or `delete`. */
   deprovision?: "deactivate" | "delete" | undefined;
   /** Per request; default 10 seconds. */

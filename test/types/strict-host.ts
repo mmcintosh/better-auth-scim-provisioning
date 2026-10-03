@@ -51,3 +51,12 @@ export const checked = () => checkScimTarget({ url: target.url, token, userName:
 declare const maybeGroups: boolean | undefined;
 export const groupTarget: ScimTarget = { id: "aws-groups", url: target.url, token, groups: maybeGroups, groupName: (org) => `team-${org.slug ?? org.id}` };
 export const filteredGroups: ScimTarget = { id: "teams", url: target.url, token, groups: async (org) => org.slug?.startsWith("team-") === true };
+export const teamAndRoleGroups: ScimTarget = {
+  id: "teams-and-roles",
+  url: target.url,
+  token,
+  teamGroups: (team, org) => team.organizationId === org.id,
+  teamGroupName: (team, org) => `${org.name}/${team.name}`,
+  roleGroups: ["admin"],
+  roleGroupName: (role, org) => `${org.slug ?? org.id}-${role}`,
+};

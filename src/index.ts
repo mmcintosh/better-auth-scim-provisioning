@@ -60,6 +60,10 @@ const optionsSchema = z.object({
         update: z.enum(["put", "patch"]).optional(),
         groups: z.union([z.boolean(), z.function()]).optional(),
         groupName: z.function().optional(),
+        teamGroups: z.union([z.boolean(), z.function()]).optional(),
+        teamGroupName: z.function().optional(),
+        roleGroups: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
+        roleGroupName: z.function().optional(),
         timeoutMs: z.number().int().min(100).max(120_000).optional(),
         fetch: z.function().optional(),
       }).refine((t) => (t.token === undefined) !== (t.auth === undefined), "give either token or auth"),
@@ -85,6 +89,9 @@ const MEMBERSHIP_WRITES = new Set([
 
 /** Endpoints that change an organization itself (its group's name, or its existence). */
 const ORGANIZATION_WRITES = new Set(["/organization/create", "/organization/update", "/organization/delete"]);
+
+/** Endpoints that change a team or its members. */
+const TEAM_WRITES = new Set(["/organization/create-team", "/organization/update-team", "/organization/remove-team", "/organization/add-team-member", "/organization/remove-team-member"]);
 
 /** A member row (organization plugin) in an endpoint's result: `{ member }`, or the member itself. */
 function membersIn(returned: unknown): { userId: string; organizationId: string }[] {
@@ -115,19 +122,30 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       background(
         (async () => {
           await b.runFor(targetId, userId);
-          if (target?.groups) for (const org of await b.groupsOf(target, userId)) await b.runFor(targetId, org, "group");
+          if (target && b.hasGroups(target)) for (const ref of await b.groupsOf(target, userId)) await b.runFor(targetId, ref.id, ref.kind);
         })(),
       );
     }
   }
 
-  /** Queue an organization's group at every target that has it, and deliver it in the background. */
+  /** Queue an organization's groups (its own, its teams', its roles') at every target, and deliver them in the background. */
   async function groupChanged(organizationId: string) {
     if (!box) return;
     const b = box;
-    for (const t of options.targets.filter((x) => x.groups && (!x.organizationId || x.organizationId === organizationId))) {
-      await b.enqueue(t.id, organizationId, { kind: "group" });
-      background(b.runFor(t.id, organizationId, "group"));
+    for (const t of options.targets.filter((x) => b.hasGroups(x))) {
+      const refs = await b.groupsForOrganization(t, organizationId);
+      for (const ref of refs) await b.enqueue(t.id, ref.id, { kind: ref.kind });
+      background((async () => { for (const ref of refs) await b.runFor(t.id, ref.id, ref.kind); })());
+    }
+  }
+
+  /** Queue a team's group at every target with team groups (a removed team's group is removed). */
+  async function teamChanged(teamId: string) {
+    if (!box) return;
+    const b = box;
+    for (const t of options.targets.filter((x) => x.teamGroups)) {
+      await b.enqueue(t.id, teamId, { kind: "team" });
+      background(b.runFor(t.id, teamId, "team"));
     }
   }
 
@@ -170,6 +188,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           organizationId: { type: "string", required: true },
           remoteId: { type: "string", required: true, index: true },
           displayName: { type: "string", required: true },
+          kind: { type: "string", required: false },
+          sourceId: { type: "string", required: false },
           syncedAt: { type: "date", required: true },
         },
       },
@@ -205,7 +225,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           // returned: a member row names the user whose membership changed. Queue them for the
           // targets of that organization.
           matcher: (ctx) =>
-            options.targets.some((t) => t.organizationId || t.groups) && (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path) || ORGANIZATION_WRITES.has(ctx.path)),
+            options.targets.some((t) => t.organizationId || t.groups || t.teamGroups || t.roleGroups) &&
+            (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path) || ORGANIZATION_WRITES.has(ctx.path) || TEAM_WRITES.has(ctx.path)),
           handler: createAuthMiddleware(async (ctx) => {
             const returned = (ctx.context as { returned?: unknown }).returned;
             if (!returned || returned instanceof Error || !box) return;
@@ -221,9 +242,25 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             for (const m of members) {
               await queue(m.userId, options.targets.filter((t) => t.organizationId === m.organizationId).map((t) => t.id));
             }
-            // Groups: the organization whose membership, name or existence changed.
-            if (options.targets.some((t) => t.groups)) {
+            // Groups: the organization whose membership, roles, name or existence changed, and the
+            // team that changed.
+            if (options.targets.some((t) => t.groups || t.teamGroups || t.roleGroups)) {
+              const teamIds = new Set<string>();
+              if (ctx.path && TEAM_WRITES.has(ctx.path)) {
+                const r = returned as { id?: unknown; teamId?: unknown; organizationId?: unknown } | null;
+                const body = ctx.body as { teamId?: unknown } | undefined;
+                for (const id of [ctx.path.endsWith("-team") ? r?.id : undefined, r?.teamId, body?.teamId]) if (typeof id === "string") teamIds.add(id);
+              }
+              for (const teamId of teamIds) {
+                try {
+                  await teamChanged(teamId);
+                } catch (e) {
+                  ctx.context.logger.error(`[scim] could not queue the group of team ${teamId}`, e);
+                }
+              }
               const orgIds = new Set(members.map((m) => m.organizationId));
+              const teamOrg = (returned as { organizationId?: unknown } | null)?.organizationId;
+              if (ctx.path && TEAM_WRITES.has(ctx.path) && typeof teamOrg === "string") orgIds.add(teamOrg);
               const own = (returned as { id?: unknown } | null)?.id;
               if (ctx.path === "/organization/create" || ctx.path === "/organization/update") if (typeof own === "string") orgIds.add(own);
               const bodyOrg = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
@@ -346,17 +383,17 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           }
           // Groups: every organization at targets with groups, and every linked group whose
           // organization is gone (removed at the app).
-          for (const t of options.targets.filter((x) => targetIds.includes(x.id) && x.groups)) {
-            const orgIds = new Set<string>();
+          for (const t of options.targets.filter((x) => targetIds.includes(x.id) && b.hasGroups(x))) {
+            const refs = new Map<string, { kind: "group" | "team" | "role"; id: string }>();
             for (let after: string | null = null; ; ) {
               const orgs = (await ctx.context.adapter.findMany({ model: "organization", where: after === null ? [] : [{ field: "id", value: after, operator: "gt" }], limit: 500, sortBy: { field: "id", direction: "asc" } })) as { id: string }[];
-              for (const o of orgs) if (!t.organizationId || t.organizationId === o.id) orgIds.add(o.id);
+              for (const o of orgs) for (const ref of await b.groupsForOrganization(t, o.id)) refs.set(`${ref.kind}:${ref.id}`, ref);
               if (orgs.length < 500) break;
               after = (orgs[orgs.length - 1] as { id: string }).id;
             }
-            for (const orgId of await b.linkedGroups(t.id)) orgIds.add(orgId);
-            for (const orgId of orgIds) {
-              await b.enqueue(t.id, orgId, { kind: "group", now: true });
+            for (const ref of await b.linkedGroups(t.id)) refs.set(`${ref.kind}:${ref.id}`, ref);
+            for (const ref of refs.values()) {
+              await b.enqueue(t.id, ref.id, { kind: ref.kind, now: true });
               queued++;
             }
           }

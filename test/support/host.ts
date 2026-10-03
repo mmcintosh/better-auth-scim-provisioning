@@ -39,7 +39,8 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
     },
     plugins: [
       admin(),
-      organization(),
+      // Teams on, so team groups can be tested; nothing else changes without teamGroups.
+      organization({ teams: { enabled: true } }),
       scimProvisioning({
         targets: specs.map(({ requireNames: _, keepsExternalId: __, patch: ___, ...s }) => ({ ...s, url: apps[s.id]!.url, token: apps[s.id]!.token, fetch: apps[s.id]!.fetch })),
         ...(o.retry ? { retry: o.retry } : {}),
