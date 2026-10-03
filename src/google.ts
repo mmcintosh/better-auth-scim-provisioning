@@ -12,6 +12,7 @@ const SCOPE = "https://www.googleapis.com/auth/admin.directory.user";
 const OURS = { type: "custom", customType: "better-auth" } as const;
 
 interface GoogleUser {
+  suspended?: boolean;
   id?: string;
   primaryEmail?: string;
   externalIds?: { value?: string; type?: string; customType?: string }[];
@@ -77,7 +78,6 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
       // Google requires both names.
       name: { givenName: user.name?.givenName || first || user.userName, familyName: user.name?.familyName || rest.join(" ") || first || user.userName },
       suspended: !user.active,
-      ...(google?.orgUnitPath ? { orgUnitPath: google.orgUnitPath } : {}),
     };
   }
 
@@ -102,7 +102,7 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
         const u = await request("GET", path(userName));
         // Google also answers for an alias, which is someone else's account: only an exact primary email is a match.
         if (!u?.id || u.primaryEmail?.toLowerCase() !== userName.toLowerCase()) return null;
-        return { id: u.id, externalId: oursIn(u) };
+        return { id: u.id, externalId: oursIn(u), active: u.suspended !== true };
       } catch (e) {
         if (e instanceof ScimError && e.status === 404 && e.retryable === false) return null;
         throw e;
@@ -111,7 +111,20 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     async create(user: ScimUser) {
       // Required by Google; users sign in through your identity provider, so it's never used.
       const password = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24))));
-      const created = await request("POST", "/users", { ...toGoogle(user), password, ...(user.externalId ? { externalIds: [{ ...OURS, value: user.externalId }] } : {}) });
+      // orgUnitPath only here: where new users go, never moving a user an admin placed elsewhere.
+      let created: GoogleUser | null;
+      try {
+        created = await request("POST", "/users", { ...toGoogle(user), password, ...(google?.orgUnitPath ? { orgUnitPath: google.orgUnitPath } : {}), ...(user.externalId ? { externalIds: [{ ...OURS, value: user.externalId }] } : {}) });
+      } catch (e) {
+        // Taken as another account's alias: that account is someone else's, and no retry changes it.
+        // Not reported as a 409, which would send the outbox looking for an account to adopt.
+        if (e instanceof ScimError && e.status === 409) {
+          const holder = await request("GET", path(user.userName)).catch(() => null);
+          if (holder?.primaryEmail && holder.primaryEmail.toLowerCase() !== user.userName.toLowerCase())
+            throw new ScimError(`POST /users: ${user.userName} is an alias of another Workspace account`, null, false);
+        }
+        throw e;
+      }
       if (!created?.id) throw new ScimError("POST /users: the response has no id", null, false);
       return created.id;
     },

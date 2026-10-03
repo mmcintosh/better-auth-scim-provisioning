@@ -130,7 +130,7 @@ The group's members are the organization's members who are provisioned and activ
 - `teamGroups: true`: each team (the organization plugin's `teams`) is a group of its provisioned members, named "Acme / Red". A function chooses which: `teamGroups: (team, org) => team.name.startsWith("eng-")`. `teamGroupName: (team, org) => string` names them.
 - `roleGroups: ["admin"]`: the members holding that role in each organization are a group, named "Acme / admin"; `roleGroups: true` makes one for every role held. A member with several roles is in each role's group. `roleGroupName: (role, org) => string` names them.
 
-All three kinds can be used together. Any change in an organization (members, roles, teams, the organization itself) updates its groups; a removed team, or a role no one holds any more, has its group removed at the app.
+All three kinds can be used together. Any change in an organization (members, roles, teams, the organization itself) updates its groups; a removed team, or (with `roleGroups: true`) a role no one holds any more, has its group removed at the app. A role named in a `roleGroups` list keeps its group even while no one holds it.
 
 - **When it changes:**
   - members join or leave (add, remove, accepting an invitation, leaving), change role, or join or leave a team;
@@ -171,8 +171,8 @@ scimProvisioning({
 |---|---|---|---|
 | Cloudflare Access | `cloudflareAccess` | verified live | Nothing differs. Turn on **seat deprovisioning** in the identity provider's SCIM settings, or deactivated users keep their seats. |
 | AWS IAM Identity Center | `awsIamIdentityCenter` | documented | Groups have no PUT and list no members, so they're updated by a diff of members, at most 100 per request. |
-| Slack | `slack` | documented | userNames must be lowercase, at most 21 characters, with only `.` `_` `-`: taken from the email's local part (`slackUserName`). Deleting only deactivates. |
-| Atlassian | `atlassian` | documented | Groups can't be renamed, so a renamed group is created anew with its members, then the old one deleted. |
+| Slack | `slack` | documented | userNames must be lowercase, at most 21 characters, with only `.` `_` `-`: taken from the email's local part (`slackUserName`). Deleting only deactivates. Since the userName isn't the email, Slack accounts made by hand are never adopted: give them our `externalId`, or remove them, first. |
+| Atlassian | `atlassian` | documented | Groups can't be renamed, so a renamed group is created anew with its members, then the old one deleted (retried until it is). If a group with the new name exists and isn't ours, the job fails. |
 | GitHub Enterprise Managed Users | `githubEnterprise` | documented | GitHub's DELETE permanently suspends an account, so this only deactivates, and refuses `deprovision: "delete"`. |
 | Google Workspace | `type: "google-workspace"` | documented | Not SCIM: see [Google Workspace](#google-workspace). |
 | Anything else | `type: "webhook"` | | Signed webhooks to your own code or an automation platform: see [Webhooks](#webhooks). |
@@ -207,7 +207,7 @@ Google doesn't accept SCIM, so Workspace is its own kind of target, through the 
     clientEmail: process.env.GOOGLE_CLIENT_EMAIL!, // the service account (client_email)
     privateKey: process.env.GOOGLE_PRIVATE_KEY!,   // its key (private_key), PEM
     adminEmail: "provisioning-admin@your-domain.com", // the Workspace admin it acts as
-    orgUnitPath: "/Provisioned",                   // optional: where new users go
+    orgUnitPath: "/Provisioned",                   // optional: where new users go (existing users are never moved)
   },
 }
 ```
@@ -225,7 +225,7 @@ How it maps:
 - our user id is a custom entry in `externalIds`, and any other external ids an admin set are kept;
 - Google requires a password when a user is created, so a random one is set. Users sign in through your identity provider (with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) as Workspace's SAML identity provider), so it's never used.
 
-Adoption follows the same rules as SCIM, and an account that merely has the user's email as an *alias* is never taken over.
+Adoption follows the same rules as SCIM, and an account that merely has the user's email as an *alias* is never taken over. Nor is a suspended account made by hand: taking it over would unsuspend it, so the job fails until an admin unsuspends it (or gives it our id). Right after a create, Google sometimes says an account exists before it can show it; that's retried.
 
 ### Webhooks
 
@@ -258,7 +258,9 @@ export async function POST(request: Request) {
 }
 ```
 
-It throws on a wrong signature, or one more than 5 minutes old, which stops a captured request being replayed.
+It throws on a wrong signature, or one more than 5 minutes old, which stops a captured request being replayed later. Within those 5 minutes the same request can arrive again (a retry, or a replay), so make applying an event idempotent: remember the event `id`s you've applied for a few minutes, and drop an event whose `occurredAt` is older than the last one you applied for that user or group.
+
+A user's `externalId` is their id at the receiver. If a `mapUser` changes it for users already sent, the receiver sees new users, and the old ones are never deactivated: keep it stable.
 - **Retried:** 5xx, 429, 408, timeouts, and 401/403 ("check the target's secret").
 - **Fails the job:** any other 4xx.
 - **A 404 is a wrong URL:** it's retried, and never read as "already gone".

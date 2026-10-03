@@ -215,8 +215,6 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           organizationId: { type: "string", required: true },
           remoteId: { type: "string", required: true, index: true },
           displayName: { type: "string", required: true },
-          kind: { type: "string", required: false },
-          sourceId: { type: "string", required: false },
           syncedAt: { type: "date", required: true },
         },
       },
