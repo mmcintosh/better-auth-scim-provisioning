@@ -580,9 +580,31 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
     const { organizationId, displayName } = now;
     const group = { schemas: [SCIM_GROUP_SCHEMA], externalId, displayName, members: await remoteIdsOf(target, await now.userIds()) };
+    const compat = target.compat ?? {};
+    const updateGroup = (id: string) =>
+      compat.groupUpdate === "patch" ? client.patchGroup(id, group, { membersFrom: compat.groupMembers, batch: compat.maxGroupMembersPerRequest }) : client.replaceGroup(id, group);
+    const createGroup = () => (compat.maxGroupMembersPerRequest ? client.createGroupInBatches(group, compat.maxGroupMembersPerRequest) : client.createGroup(group));
+    // An app that can't rename groups: a new group with the new name and the members, then the
+    // old one deleted (the order Atlassian documents, so access never lapses).
+    if (link?.remoteId && link.displayName !== displayName && compat.groupRename === "recreate") {
+      let created: string;
+      try {
+        created = await createGroup();
+      } catch (e) {
+        if (e instanceof ScimError && e.status === 409) throw new ScimError(`group ${displayName}: renaming means creating it anew, and a group with this name already exists at the app`, 409, false);
+        throw e;
+      }
+      try {
+        await client.removeGroup(link.remoteId);
+      } catch (e) {
+        if (!notFound(e)) throw e;
+      }
+      await saveGroupLink(target, ref, organizationId, { remoteId: created, displayName });
+      return null;
+    }
     if (link?.remoteId) {
       try {
-        await client.replaceGroup(link.remoteId, group);
+        await updateGroup(link.remoteId);
         await saveGroupLink(target, ref, organizationId, { remoteId: link.remoteId, displayName });
         return null;
       } catch (e) {
@@ -590,7 +612,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         // Removed at the app since, or a wrong URL: asking the list tells which.
         const found = await client.findGroupByName(link.displayName);
         if (found && found.externalId === externalId) {
-          await client.replaceGroup(found.id, group);
+          await updateGroup(found.id);
           await saveGroupLink(target, ref, organizationId, { remoteId: found.id, displayName });
           return null;
         }
@@ -610,7 +632,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const existing = await client.findGroupByName(displayName);
       if (existing) {
         if (existing.externalId !== externalId || (await otherOwner(existing.id))) return refuse();
-        await client.replaceGroup(existing.id, group);
+        await updateGroup(existing.id);
         await saveGroupLink(target, ref, organizationId, { remoteId: existing.id, displayName });
         return null;
       }
@@ -619,7 +641,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     await saveGroupLink(target, ref, organizationId, { remoteId: "", displayName });
     let remoteId: string;
     try {
-      remoteId = await client.createGroup(group);
+      remoteId = await createGroup();
     } catch (e) {
       if (!(e instanceof ScimError && e.status === 409)) throw e;
       // A group with this name exists. Ours (our externalId, or no externalId after our own create
@@ -628,7 +650,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const found = await client.findGroupByName(displayName);
       const ours = found !== null && !(await otherOwner(found.id)) && (found.externalId === externalId || (found.externalId === null && pendingBefore));
       if (!found || !ours) return refuse();
-      await client.replaceGroup(found.id, group);
+      await updateGroup(found.id);
       remoteId = found.id;
     }
     await saveGroupLink(target, ref, organizationId, { remoteId, displayName });

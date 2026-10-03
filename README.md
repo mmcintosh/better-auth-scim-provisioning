@@ -95,6 +95,7 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `teamGroupName` | "Org / Team" | `(team, organization) => string`. |
 | `roleGroups` | `false` | Roles as groups: `true` (every role held) or a list, `["admin"]`. |
 | `roleGroupName` | "Org / role" | `(role, organization) => string`. |
+| `compat` | | How the app differs from the standard, usually set by a profile (see [Apps](#apps)). |
 | `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
 | `timeoutMs` | `10000` | Per request. |
 
@@ -156,16 +157,42 @@ Most apps grant access by group: assign the group to the app or role there (AWS 
 
 ## Apps
 
-- **Cloudflare Access** (verified live). Zero Trust → Integrations → Identity providers → your identity provider → turn on **Enable SCIM** (and **Enable user deprovisioning**), **save**, then copy the SCIM endpoint and secret. The secret only works once the provider is saved: if you copied it before saving, regenerate it, copy it, and save. With SCIM, a user exists at Cloudflare before their first sign-in, and that sign-in lands on the same account. Verified live:
-  - a ban revoked the user's live Access session within 35 seconds;
-  - a timed ban was lifted by the scheduled run within a minute of ending.
+Some apps differ from the SCIM standard. A **profile** sets a target up for one: it fills in what that app's documentation requires, and anything you set on the target yourself still wins.
 
-  Two things to know:
-  - turn on **seat deprovisioning** too, or a deactivated user keeps their seat;
+```ts
+import { awsIamIdentityCenter, scimProvisioning } from "better-auth-scim-provisioning";
+
+scimProvisioning({
+  targets: [awsIamIdentityCenter({ id: "aws", url: process.env.AWS_SCIM_URL!, token: process.env.AWS_SCIM_TOKEN!, groups: true })],
+});
+```
+
+| App | Profile | Status | What it handles |
+|---|---|---|---|
+| Cloudflare Access | `cloudflareAccess` | verified live | Nothing differs. Turn on **seat deprovisioning** in the identity provider's SCIM settings, or deactivated users keep their seats. |
+| AWS IAM Identity Center | `awsIamIdentityCenter` | documented | Groups have no PUT and list no members, so they're updated by a diff of members, at most 100 per request. |
+| Slack | `slack` | documented | userNames must be lowercase, at most 21 characters, with only `.` `_` `-`: taken from the email's local part (`slackUserName`). Deleting only deactivates. |
+| Atlassian | `atlassian` | documented | Groups can't be renamed, so a renamed group is created anew with its members, then the old one deleted. |
+| GitHub Enterprise Managed Users | `githubEnterprise` | documented | GitHub's DELETE permanently suspends an account, so this only deactivates, and refuses `deprovision: "delete"`. |
+| Google Workspace | `type: "google-workspace"` | documented | Not SCIM: see [Google Workspace](#google-workspace). |
+
+"Verified live" means tested against the app itself. "Documented" means built from the app's documentation and tested against a model of it. Run `check` against it first (below), and tell us what you find.
+
+- **Cloudflare Access.** Zero Trust → Integrations → Identity providers → your identity provider → turn on **Enable SCIM** and **Enable user deprovisioning**, **save**, then copy the SCIM endpoint and secret.
+  - The secret only works once the provider is saved: if you copied it before saving, regenerate it, copy it, and save.
+  - With SCIM, a user exists at Cloudflare before their first sign-in, and that sign-in lands on the same account.
+  - Verified live: a ban revoked the user's Access session within 35 seconds, and a timed ban was lifted by the scheduled run within a minute of ending.
   - Cloudflare's Users list shows the name from the last sign-in, not the latest SCIM update.
-- **AWS IAM Identity Center.** IAM Identity Center → Settings → Identity source → **Automatic provisioning**. Its tokens last a year. Users need a given name, a family name and a display name (the defaults always send them), and your identity provider's SAML NameID must be the same value as the SCIM `userName` (the email, by default).
-- **Google Workspace** (Directory API; tested against a model of it, not yet live). See [below](#google-workspace).
-- **Anything else that speaks SCIM 2.0**, with a bearer token, Basic auth, an API-key header or OAuth 2.0 client credentials: Auth0 (enterprise connections), Okta, Salesforce, your own apps.
+- **AWS IAM Identity Center.** IAM Identity Center → Settings → Identity source → **Automatic provisioning**.
+  - Its tokens last a year.
+  - Your identity provider's SAML NameID must be the same value as the SCIM `userName` (the email, by default).
+  - Users need a given name, a family name, a display name and a single primary email, which the default mapping always sends.
+- **GitHub Enterprise Managed Users.**
+  - The token is a classic personal access token of the setup user, with `scim:enterprise`.
+  - Only one system may provision the enterprise.
+  - GitHub asks for at most 1,000 users an hour, so keep `concurrency` low for a first reconcile.
+- **Anything else that speaks SCIM 2.0**, with a bearer token, Basic auth, an API-key header or OAuth 2.0 client credentials (Okta, Salesforce, Zoom, your own apps).
+  - If an app differs in a way a profile would cover, `compat` sets the same behaviours by hand: `groupUpdate: "patch"`, `groupMembers: "users-filter"`, `maxGroupMembersPerRequest`, `groupRename: "recreate"`.
 
 ### Google Workspace
 

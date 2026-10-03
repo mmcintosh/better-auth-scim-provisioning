@@ -8,6 +8,7 @@ import { type Adapter, GROUP_LINK_MODEL, IN_BATCH, JOB_MODEL, LINK_MODEL, outbox
 import type { ScimProvisioningOptions } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
+export { atlassian, awsIamIdentityCenter, cloudflareAccess, githubEnterprise, profiles, slack, slackUserName } from "./profiles";
 export { SCIM_USER_SCHEMA, ScimError, type ScimUser } from "./scim-client";
 export type { ScimAuth } from "./credentials";
 export { type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
@@ -68,6 +69,14 @@ const optionsSchema = z.object({
         mapUser: z.function().optional(),
         deprovision: z.enum(["deactivate", "delete"]).optional(),
         update: z.enum(["put", "patch"]).optional(),
+        compat: z
+          .object({
+            groupUpdate: z.enum(["put", "patch"]).optional(),
+            groupMembers: z.enum(["group", "users-filter"]).optional(),
+            maxGroupMembersPerRequest: z.number().int().min(1).max(100_000).optional(),
+            groupRename: z.enum(["rename", "recreate"]).optional(),
+          })
+          .optional(),
         groups: z.union([z.boolean(), z.function()]).optional(),
         groupName: z.function().optional(),
         teamGroups: z.union([z.boolean(), z.function()]).optional(),

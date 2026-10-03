@@ -62,6 +62,21 @@ export interface TargetOptions {
   roleGroups?: boolean | string[] | undefined;
   /** A role group's displayName; default "<organization> / <role>". */
   roleGroupName?: ((role: string, organization: { id: string; name: string; slug: string | null }) => string) | undefined;
+  /**
+   * How this app differs from the SCIM standard, for apps that need it (the profiles set these):
+   * `groupUpdate: "patch"` updates groups by a diff of members, for apps without PUT on groups;
+   * `groupMembers: "users-filter"` reads a group's members with `Users?filter=groups.value eq`,
+   * for apps whose groups don't list them; `maxGroupMembersPerRequest` batches member changes;
+   * `groupRename: "recreate"` replaces a renamed group with a new one, for apps that can't rename.
+   */
+  compat?:
+    | {
+        groupUpdate?: "put" | "patch" | undefined;
+        groupMembers?: "group" | "users-filter" | undefined;
+        maxGroupMembersPerRequest?: number | undefined;
+        groupRename?: "rename" | "recreate" | undefined;
+      }
+    | undefined;
   /** What leaving means at the app: `deactivate` (active=false, the default) or `delete`. */
   deprovision?: "deactivate" | "delete" | undefined;
   /** Per request; default 10 seconds. */

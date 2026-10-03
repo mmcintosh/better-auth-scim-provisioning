@@ -75,6 +75,14 @@ export function trimSlashes(s: string): string {
 /** A SCIM filter string literal: quotes and backslashes escaped (RFC 7644 §3.4.2.2, JSON rules). */
 export const scimString = (value: string) => JSON.stringify(value);
 
+/** `items` in batches of at most `size` (one batch when no size). */
+const batches = <T>(items: T[], size?: number): T[][] => {
+  if (!size || items.length <= size) return items.length ? [items] : [];
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+};
+
 export function scimClient(endpoint: ScimEndpoint) {
   const base = trimSlashes(endpoint.url);
   const doFetch = endpoint.fetch ?? fetch;
@@ -132,6 +140,26 @@ export function scimClient(endpoint: ScimEndpoint) {
       retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
       typeof scimType === "string" ? scimType : undefined,
     );
+  }
+
+  /** A group's current member ids: from the group itself, or by listing users in it (a cursor at a time). */
+  async function groupMemberIds(id: string, from: "group" | "users-filter"): Promise<string[]> {
+    if (from === "group") {
+      const { json } = await request("GET", `/Groups/${encodeURIComponent(id)}`);
+      const members = (json as { members?: { value?: unknown }[] } | null)?.members;
+      return Array.isArray(members) ? members.map((m) => m.value).filter((v): v is string => typeof v === "string") : [];
+    }
+    const ids: string[] = [];
+    const filter = encodeURIComponent(`groups.value eq ${scimString(id)}`);
+    for (let cursor = "", pages = 0; pages < 10_000; pages++) {
+      const { json } = await request("GET", `/Users?filter=${filter}&cursor=${encodeURIComponent(cursor)}`);
+      const list = json as { Resources?: { id?: unknown }[]; nextCursor?: unknown } | null;
+      if (!list || !Array.isArray(list.Resources)) throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, true);
+      for (const r of list.Resources) if (typeof r.id === "string") ids.push(r.id);
+      if (typeof list.nextCursor !== "string" || !list.nextCursor) break;
+      cursor = list.nextCursor;
+    }
+    return ids;
   }
 
   const idOf = (json: unknown, what: string) => {
@@ -193,6 +221,34 @@ export function scimClient(endpoint: ScimEndpoint) {
     /** A 404 is left to the caller. */
     async removeGroup(id: string): Promise<void> {
       await request("DELETE", `/Groups/${encodeURIComponent(id)}`);
+    },
+    /**
+     * Update a group by PATCH, for apps without PUT on groups: its name and externalId, then the
+     * members that differ, added and removed in batches. The current members come from the group,
+     * or from `Users?filter=groups.value eq` for apps whose groups don't list them.
+     */
+    async patchGroup(id: string, group: ScimGroup, o: { membersFrom?: "group" | "users-filter" | undefined; batch?: number | undefined } = {}): Promise<void> {
+      const path = `/Groups/${encodeURIComponent(id)}`;
+      await request("PATCH", path, {
+        schemas: [PATCH_OP_SCHEMA],
+        Operations: [{ op: "replace", path: "displayName", value: group.displayName }, ...(group.externalId ? [{ op: "replace", path: "externalId", value: group.externalId }] : [])],
+      });
+      const current = new Set(await groupMemberIds(id, o.membersFrom ?? "group"));
+      const wanted = new Set(group.members.map((m) => m.value));
+      for (const [op, ids] of [["add", [...wanted].filter((m) => !current.has(m))], ["remove", [...current].filter((m) => !wanted.has(m))]] as const) {
+        for (const batch of batches(ids, o.batch)) {
+          await request("PATCH", path, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op, path: "members", value: batch.map((value) => ({ value })) }] });
+        }
+      }
+    },
+    /** Create a group with at most `batch` members, then add the rest. */
+    async createGroupInBatches(group: ScimGroup, batch?: number): Promise<string> {
+      const [first = [], ...rest] = batches(group.members.map((m) => m.value), batch);
+      const id = idOf((await request("POST", "/Groups", { ...group, members: first.map((value) => ({ value })) })).json, "POST /Groups");
+      for (const more of rest) {
+        await request("PATCH", `/Groups/${encodeURIComponent(id)}`, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "add", path: "members", value: more.map((value) => ({ value })) }] });
+      }
+      return id;
     },
   };
 }
