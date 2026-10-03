@@ -15,6 +15,14 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 ### Fixed
 
 - A group job's lease now lasts long enough for a large group's batched requests, so a slow delivery isn't taken over and sent twice.
+- A deleted user is removed from their groups at the app. SQL databases delete the user's memberships with them, so their groups weren't updated.
+- A redirect or a 408 from a SCIM app (or Google) is retried instead of failing the job, so a ban answered by a maintenance page still reaches the app. Redirects are still never followed.
+- A paged reconcile (`limit`) now pages the groups too. Before, it did all of them in its last call, which could run past the limits of a Workers invocation.
+- A create whose reply was lost, followed by a rename before the retry, no longer leaves a second account (or group) at the app: the first is found under its old name and renamed.
+- A worker with an old list of due jobs no longer sends a job another worker has just put off (a 429's `Retry-After`, a backoff).
+- `checkScimTarget` and the `check` CLI refuse plain-http URLs, as the plugin does, instead of sending the token over them.
+- `Retry-After` is honoured at every kind of target, not only SCIM.
+- A warning is logged when an organization, user or team has more rows than are read at once (1,000), instead of skipping the rest's groups silently.
 
 ## [0.1.0] - 2026-10-02
 

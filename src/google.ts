@@ -3,7 +3,7 @@
 // remove), so the outbox treats both alike. Google doesn't speak SCIM: users are `primaryEmail`,
 // `name`, `suspended`, and our id is a custom entry in `externalIds`. Users only, for now.
 import { credentials } from "./credentials";
-import { ScimError, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
+import { retryAfterMs, ScimError, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
 import type { Target } from "./types";
 
 export const GOOGLE_DIRECTORY_URL = "https://admin.googleapis.com/admin/directory/v1";
@@ -52,18 +52,19 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     } catch {}
     if (res.ok) return json;
     if (res.status === 401 && !retried && creds.rejected()) return request(method, path, body, true);
-    if (res.status >= 300 && res.status < 400) throw new ScimError(`${method} ${path}: redirected (${res.status}); check the target's url`, res.status, false);
+    // Retried: a passing redirect (maintenance) clears by itself, and a wrong URL is the host's to fix.
+    if (res.status >= 300 && res.status < 400) throw new ScimError(`${method} ${path}: redirected (${res.status}); check the target's url`, res.status, true, retryAfterMs(res.headers.get("retry-after")));
     const google404 = res.status === 404 && typeof json.error?.code === "number";
     // Not Google's own "not found" (a wrong URL answers 404 for everything): the host's to fix.
     const misplaced = res.status === 404 && !google404;
     const auth = res.status === 401 || res.status === 403;
-    const retryable = res.status === 429 || res.status >= 500 || auth || misplaced;
+    const retryable = res.status === 408 || res.status === 429 || res.status >= 500 || auth || misplaced;
     const message = typeof json.error?.message === "string" ? ` ${json.error.message.slice(0, 300)}` : "";
     throw new ScimError(
       `${method} ${path}: ${res.status}${auth ? " (check the service account, its domain-wide delegation and the admin)" : misplaced ? " (check the target's url)" : ""}${message}`,
       res.status,
       retryable,
-      undefined,
+      retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
     );
   }
 

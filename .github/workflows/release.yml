@@ -1,4 +1,5 @@
-# Release: the full test suite, then the exact tarball that was tested is published to npm with
+# Release: the full test suite (SQLite; the tag must be on main, where CI also ran PostgreSQL, MySQL
+# and MongoDB), then a tarball built from that same commit is published to npm with
 # provenance (a signed statement, from GitHub's OIDC token, of which commit and workflow built it)
 # and attached to a GitHub release with its CycloneDX SBOM.
 #

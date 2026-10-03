@@ -36,6 +36,7 @@ describe("target URLs", () => {
     const e = await client.create({ schemas: [], userName: "a@example.com", active: true }).catch((x: unknown) => x);
     expect(redirect).toBe("manual");
     expect(e).toBeInstanceOf(ScimError);
-    expect(e).toMatchObject({ status: 307, retryable: false, message: expect.stringContaining("elsewhere.example") });
+    // Not followed, and retried: a passing redirect (maintenance) clears, and a wrong URL is the host's to fix.
+    expect(e).toMatchObject({ status: 307, retryable: true, message: expect.stringContaining("elsewhere.example") });
   });
 });

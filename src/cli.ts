@@ -31,7 +31,10 @@ if (!auth && !process.env.SCIM_TOKEN) {
   console.error("Set SCIM_TOKEN, or pass --auth <file.json>.");
   process.exit(1);
 }
-const results = await checkScimTarget({ url: flags.url, token: process.env.SCIM_TOKEN, auth, userName: flags["user-name"] || undefined });
+const results = await checkScimTarget({ url: flags.url, token: process.env.SCIM_TOKEN, auth, userName: flags["user-name"] || undefined }).catch((e: Error) => {
+  console.error(e.message);
+  process.exit(1);
+});
 for (const r of results) console.log(`${r.ok === true ? "✓" : r.ok === false ? "✗" : "–"} ${r.name}${r.detail ? `: ${r.detail}` : ""}`);
 const essential = ["create a user", "find by userName", "update with PUT", "deactivate (PATCH active false)"];
 process.exit(results.some((r) => essential.includes(r.name) && r.ok === false) || !results.some((r) => r.name === "create a user" && r.ok) ? 1 : 0);

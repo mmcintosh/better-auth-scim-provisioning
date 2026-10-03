@@ -218,10 +218,19 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           }
         }
       }
-      // Pending first: if the reply to the create is lost, we still know to look for it.
-      // A webhook's id at the receiver is our externalId, known before sending: the link holds it
-      // from the start, so a later deactivate or delete is always sent, even after a lost reply.
-      await saveLink(target, userId, { remoteId: target.type === "webhook" ? (externalId ?? "") : "", userName: scim.userName, externalId, active: true });
+      // Pending under another name (a create whose reply was lost, then a rename): the account the
+      // lost create made is found under the old name and renamed, never left behind beside a new one.
+      if (link && !link.remoteId && link.userName !== scim.userName) {
+        const settled = await settlePending(target, client, link);
+        if (settled) {
+          await (target.update === "patch" ? client.patch : client.replace)(settled.remoteId, scim);
+          await saveLink(target, userId, { remoteId: settled.remoteId, userName: scim.userName, externalId, active: true });
+          return null;
+        }
+      }
+      // Pending first: if the reply to the create is lost, we still know to look for it. Pending
+      // links have no id, so groups never list a user the app hasn't confirmed.
+      await saveLink(target, userId, { remoteId: "", userName: scim.userName, externalId, active: true });
       let remoteId: string;
       try {
         remoteId = await client.create(scim);
@@ -321,6 +330,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * and return it as a real link to deprovision, or drop the link.
    */
   async function settlePending(target: Target, client: ReturnType<typeof scimClient>, link: Link): Promise<Link | null> {
+    // A receiver has no lookup, but its id is our externalId: the user may have been received, so
+    // they're deprovisioned (harmless at a receiver that never saw them).
+    if (target.type === "webhook" && link.externalId) return { ...link, remoteId: link.externalId, active: true };
     const found = await client.findByUserName(link.userName);
     const owner = found ? await ownerOf(target, found.id) : null;
     if (!found || (owner && owner !== link.userId) || (found.externalId !== null && found.externalId !== link.externalId)) {
@@ -341,7 +353,14 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const lockedUntil = now + leaseFor(targets.get(job.targetId), job.kind);
     const claimed = await adapter.updateMany({
       model: JOB_MODEL,
-      where: [{ field: "id", value: job.id }, { field: "lockedUntil", value: new Date(now), operator: "lt" }],
+      // Still due and not failed, not just free: a worker holding an old list of due jobs must not
+      // send one another worker has just put off (a 429's Retry-After, a backoff).
+      where: [
+        { field: "id", value: job.id },
+        { field: "lockedUntil", value: new Date(now), operator: "lt" },
+        { field: "nextAttemptAt", value: new Date(now + 1), operator: "lt" },
+        { field: "failed", value: false },
+      ],
       update: { lockedUntil: new Date(lockedUntil) },
     });
     if (claimed === 0) return "busy";
@@ -584,6 +603,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           const found = await client.findGroupByName(link.displayName);
           if (found && found.externalId === externalId) await client.removeGroup(found.id);
         }
+      } else if (target.type === "webhook") {
+        // Pending at a receiver: it may have the group; its id is our externalId.
+        await client.removeGroup(externalId);
       } else {
         // Pending: a create whose reply was lost may have made it. Ours is removed.
         const found = await client.findGroupByName(link.displayName);
@@ -651,6 +673,19 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       }
     }
     const pendingBefore = link !== null && !link.remoteId;
+    // Pending under another name (a lost create's reply, then a rename): the group it made is
+    // found under the old name and renamed (or, at apps that can't rename, removed and made anew).
+    if (link && pendingBefore && link.displayName !== displayName && target.type !== "webhook") {
+      const found = await client.findGroupByName(link.displayName);
+      if (found && !(await otherOwner(found.id)) && (found.externalId === externalId || found.externalId === null)) {
+        if (compat.groupRename === "recreate") await client.removeGroup(found.id);
+        else {
+          await updateGroup(found.id);
+          await saveGroupLink(target, ref, organizationId, { remoteId: found.id, displayName });
+          return null;
+        }
+      }
+    }
     const refuse = async (): Promise<never> => {
       await adapter.deleteMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }] });
       const what = ref.kind === "group" ? "organization" : ref.kind;
@@ -668,7 +703,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       }
     }
     // Pending first, as for users: a create whose reply is lost is ours to adopt later.
-    await saveGroupLink(target, ref, organizationId, { remoteId: target.type === "webhook" ? externalId : "", displayName });
+    await saveGroupLink(target, ref, organizationId, { remoteId: "", displayName });
     let remoteId: string;
     try {
       remoteId = await createGroup();
@@ -687,6 +722,13 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return null;
   }
 
+  /** Rows up to a cap, with a warning when it's reached: beyond it, groups would be skipped silently. */
+  async function capped<T>(rows: Promise<unknown[]>, what: string, cap = 1000): Promise<T[]> {
+    const got = (await rows) as T[];
+    if (got.length >= cap) log.warn(`[scim] ${what}: only the first ${cap} are taken into account; the rest's groups aren't updated`);
+    return got;
+  }
+
   /**
    * Every group an organization may have at this target: its own, its teams', its roles', and any
    * still linked (a team removed, a role no longer held), so those are removed.
@@ -696,7 +738,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const refs: GroupRef[] = [];
     if (target.groups) refs.push({ kind: "group", id: organizationId });
     if (target.teamGroups) {
-      const teams = (await adapter.findMany({ model: "team", where: [{ field: "organizationId", value: organizationId }], limit: 1000 })) as { id: string; organizationId: string }[];
+      const teams = await capped<{ id: string; organizationId: string }>(adapter.findMany({ model: "team", where: [{ field: "organizationId", value: organizationId }], limit: 1000 }), `organization ${organizationId}: teams`);
       for (const t of teams) if (t.organizationId === organizationId) refs.push({ kind: "team", id: t.id });
     }
     if (target.roleGroups) {
@@ -711,7 +753,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       }
       for (const r of roles) refs.push({ kind: "role", id: `${organizationId}:${r}` });
     }
-    const linked = (await adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "organizationId", value: organizationId }], limit: 1000 })) as GroupLink[];
+    const linked = await capped<GroupLink>(adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "organizationId", value: organizationId }], limit: 1000 }), `${target.id}: organization ${organizationId}: linked groups`);
     for (const l of linked) if (l.targetId === target.id && l.organizationId === organizationId) refs.push(refOfLink(l));
     return uniqueRefs(refs);
   }
@@ -732,14 +774,14 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   async function groupsOf(target: Target, userId: string): Promise<GroupRef[]> {
     if (!hasGroups(target)) return [];
     const refs: GroupRef[] = [];
-    const memberships = (await adapter.findMany({ model: "member", where: [{ field: "userId", value: userId }], limit: 1000 })) as { userId: string; organizationId: string; role?: unknown }[];
+    const memberships = await capped<{ userId: string; organizationId: string; role?: unknown }>(adapter.findMany({ model: "member", where: [{ field: "userId", value: userId }], limit: 1000 }), `user ${userId}: organizations`);
     for (const m of memberships) {
       if (m.userId !== userId || !inScope(target, m.organizationId)) continue;
       if (target.groups) refs.push({ kind: "group", id: m.organizationId });
       if (target.roleGroups) for (const r of rolesOf(m.role)) if (target.roleGroups === true || target.roleGroups.includes(r)) refs.push({ kind: "role", id: `${m.organizationId}:${r}` });
     }
     if (target.teamGroups) {
-      const teamIds = (await adapter.findMany({ model: "teamMember", where: [{ field: "userId", value: userId }], limit: 1000 }).catch(() => [])) as { userId: string; teamId: string }[];
+      const teamIds = await capped<{ userId: string; teamId: string }>(adapter.findMany({ model: "teamMember", where: [{ field: "userId", value: userId }], limit: 1000 }).catch(() => []), `user ${userId}: teams`);
       for (const t of teamIds) if (t.userId === userId) refs.push({ kind: "team", id: t.teamId });
     }
     return uniqueRefs(refs);
@@ -758,10 +800,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     }
   }
 
-  /** Every group linked at a target (for reconcile: groups whose organization, team or role is gone). */
-  async function linkedGroups(targetId: string): Promise<GroupRef[]> {
-    const links = (await adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: targetId }], limit: 10_000 })) as GroupLink[];
-    return links.filter((l) => l.targetId === targetId).map(refOfLink);
+  /** The groups linked at a target, a page at a time in key order (for reconcile: groups whose organization, team or role is gone). */
+  async function linkedGroups(targetId: string, after: string | null, limit = PAGE): Promise<{ key: string; ref: GroupRef }[]> {
+    const where: Where[] = [{ field: "targetId", value: targetId }];
+    if (after !== null) where.push({ field: "key", value: after, operator: "gt" });
+    const links = (await adapter.findMany({ model: GROUP_LINK_MODEL, where, limit, sortBy: { field: "key", direction: "asc" } })) as GroupLink[];
+    return links.filter((l) => l.targetId === targetId).map((l) => ({ key: l.key, ref: refOfLink(l) }));
   }
 
   return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, targets };
