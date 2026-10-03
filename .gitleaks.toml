@@ -1,9 +1,11 @@
 # Secret scan over the full git history (CI job "secrets"). Live-test credentials live in the
-# git-ignored .env.live and are never committed; the only allow-listed values are the fixed Better
-# Auth test secrets, spelled "<name>-secret-that-is-at-least-32-characters-long".
+# git-ignored .env.live and are never committed. Allow-listed: the fixed Better Auth test secrets,
+# spelled "<name>-secret-that-is-at-least-32-characters-long", and the mock Google Directory API,
+# which wraps a key pair it generates in memory for each test run in PEM armour (no key is stored).
 [extend]
 useDefault = true
 
 [allowlist]
 description = "Test-only placeholders"
 regexes = ['''[a-z]+-secret-that-is-at-least-32-characters-long''']
+paths = ['''(^|/)test/support/mock-google\.ts$''']
