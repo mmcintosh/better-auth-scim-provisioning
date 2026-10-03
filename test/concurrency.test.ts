@@ -1,5 +1,5 @@
 // The scheduled run delivers `concurrency` jobs at once (default 4): one at a time was the
-// bottleneck at scale in the field test (D-007).
+// bottleneck at scale in the field test.
 import { describe, expect, it } from "vitest";
 import { scimProvisioning } from "../src";
 import { createHost } from "./support/host";

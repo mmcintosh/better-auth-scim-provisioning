@@ -1,4 +1,4 @@
-// Review S2 F-11 (Low): leases were per job, so two duplicate jobs for one user (MongoDB builds its
+// Leases were per job, so two duplicate jobs for one user (MongoDB builds its
 // UNIQUE index lazily) could be delivered at once by two workers, and the older state could land
 // last. A claimed job now clears free duplicates and defers to one already being delivered.
 import { expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { createHost } from "../support/host";
 
 const log = { warn() {}, error() {} };
 
-it("S2-11: two duplicate jobs for one user are never delivered at the same time", async () => {
+it("two duplicate jobs for one user are never delivered at the same time", async () => {
   const h = await createHost();
   const u = await h.user();
   // Rebuild the job table without its UNIQUE key, as a lazily indexed database can be.

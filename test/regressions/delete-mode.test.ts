@@ -1,4 +1,4 @@
-// Review S2 F-8 (Low): after switching a target from deactivate to delete, users already
+// After switching a target from deactivate to delete, users already
 // deactivated were never deleted, not even by reconcile.
 import { expect, it } from "vitest";
 import { type Adapter, outbox } from "../../src/outbox";
@@ -6,7 +6,7 @@ import { createHost } from "../support/host";
 
 const log = { warn() {}, error() {} };
 
-it("S2-8: delete mode also deletes users who were only deactivated before", async () => {
+it("delete mode also deletes users who were only deactivated before", async () => {
   const h = await createHost();
   const u = await h.user();
   await h.ctx.internalAdapter.updateUser(u.id, { banned: true });

@@ -1,10 +1,10 @@
-// Review S2 F-2 (Medium): the link was saved only after a successful POST. When the POST reached
+// The link was saved only after a successful POST. When the POST reached
 // the app but its reply was lost, and the user then left (banned, deleted, …), there was no link,
 // so nothing was deprovisioned: the account stayed active at the app for good.
 import { describe, expect, it } from "vitest";
 import { createHost } from "../support/host";
 
-describe("S2-2: a create whose reply was lost can still be undone", () => {
+describe("a create whose reply was lost can still be undone", () => {
   it("the account is deactivated when the user is banned before the retry", async () => {
     const h = await createHost({ retry: { baseDelayMs: 60_000 } });
     h.app.fail({ lostReply: true });

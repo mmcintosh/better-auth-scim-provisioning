@@ -123,7 +123,7 @@ With `groups: true`, each organization (Better Auth's organization plugin) is a 
   - a reconcile runs.
 - **Rebuilt each time:** the group is recomputed from the database on every delivery, so it converges whatever order changes arrive in. A change made in the app is delivered at once; a reconcile updates each group a few times, not once per member.
 - **Never taken over:** a group of the same name that isn't the organization's (another `externalId`, or one made by hand) is refused, because replacing it would rewrite its members. Rename one of them, or set `groupName`.
-- **Verified live** against Cloudflare Access (D-008).
+- **Verified live** against Cloudflare Access.
 
 Most apps grant access by group: assign the group to the app or role there (AWS permission sets, Atlassian products, Cloudflare Access policies).
 
@@ -141,7 +141,7 @@ Most apps grant access by group: assign the group to the app or role there (AWS 
 
 ## Apps
 
-- **Cloudflare Access** (verified live). Zero Trust → Integrations → Identity providers → your identity provider → turn on **Enable SCIM** (and **Enable user deprovisioning**), **save**, then copy the SCIM endpoint and secret. The secret only works once the provider is saved: if you copied it before saving, regenerate it, copy it, and save. With SCIM, a user exists at Cloudflare before their first sign-in, and that sign-in lands on the same account. Verified live (DECISIONS.md D-007):
+- **Cloudflare Access** (verified live). Zero Trust → Integrations → Identity providers → your identity provider → turn on **Enable SCIM** (and **Enable user deprovisioning**), **save**, then copy the SCIM endpoint and secret. The secret only works once the provider is saved: if you copied it before saving, regenerate it, copy it, and save. With SCIM, a user exists at Cloudflare before their first sign-in, and that sign-in lands on the same account. Verified live:
   - a ban revoked the user's live Access session within 35 seconds;
   - a timed ban was lifted by the scheduled run within a minute of ending.
 
@@ -176,7 +176,7 @@ For other auth methods, `--auth auth.json` with an `auth` object as in the table
 
 Tested on SQLite (`node:sqlite`), PostgreSQL 17, MySQL 8.4 and MongoDB 8.2 (Better Auth's Kysely and MongoDB adapters), with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24.
 
-It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested there in a real app, with D1, `waitUntil` and a Cron Trigger, against Cloudflare Access (D-007): 200 users were reconciled and delivered at about 6 users a second with the default concurrency.
+It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested there in a real app, with D1, `waitUntil` and a Cron Trigger, against Cloudflare Access: 200 users were reconciled and delivered at about 6 users a second with the default concurrency.
 
 ## Not yet
 
@@ -192,7 +192,7 @@ pnpm typecheck && pnpm lint && pnpm pack:check
 ADAPTER_DB=postgres ADAPTER_URL=postgres://postgres:test@localhost:5432/postgres npx vitest run test/adapters
 ```
 
-The live test (`test/live/`) runs against a real SCIM service when the git-ignored `.env.live` holds `SCIM_URL` and `SCIM_TOKEN`: `npx vitest run -c vitest.live.config.ts`. Design decisions and reviews are in [DECISIONS.md](DECISIONS.md).
+The live test (`test/live/`) runs against a real SCIM service when the git-ignored `.env.live` holds `SCIM_URL` and `SCIM_TOKEN`: `npx vitest run -c vitest.live.config.ts`.
 
 ## License
 

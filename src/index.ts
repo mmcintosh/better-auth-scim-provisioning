@@ -15,7 +15,7 @@ export type { ProvisionedUser, ScimProvisioningOptions, ScimTarget } from "./typ
 
 /**
  * A SCIM base URL: https, or http to a loopback address; no credentials, query or fragment, which
- * would send the token elsewhere or break every path built on it (S2-13).
+ * would send the token elsewhere or break every path built on it.
  */
 function targetUrl(value: string): boolean {
   let u: URL;
@@ -72,7 +72,7 @@ const optionsSchema = z.object({
 /**
  * The organization plugin's endpoints that change a membership. Server-side `addMember` has no
  * path, so a path-less call is taken too. Reads (getActiveMember, …) also return member rows and
- * are called on page loads: they must not provision (S1-2).
+ * are called on page loads: they must not provision.
  */
 const MEMBERSHIP_WRITES = new Set([
   "/organization/add-member",
@@ -238,7 +238,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             }
             // A deleted organization takes its members with it: deprovision everyone linked
             // through its targets. In the background, one user at a time: never in the way of
-            // the request, and never a burst at the app (S2-6, S2-10). Whatever doesn't finish
+            // the request, and never a burst at the app. Whatever doesn't finish
             // is left queued for the scheduled run, or found by the next reconcile.
             const orgId = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
             const orgTargets = options.targets.filter((t) => ctx.path === "/organization/delete" && typeof orgId === "string" && t.organizationId === orgId);
@@ -272,9 +272,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       }),
       /**
        * Queue every user for every target (or one), and every user still linked at a target who no
-       * longer exists (deleted users whose deprovisioning was lost, S1-5): after adding or fixing a
+       * longer exists (deleted users whose deprovisioning was lost): after adding or fixing a
        * target, or to repair drift. Delivery then happens through scimProvisioningRun. With
-       * `limit`, one page at a time: call again with `after: next` until `next` is null (S2-6).
+       * `limit`, one page at a time: call again with `after: next` until `next` is null.
        */
       scimProvisioningReconcile: createAuthEndpoint.serverOnly(
         {

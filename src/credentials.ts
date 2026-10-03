@@ -93,7 +93,7 @@ async function fetchToken(auth: Extract<ScimAuth, { type: "oauth2" }>, o: { fetc
   if (!res.ok || typeof json?.access_token !== "string" || !json.access_token) {
     // The error code only: never the response body, which could echo credentials.
     const code = typeof json?.error === "string" ? ` ${json.error.slice(0, 100)}` : "";
-    // A refused client is the host's configuration, like a bad token (S1-4): retried until fixed.
+    // A refused client is the host's configuration, like a bad token: retried until fixed.
     throw new ScimError(`token request to ${host}: ${res.status}${code} (check the target's OAuth client)`, res.status, true);
   }
   if (typeof json.token_type === "string" && json.token_type.toLowerCase() !== "bearer")

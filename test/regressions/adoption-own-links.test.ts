@@ -1,10 +1,10 @@
-// Review S2 F-3 (Medium, security): S1-1's guard relied on the app keeping externalId. Many apps
+// The first guard relied on the app keeping externalId. Many apps
 // don't, so a new user with a deleted user's old email was handed the old account, reactivated.
 // We know who owns what from our own links: an account linked to another user is never adopted.
 import { describe, expect, it } from "vitest";
 import { createHost } from "../support/host";
 
-describe("S2-3: adoption checks our own links, not just the app's externalId", () => {
+describe("adoption checks our own links, not just the app's externalId", () => {
   it("an app without externalId: a new user with a deleted user's email is refused", async () => {
     const h = await createHost({ targets: [{ id: "app", keepsExternalId: false }] });
     const a = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "First Owner", emailVerified: true }, { method: "admin" });

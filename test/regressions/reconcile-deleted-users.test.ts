@@ -1,9 +1,9 @@
-// Review S1-5 (Medium): reconcile walked existing users only, so a deleted user whose
+// Reconcile walked existing users only, so a deleted user whose
 // deprovisioning was lost (a crash, a failed queue) stayed active at the app for good.
 import { describe, expect, it } from "vitest";
 import { createHost } from "../support/host";
 
-describe("S1-5: reconcile also deprovisions users who are gone", () => {
+describe("reconcile also deprovisions users who are gone", () => {
   it("a user deleted without their deprovisioning is deactivated by reconcile", async () => {
     const h = await createHost();
     const u = await h.user("Gone Person");

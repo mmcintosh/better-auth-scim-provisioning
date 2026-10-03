@@ -1,10 +1,10 @@
-// Review S1-1 (High): adopting an existing app user by userName could hand one person's account
+// Adopting an existing app user by userName could hand one person's account
 // to another. User A is deleted (deactivated at the app, account kept); someone signs up with A's
 // old email; the 409 → find → adopt path took A's account, reactivated it, and gave it to B.
 import { describe, expect, it } from "vitest";
 import { createHost } from "../support/host";
 
-describe("S1-1: adoption never takes another user's account", () => {
+describe("adoption never takes another user's account", () => {
   it("a new user with a deleted user's email is refused, not given the old account", async () => {
     const h = await createHost();
     const a = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "First Owner", emailVerified: true }, { method: "admin" });

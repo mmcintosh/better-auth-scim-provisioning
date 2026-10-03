@@ -1,10 +1,10 @@
-// Review S1-4 (Medium): a 401 or 403 counted as "won't fix itself", so while a token was expired
+// A 401 or 403 counted as "won't fix itself", so while a token was expired
 // (AWS tokens last a year) every changed user's job failed for good, until that user changed again.
 // It's the host's configuration, not the user: retry, and recover once the token is fixed.
 import { describe, expect, it } from "vitest";
 import { createHost } from "../support/host";
 
-describe("S1-4: a token problem is retried, not a permanent failure", () => {
+describe("a token problem is retried, not a permanent failure", () => {
   it("a 401 leaves the job waiting, and the scheduled run delivers it once the token works", async () => {
     const h = await createHost({ retry: { baseDelayMs: 0 } });
     h.app.fail({ status: 401, detail: "token expired" });

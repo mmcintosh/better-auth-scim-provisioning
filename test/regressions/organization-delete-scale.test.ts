@@ -1,4 +1,4 @@
-// Review S2 F-6 (Medium) and F-10 (Low): deleting an organization did its deprovisioning inside
+// Deleting an organization did its deprovisioning inside
 // the admin's request, one delivery per member at once, and a database error there failed the
 // request after the organization was already gone. Reconcile ran over every user in one call, and
 // "every linked user" silently stopped at 10,000.
@@ -22,7 +22,7 @@ async function orgWithMembers(n: number) {
   return { h, cookie };
 }
 
-describe("S2-6: organization delete and reconcile scale", () => {
+describe("organization delete and reconcile scale", () => {
   it("deleting an organization deprovisions its members one at a time, not all at once", async () => {
     const { h, cookie } = await orgWithMembers(3);
     const release = h.app.hold();
