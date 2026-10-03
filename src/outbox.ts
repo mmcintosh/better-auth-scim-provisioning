@@ -68,7 +68,9 @@ const RELEASED = new Date("2000-01-01T00:00:00.000Z");
  * replace), each up to the target's timeout, plus a margin. Shorter, and a second worker could
  * claim a job still being delivered.
  */
-const leaseFor = (target: Target | undefined) => 12 * (target?.timeoutMs ?? 10_000) + 30_000;
+const leaseFor = (target: Target | undefined, kind?: string | null) =>
+  // A group can take many requests (members read a page at a time, changed in batches).
+  (kind && kind !== "user" ? 60 : 12) * (target?.timeoutMs ?? 10_000) + 30_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
 const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
@@ -94,9 +96,6 @@ export interface GroupLink {
   /** The app's id for the group; empty while its create is pending. */
   remoteId: string;
   displayName: string;
-  /** "team" or "role", with `sourceId` the team's id or "<organization>:<role>"; absent for an organization's group. */
-  kind?: string | null;
-  sourceId?: string | null;
 }
 
 export type Outcome = "done" | "retry" | "failed" | "busy";
@@ -220,7 +219,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         }
       }
       // Pending first: if the reply to the create is lost, we still know to look for it.
-      await saveLink(target, userId, { remoteId: "", userName: scim.userName, externalId, active: true });
+      // A webhook's id at the receiver is our externalId, known before sending: the link holds it
+      // from the start, so a later deactivate or delete is always sent, even after a lost reply.
+      await saveLink(target, userId, { remoteId: target.type === "webhook" ? (externalId ?? "") : "", userName: scim.userName, externalId, active: true });
       let remoteId: string;
       try {
         remoteId = await client.create(scim);
@@ -239,7 +240,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           await dropLink(key);
           throw new ScimError(`${scim.userName}: ${why}; resolve it at the app`, 409, false);
         };
-        if (!found) return refuse("the app says it exists but can't find it");
+        if (!found) {
+          // Google's directory takes a moment to show a new account: retried, with the link kept.
+          if (target.type === "google-workspace") throw new ScimError(`${scim.userName}: Google says the account exists but can't find it yet; retrying`, 409, true);
+          return refuse("the app says it exists but can't find it");
+        }
         const ours = found.externalId !== null && found.externalId === externalId;
         if (!ours) {
           // Tied to another user, such as a deleted user whose email was reused: never handed
@@ -251,6 +256,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // account's userName is that address: a custom userName (mapUser) proves nothing about
           // who the account was made for.
           if ((user as ProvisionedUser).emailVerified !== true) return refuse("an account with this userName exists at the app, and the user's email is not verified");
+          // Taking it over would unsuspend it, restoring someone's mailbox: an admin decides that.
+          if (found.active === false && target.type === "google-workspace")
+            return refuse("the Workspace account is suspended; unsuspend it at Google first if it should be taken over");
           if (scim.userName.toLowerCase() !== (user as ProvisionedUser).email.toLowerCase())
             return refuse("an account with this userName exists at the app, and its userName isn't the user's verified email, so it isn't taken over");
         }
@@ -330,7 +338,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    */
   async function run(job: Job, round = 0): Promise<Outcome> {
     const now = Date.now();
-    const lockedUntil = now + leaseFor(targets.get(job.targetId));
+    const lockedUntil = now + leaseFor(targets.get(job.targetId), job.kind);
     const claimed = await adapter.updateMany({
       model: JOB_MODEL,
       where: [{ field: "id", value: job.id }, { field: "lockedUntil", value: new Date(now), operator: "lt" }],
@@ -527,13 +535,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const { organizationId, role } = splitRoleId(ref.id);
     const org = await organization(organizationId);
     if (!org) return null;
-    const wanted = inScope(target, org.id) && (Array.isArray(target.roleGroups) ? target.roleGroups.includes(role) : target.roleGroups === true);
-    return {
-      organizationId: org.id,
-      wanted,
-      displayName: target.roleGroupName ? target.roleGroupName(role, org) : `${org.name} / ${role}`,
-      userIds: () => userIdsOf("member", [{ field: "organizationId", value: org.id }], (m) => rolesOf(m.role).includes(role)),
-    };
+    const holders = () => userIdsOf("member", [{ field: "organizationId", value: org.id }], (m) => rolesOf(m.role).includes(role));
+    // A listed role keeps its group even when empty; with `true`, a role no one holds any more has none.
+    const wanted =
+      inScope(target, org.id) && (Array.isArray(target.roleGroups) ? target.roleGroups.includes(role) : target.roleGroups === true && (await holders()).length > 0);
+    return { organizationId: org.id, wanted, displayName: target.roleGroupName ? target.roleGroupName(role, org) : `${org.name} / ${role}`, userIds: holders };
   }
 
   /** The users' ids at the app: provisioned and active, sorted. */
@@ -556,7 +562,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const key = keyFor(ref.kind, target.id, ref.id);
     const update = { ...fields, syncedAt: new Date() };
     if ((await adapter.updateMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }], update })) > 0) return;
-    await adapter.create({ model: GROUP_LINK_MODEL, data: { key, targetId: target.id, organizationId, ...(ref.kind === "group" ? {} : { kind: ref.kind, sourceId: ref.id }), ...update } });
+    await adapter.create({ model: GROUP_LINK_MODEL, data: { key, targetId: target.id, organizationId, ...update } });
   }
 
   /** Make the app's group match its organization, team or role: create, update, adopt, or remove. */
@@ -578,6 +584,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           const found = await client.findGroupByName(link.displayName);
           if (found && found.externalId === externalId) await client.removeGroup(found.id);
         }
+      } else {
+        // Pending: a create whose reply was lost may have made it. Ours is removed.
+        const found = await client.findGroupByName(link.displayName);
+        if (found && found.externalId === externalId) await client.removeGroup(found.id);
       }
       await adapter.deleteMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }] });
       return null;
@@ -591,14 +601,31 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const createGroup = () => (compat.maxGroupMembersPerRequest ? client.createGroupInBatches(group, compat.maxGroupMembersPerRequest) : client.createGroup(group));
     // An app that can't rename groups: a new group with the new name and the members, then the
     // old one deleted (the order Atlassian documents, so access never lapses).
+    const otherOwner = async (remoteId: string) =>
+      ((await adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "remoteId", value: remoteId }], limit: 2 })) as GroupLink[]).some((l) => l.remoteId === remoteId && l.key !== key);
     if (link?.remoteId && link.displayName !== displayName && compat.groupRename === "recreate") {
-      let created: string;
-      try {
-        created = await createGroup();
-      } catch (e) {
-        if (e instanceof ScimError && e.status === 409) throw new ScimError(`group ${displayName}: renaming means creating it anew, and a group with this name already exists at the app`, 409, false);
-        throw e;
+      // The new group may already exist: made by an earlier try whose delete of the old one failed,
+      // or whose reply was lost. Ours (our externalId, no other link) is used, never created twice.
+      const ours = async () => {
+        const found = await client.findGroupByName(displayName);
+        if (!found) return null;
+        if (found.externalId !== externalId || (await otherOwner(found.id)))
+          throw new ScimError(`group ${displayName}: renaming means creating it anew, and a group with this name already exists at the app`, 409, false);
+        await updateGroup(found.id);
+        return found.id;
+      };
+      let created = await ours();
+      if (!created) {
+        try {
+          created = await createGroup();
+        } catch (e) {
+          if (!(e instanceof ScimError && e.status === 409)) throw e;
+          created = await ours();
+          if (!created) throw new ScimError(`group ${displayName}: the app says it exists but can't find it`, 409, true);
+        }
       }
+      // Only once the old group is gone does the link move: a failed delete is retried, finding the
+      // new group above rather than making another.
       try {
         await client.removeGroup(link.remoteId);
       } catch (e) {
@@ -624,8 +651,6 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       }
     }
     const pendingBefore = link !== null && !link.remoteId;
-    const otherOwner = async (remoteId: string) =>
-      ((await adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "remoteId", value: remoteId }], limit: 2 })) as GroupLink[]).some((l) => l.remoteId === remoteId && l.key !== key);
     const refuse = async (): Promise<never> => {
       await adapter.deleteMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }] });
       const what = ref.kind === "group" ? "organization" : ref.kind;
@@ -643,7 +668,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       }
     }
     // Pending first, as for users: a create whose reply is lost is ours to adopt later.
-    await saveGroupLink(target, ref, organizationId, { remoteId: "", displayName });
+    await saveGroupLink(target, ref, organizationId, { remoteId: target.type === "webhook" ? externalId : "", displayName });
     let remoteId: string;
     try {
       remoteId = await createGroup();
@@ -691,7 +716,16 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return uniqueRefs(refs);
   }
 
-  const refOfLink = (l: GroupLink): GroupRef => (l.kind === "team" || l.kind === "role" ? { kind: l.kind, id: l.sourceId as string } : { kind: "group", id: l.organizationId });
+  /**
+   * A link's group, read from its key ("<target>:group|team|role:<id>"), so the schema stays as in
+   * 0.1.0: a new column would make Better Auth refuse every request until the host migrated.
+   */
+  const refOfLink = (l: GroupLink): GroupRef => {
+    const rest = l.key.slice(l.targetId.length + 1);
+    const at = rest.indexOf(":");
+    const kind = rest.slice(0, at);
+    return kind === "team" || kind === "role" ? { kind, id: rest.slice(at + 1) } : { kind: "group", id: l.organizationId };
+  };
   const uniqueRefs = (refs: GroupRef[]) => [...new Map(refs.map((r) => [`${r.kind}:${r.id}`, r])).values()];
 
   /** The groups at this target that include (or may include) this user. */

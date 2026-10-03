@@ -5,6 +5,9 @@
 import { defaultScimUser } from "./mapping";
 import type { ScimTarget } from "./types";
 
+/** Only the keys set to something: a host's `undefined` (an unset option of its own) never removes a profile's value. */
+const defined = <T extends object>(o: T | undefined): Partial<T> => Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>;
+
 /**
  * AWS IAM Identity Center (documented). Groups have no PUT and their GET lists no members, so
  * groups are updated by a diff of members read with `Users?filter=groups.value eq`, at most 100
@@ -12,7 +15,7 @@ import type { ScimTarget } from "./types";
  * email, which the default mapping sends; the SAML NameID must equal the SCIM userName.
  */
 export function awsIamIdentityCenter(target: ScimTarget): ScimTarget {
-  return { ...target, compat: { groupUpdate: "patch", groupMembers: "users-filter", maxGroupMembersPerRequest: 100, ...target.compat } };
+  return { ...target, compat: { groupUpdate: "patch", groupMembers: "users-filter", maxGroupMembersPerRequest: 100, ...defined(target.compat) } };
 }
 
 /**
@@ -32,7 +35,7 @@ export function slackUserName(email: string): string {
  * userName for them. Deleting a Slack user only deactivates them.
  */
 export function slack(target: ScimTarget): ScimTarget {
-  return { mapUser: (user) => ({ ...defaultScimUser(user), userName: slackUserName(user.email) }), ...target };
+  return { ...target, mapUser: target.mapUser ?? ((user) => ({ ...defaultScimUser(user), userName: slackUserName(user.email) })) };
 }
 
 /**
@@ -41,7 +44,7 @@ export function slack(target: ScimTarget): ScimTarget {
  * user only deactivates them.
  */
 export function atlassian(target: ScimTarget): ScimTarget {
-  return { ...target, compat: { groupUpdate: "patch", groupRename: "recreate", ...target.compat } };
+  return { ...target, compat: { groupUpdate: "patch", groupRename: "recreate", ...defined(target.compat) } };
 }
 
 /**

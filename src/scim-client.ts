@@ -170,7 +170,7 @@ export function scimClient(endpoint: ScimEndpoint) {
 
   return {
     /** The user with this userName (its id and externalId), or null. */
-    async findByUserName(userName: string): Promise<{ id: string; externalId: string | null } | null> {
+    async findByUserName(userName: string): Promise<{ id: string; externalId: string | null; active?: boolean } | null> {
       const { json } = await request("GET", `/Users?filter=${encodeURIComponent(`userName eq ${scimString(userName)}`)}&count=2`);
       const list = json as { schemas?: unknown; Resources?: unknown; totalResults?: unknown } | null;
       // A page that isn't a SCIM list (a wrong URL that answers 200): never read as "no such user".
