@@ -12,7 +12,8 @@ export { atlassian, awsIamIdentityCenter, cloudflareAccess, githubEnterprise, pr
 export { SCIM_USER_SCHEMA, ScimError, type ScimUser } from "./scim-client";
 export type { ScimAuth } from "./credentials";
 export { type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
-export type { GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions } from "./types";
+export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, webhookSignature } from "./webhook";
+export type { GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, WebhookTarget } from "./types";
 
 /**
  * A SCIM base URL: https, or http to a loopback address; no credentials, query or fragment, which
@@ -35,7 +36,8 @@ const optionsSchema = z.object({
     .array(
       z.object({
         id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
-        type: z.enum(["scim", "google-workspace"]).optional(),
+        type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
+        secret: z.string().min(32, "must be at least 32 characters").optional(),
         url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment").optional(),
         google: z
           .object({
@@ -87,7 +89,9 @@ const optionsSchema = z.object({
         fetch: z.function().optional(),
       })
         .refine((t) => t.type === "google-workspace" || t.url !== undefined, { message: "url is required", path: ["url"] })
-        .refine((t) => t.type === "google-workspace" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
+        .refine((t) => t.type === "google-workspace" || t.type === "webhook" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
+        .refine((t) => t.type !== "webhook" || (t.secret !== undefined && t.token === undefined && t.auth === undefined && t.google === undefined), "a webhook target takes url and secret, not token, auth or google")
+        .refine((t) => t.type === "webhook" || t.secret === undefined, "secret is for webhook targets")
         .refine((t) => t.type !== "google-workspace" || (t.google !== undefined && t.token === undefined && t.auth === undefined), "a google-workspace target takes google, not token or auth")
         .refine((t) => t.type !== "google-workspace" || !(t.groups || t.teamGroups || t.roleGroups), "Google Workspace targets don't provision groups yet"),
     )

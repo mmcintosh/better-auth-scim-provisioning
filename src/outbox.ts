@@ -10,6 +10,7 @@
 // account whose create reply was lost can still be found, and undone, later.
 import { defaultScimUser, isBanned } from "./mapping";
 import { googleWorkspaceClient } from "./google";
+import { webhookClient } from "./webhook";
 import { SCIM_GROUP_SCHEMA, ScimError, scimClient } from "./scim-client";
 import type { ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
 
@@ -104,7 +105,11 @@ const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
 
 /** The client for a target: SCIM, or Google Workspace's Directory API behind the same operations. */
 const clientFor = (target: Target) =>
-  target.type === "google-workspace" ? googleWorkspaceClient(target) : scimClient({ url: target.url ?? "", token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
+  target.type === "google-workspace"
+    ? googleWorkspaceClient(target)
+    : target.type === "webhook"
+      ? webhookClient(target)
+      : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
 
 export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }) {
   const targets = new Map(options.targets.map((t) => [t.id, t]));
