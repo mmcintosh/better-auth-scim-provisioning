@@ -3,7 +3,7 @@
 // delete. The test user is always removed (or at least deactivated) at the end. Behind
 // `npx better-auth-scim-provisioning check`, and usable from an admin page ("test connection").
 import { credentials, type ScimAuth } from "./credentials";
-import { SCIM_USER_SCHEMA, scimString, trimSlashes } from "./scim-client";
+import { SCIM_USER_SCHEMA, scimString, targetUrl, trimSlashes } from "./scim-client";
 
 export interface CheckResult {
   name: string;
@@ -45,6 +45,9 @@ export function parseAuthFile(text: string): ScimAuth {
 }
 
 export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
+  // The plugin's own rule: the token never goes over plain http, except to this machine.
+  if (!targetUrl(o.url)) throw new Error("[scim] check: the url must be https (http only for localhost), without credentials, query or fragment");
+  if (o.auth?.type === "oauth2" && !targetUrl(o.auth.tokenUrl)) throw new Error("[scim] check: the auth tokenUrl must be https (http only for localhost)");
   const base = trimSlashes(o.url);
   const doFetch = o.fetch ?? fetch;
   const creds = credentials(o.auth ?? { type: "bearer", token: o.token ?? "" }, { fetch: doFetch, timeoutMs: o.timeoutMs });

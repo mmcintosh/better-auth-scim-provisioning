@@ -4,7 +4,8 @@
 import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import * as z from "zod";
-import { type Adapter, GROUP_LINK_MODEL, IN_BATCH, JOB_MODEL, LINK_MODEL, outbox } from "./outbox";
+import { targetUrl } from "./scim-client";
+import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, JOB_MODEL, LINK_MODEL, outbox } from "./outbox";
 import type { ScimProvisioningOptions } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
@@ -15,21 +16,6 @@ export { type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, webhookSignature } from "./webhook";
 export type { GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, WebhookTarget } from "./types";
 
-/**
- * A SCIM base URL: https, or http to a loopback address; no credentials, query or fragment, which
- * would send the token elsewhere or break every path built on it.
- */
-function targetUrl(value: string): boolean {
-  let u: URL;
-  try {
-    u = new URL(value);
-  } catch {
-    return false;
-  }
-  if (u.username || u.password || u.search || u.hash || value.includes("?") || value.includes("#")) return false;
-  if (u.protocol === "https:") return true;
-  return u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
-}
 
 const optionsSchema = z.object({
   targets: z
@@ -140,20 +126,31 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
    * Queue (target, user) and try to deliver it right away, in the background; then, for targets
    * with groups, the user's organizations' groups, so a new user shows up in them at once.
    */
-  async function changed(userId: string, targetIds = options.targets.map((t) => t.id)) {
+  async function changed(userId: string, targetIds = options.targets.map((t) => t.id), formerGroups?: Map<string, GroupRef[]>) {
     if (!box) return;
     const b = box;
     for (const targetId of targetIds) {
       await b.enqueue(targetId, userId);
+      // A deleted user's groups, noted before the delete: queued, so they're updated even if this
+      // delivery doesn't finish.
+      const former = formerGroups?.get(targetId) ?? [];
+      for (const ref of former) await b.enqueue(targetId, ref.id, { kind: ref.kind });
       const target = options.targets.find((t) => t.id === targetId);
       background(
         (async () => {
           await b.runFor(targetId, userId);
-          if (target && b.hasGroups(target)) for (const ref of await b.groupsOf(target, userId)) await b.runFor(targetId, ref.id, ref.kind);
+          if (target && b.hasGroups(target)) for (const ref of [...former, ...(await b.groupsOf(target, userId))]) await b.runFor(targetId, ref.id, ref.kind);
         })(),
       );
     }
   }
+
+  /**
+   * A user's groups at each target, noted just before they're deleted: SQL databases delete the
+   * member rows with the user, so after the delete their groups can't be found, and the user would
+   * stay in them at the app.
+   */
+  const deleting = new Map<string, Map<string, GroupRef[]>>();
 
   /** Queue an organization's groups (its own, its teams', its roles') at every target, and deliver them in the background. */
   async function groupChanged(organizationId: string) {
@@ -236,7 +233,28 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             user: {
               create: { after: onUser },
               update: { after: onUser },
-              delete: { after: onUser },
+              delete: {
+                before: async (user: { id: string }) => {
+                  if (!box) return;
+                  try {
+                    const byTarget = new Map<string, GroupRef[]>();
+                    for (const t of options.targets) if (box.hasGroups(t)) byTarget.set(t.id, await box.groupsOf(t, user.id));
+                    deleting.set(user.id, byTarget);
+                  } catch (e) {
+                    // Never stop the delete: the next reconcile updates the groups.
+                    ctx.logger.error(`[scim] could not note the groups of user ${user.id}`, e);
+                  }
+                },
+                after: async (user: { id: string }) => {
+                  const former = deleting.get(user.id);
+                  deleting.delete(user.id);
+                  try {
+                    await changed(user.id, undefined, former);
+                  } catch (e) {
+                    ctx.logger.error(`[scim] could not queue user ${user.id}`, e);
+                  }
+                },
+              },
             },
           },
         },
@@ -353,7 +371,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           let budget = ctx.body?.limit ?? Number.POSITIVE_INFINITY;
           let queued = 0;
           // The cursor: "u:<last user id>" while walking users, then "l:<target>:<last user id>"
-          // while walking each target's links.
+          // while walking each target's links, then the groups ("g:…", "G:…", below).
           const cursor = ctx.body?.after ?? "u:";
           const page = () => Math.min(500, budget);
 
@@ -378,48 +396,76 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             }
           }
 
-          const [, fromTarget = targetIds[0], fromUser = ""] = cursor.startsWith("l:") ? (/^l:([^:]*):(.*)$/.exec(cursor) ?? []) : [];
-          for (const t of targetIds.slice(Math.max(0, targetIds.indexOf(fromTarget as string)))) {
-            let last: string | null = t === fromTarget && fromUser ? fromUser : null;
-            for (;;) {
-              if (budget <= 0) return ctx.json({ queued, next: `l:${t}:${last ?? ""}` });
-              const size = page();
-              const linked = await b.linkedUsers(t, last, size);
-              if (linked.length) {
-                // D1 allows 100 bound parameters per query: look the ids up in batches.
-                const existing = new Set<string>();
-                for (let i = 0; i < linked.length; i += IN_BATCH) {
-                  const ids = linked.slice(i, i + IN_BATCH);
-                  const found = (await ctx.context.adapter.findMany({ model: "user", where: [{ field: "id", value: ids, operator: "in" }], limit: ids.length })) as { id: string }[];
-                  for (const u of found) existing.add(u.id);
+          if (cursor.startsWith("u:") || cursor.startsWith("l:")) {
+            const [, fromTarget = targetIds[0], fromUser = ""] = cursor.startsWith("l:") ? (/^l:([^:]*):(.*)$/.exec(cursor) ?? []) : [];
+            for (const t of targetIds.slice(Math.max(0, targetIds.indexOf(fromTarget as string)))) {
+              let last: string | null = t === fromTarget && fromUser ? fromUser : null;
+              for (;;) {
+                if (budget <= 0) return ctx.json({ queued, next: `l:${t}:${last ?? ""}` });
+                const size = page();
+                const linked = await b.linkedUsers(t, last, size);
+                if (linked.length) {
+                  // D1 allows 100 bound parameters per query: look the ids up in batches.
+                  const existing = new Set<string>();
+                  for (let i = 0; i < linked.length; i += IN_BATCH) {
+                    const ids = linked.slice(i, i + IN_BATCH);
+                    const found = (await ctx.context.adapter.findMany({ model: "user", where: [{ field: "id", value: ids, operator: "in" }], limit: ids.length })) as { id: string }[];
+                    for (const u of found) existing.add(u.id);
+                  }
+                  for (const userId of linked) {
+                    if (!existing.has(userId)) {
+                      await b.enqueue(t, userId, { now: true });
+                      queued++;
+                    }
+                    last = userId;
+                  }
                 }
-                for (const userId of linked) {
-                  if (!existing.has(userId)) {
-                    await b.enqueue(t, userId, { now: true });
+                budget -= linked.length;
+                if (linked.length < size) break;
+                if (budget <= 0) return ctx.json({ queued, next: `l:${t}:${last}` });
+              }
+            }
+          }
+
+          // Groups: every organization at targets with groups ("g:<target>:<last organization id>"),
+          // then every linked group, so those whose organization, team or role is gone are removed
+          // ("G:<target>:<last link key>"). Paged like the rest: on Workers and D1, doing all of
+          // it in one call ran past the per-call limits once there were a few hundred organizations.
+          const groupTargets = options.targets.filter((x) => targetIds.includes(x.id) && b.hasGroups(x)).map((x) => x.id);
+          const [, phase = "g", fromGroupTarget = groupTargets[0], fromGroup = ""] = /^([gG]):([^:]*):(.*)$/.exec(cursor) ?? [];
+          for (const t of groupTargets.slice(Math.max(0, groupTargets.indexOf(fromGroupTarget as string)))) {
+            const target = b.targets.get(t);
+            if (!target) continue;
+            const resuming = t === fromGroupTarget;
+            if (!resuming || phase === "g") {
+              let after: string | null = resuming && fromGroup ? fromGroup : null;
+              for (;;) {
+                if (budget <= 0) return ctx.json({ queued, next: `g:${t}:${after ?? ""}` });
+                const size = page();
+                const orgs = (await ctx.context.adapter.findMany({ model: "organization", where: after === null ? [] : [{ field: "id", value: after, operator: "gt" }], limit: size, sortBy: { field: "id", direction: "asc" } })) as { id: string }[];
+                for (const o of orgs) {
+                  for (const ref of await b.groupsForOrganization(target, o.id)) {
+                    await b.enqueue(t, ref.id, { kind: ref.kind, now: true });
                     queued++;
                   }
-                  last = userId;
+                  after = o.id;
                 }
+                budget -= orgs.length;
+                if (orgs.length < size) break;
+              }
+            }
+            let afterKey: string | null = resuming && phase === "G" && fromGroup ? fromGroup : null;
+            for (;;) {
+              if (budget <= 0) return ctx.json({ queued, next: `G:${t}:${afterKey ?? ""}` });
+              const size = page();
+              const linked = await b.linkedGroups(t, afterKey, size);
+              for (const l of linked) {
+                await b.enqueue(t, l.ref.id, { kind: l.ref.kind, now: true });
+                queued++;
+                afterKey = l.key;
               }
               budget -= linked.length;
               if (linked.length < size) break;
-              if (budget <= 0) return ctx.json({ queued, next: `l:${t}:${last}` });
-            }
-          }
-          // Groups: every organization at targets with groups, and every linked group whose
-          // organization is gone (removed at the app).
-          for (const t of options.targets.filter((x) => targetIds.includes(x.id) && b.hasGroups(x))) {
-            const refs = new Map<string, { kind: "group" | "team" | "role"; id: string }>();
-            for (let after: string | null = null; ; ) {
-              const orgs = (await ctx.context.adapter.findMany({ model: "organization", where: after === null ? [] : [{ field: "id", value: after, operator: "gt" }], limit: 500, sortBy: { field: "id", direction: "asc" } })) as { id: string }[];
-              for (const o of orgs) for (const ref of await b.groupsForOrganization(t, o.id)) refs.set(`${ref.kind}:${ref.id}`, ref);
-              if (orgs.length < 500) break;
-              after = (orgs[orgs.length - 1] as { id: string }).id;
-            }
-            for (const ref of await b.linkedGroups(t.id)) refs.set(`${ref.kind}:${ref.id}`, ref);
-            for (const ref of refs.values()) {
-              await b.enqueue(t.id, ref.id, { kind: ref.kind, now: true });
-              queued++;
             }
           }
           return ctx.json({ queued, next: null as string | null });

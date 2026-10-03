@@ -57,7 +57,7 @@ Then:
    ```ts
    await auth.api.scimProvisioningReconcile({ body: {} }); // { queued, next: null }
    ```
-   With many users, or on Workers (which limits the work per invocation), go a page at a time:
+   With many users, or on Workers (which limits the work per invocation), go a page at a time (groups included):
    ```ts
    let next: string | null = null;
    do {
@@ -134,7 +134,7 @@ All three kinds can be used together. Any change in an organization (members, ro
 
 - **When it changes:**
   - members join or leave (add, remove, accepting an invitation, leaving), change role, or join or leave a team;
-  - a member is provisioned or deprovisioned;
+  - a member is provisioned, deprovisioned or deleted;
   - the organization or team is renamed (the group is renamed) or deleted (the group is removed at the app);
   - a reconcile runs.
 - **Rebuilt each time:** the group is recomputed from the database on every delivery, so it converges whatever order changes arrive in. A change made in the app is delivered at once; a reconcile updates each group a few times, not once per member.
@@ -148,12 +148,12 @@ Most apps grant access by group: assign the group to the app or role there (AWS 
 - **An outbox in your database.** A change queues one job per user and target. The job carries no user data: delivery reads the user as they are then, so quick changes collapse into one request with the latest state.
 - **Never in the way.** Provisioning never fails the user's own write. A failure to queue is logged, and the next reconcile catches up.
 - **Leases.** A job is claimed before delivery, so two workers never deliver it at once. A change that arrives during a delivery goes out straight after it.
-- **Retries.** 429 (honouring `Retry-After`), 5xx, timeouts, network errors, 401/403 (an expired token is the host's problem, not the user's), and a wrong target URL are retried with backoff, for as long as it takes. The job's last error says which: "check the target's token", "check the target's url". Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
+- **Retries.** 429 (honouring `Retry-After`, at every kind of target), 408, 5xx, timeouts, network errors, 401/403 (an expired token is the host's problem, not the user's), and a wrong target URL (a 404 for everything, or a redirect) are retried with backoff, for as long as it takes. The job's last error says which: "check the target's token", "check the target's url". Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
 - **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off. At apps that don't keep `externalId`, we can't tell that account from one made by hand in the meantime, so the job fails with a message instead of guessing.
 - **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, the user's email verified, and the account's userName that same email. With a custom `mapUser` userName (an employee id, a handle), accounts made by hand at the app are therefore never taken over: give them our `externalId` at the app, or remove them, first. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
 - **A 404 is checked, not believed.** A user is taken as gone at the app only when the app's own list agrees. A wrong URL answers 404 for everything, and believing it would mark people deactivated here while they stay active there.
 - **Reconcile** covers every user, and every user still linked at a target, so deleted users whose deprovisioning was lost are cleaned up too.
-- **No redirects.** The token only goes to the target's URL: a redirect fails the request, with the new location in the error.
+- **No redirects.** The token only goes to the target's URL: a redirect is never followed. It's retried (a maintenance page passes), with the new location in the error, so a target moved for good shows up as "check the target's url".
 
 ## Apps
 
@@ -274,15 +274,20 @@ SCIM_TOKEN=… npx better-auth-scim-provisioning check --url https://example.com
 ```
 
 ```
+✓ ServiceProviderConfig: patch true, filter true, bulk false, etag false, sort false; auth: oauthbearertoken
 ✓ create a user: 201, id 4bb3b660-…
 ✓ keeps externalId
+✓ find by userName
 ✓ find by userName, any case
 ✓ duplicate userName refused (409)
 ✓ update with PUT
 ✓ update with PATCH (no path)
+✓ update with PATCH (path)
 ✓ deactivate (PATCH active false)
 ✓ delete
 ```
+
+Like the plugin, it sends the token only over https (http only to localhost).
 
 For other auth methods, `--auth auth.json`, a file holding the `auth` object as in the table above (or `{ "auth": { … } }`):
 

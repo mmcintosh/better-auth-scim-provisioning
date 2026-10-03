@@ -4,6 +4,22 @@
 
 import { credentials, type ScimAuth } from "./credentials";
 
+/**
+ * A SCIM base URL: https, or http to a loopback address; no credentials, query or fragment, which
+ * would send the token elsewhere or break every path built on it.
+ */
+export function targetUrl(value: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return false;
+  }
+  if (u.username || u.password || u.search || u.hash || value.includes("?") || value.includes("#")) return false;
+  if (u.protocol === "https:") return true;
+  return u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+}
+
 export const SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User";
 export const SCIM_GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group";
 const PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
@@ -124,7 +140,9 @@ export function scimClient(endpoint: ScimEndpoint) {
     if (res.status === 401 && !retried && creds.rejected()) return request(method, path, body, true);
     if (res.status >= 300 && res.status < 400) {
       const to = res.headers.get("location");
-      throw new ScimError(`${method} ${path}: redirected (${res.status})${to ? ` to ${to.slice(0, 200)}` : ""}; use the final URL as the target's url`, res.status, false);
+      // Retried, like a wrong URL: a maintenance page or a login bounce passes, and a wrong URL is
+      // the host's to fix. Failing the job would leave a banned user active until a reconcile.
+      throw new ScimError(`${method} ${path}: redirected (${res.status})${to ? ` to ${to.slice(0, 200)}` : ""}; check the target's url (use the final URL)`, res.status, true, retryAfterMs(res.headers.get("retry-after")));
     }
     const detail = (json as { detail?: unknown } | null)?.detail;
     const scimType = (json as { scimType?: unknown } | null)?.scimType;
@@ -132,7 +150,7 @@ export function scimClient(endpoint: ScimEndpoint) {
     const auth = res.status === 401 || res.status === 403;
     // /Users itself can't be missing: a 404 there is a wrong URL, the host's to fix, like a token.
     const misplaced = res.status === 404 && /^\/(Users|Groups)(\?|$)/.test(path);
-    const retryable = res.status === 429 || res.status >= 500 || auth || misplaced;
+    const retryable = res.status === 408 || res.status === 429 || res.status >= 500 || auth || misplaced;
     throw new ScimError(
       `${method} ${path}: ${res.status}${auth ? " (check the target's token)" : misplaced ? " (check the target's url)" : ""}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
       res.status,
