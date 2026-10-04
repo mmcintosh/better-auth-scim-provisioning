@@ -9,6 +9,8 @@ It's the outbound direction. Better Auth's own [`@better-auth/scim`](https://www
 
 > **0.x:** the API may still change before 1.0. See [what it doesn't do yet](#not-yet).
 
+If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-auth-scim-provisioning) helps others find it.
+
 ## Install
 
 ```sh
