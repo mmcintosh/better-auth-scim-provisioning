@@ -58,10 +58,12 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     // Not Google's own "not found" (a wrong URL answers 404 for everything): the host's to fix.
     const misplaced = res.status === 404 && !google404;
     const auth = res.status === 401 || res.status === 403;
-    const retryable = res.status === 408 || res.status === 429 || res.status >= 500 || auth || misplaced;
+    // 412 "User creation is not complete": Google is still making a user created seconds ago.
+    const creating = res.status === 412;
+    const retryable = res.status === 408 || res.status === 412 || res.status === 429 || res.status >= 500 || auth || misplaced;
     const message = typeof json.error?.message === "string" ? ` ${json.error.message.slice(0, 300)}` : "";
     throw new ScimError(
-      `${method} ${path}: ${res.status}${auth ? " (check the service account, its domain-wide delegation and the admin)" : misplaced ? " (check the target's url)" : ""}${message}`,
+      `${method} ${path}: ${res.status}${auth ? " (check the service account, its domain-wide delegation and the admin)" : misplaced ? " (check the target's url)" : creating ? " (Google is still creating the user; retrying)" : ""}${message}`,
       res.status,
       retryable,
       retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
@@ -82,15 +84,49 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     };
   }
 
+  /**
+   * The user as Google has them now. For a few seconds after a create, Google answers 404 by id
+   * (found live) though the user is there by email, and updates by id already work: so a 404 by id
+   * is asked again by email, and taken only if it's the same user.
+   */
+  async function current(id: string, userName: string): Promise<GoogleUser | null> {
+    try {
+      return await request("GET", path(id));
+    } catch (e) {
+      if (!(e instanceof ScimError && e.status === 404 && !e.retryable)) throw e;
+      const byEmail = await request("GET", path(userName)).catch(() => null);
+      if (byEmail?.id === id) return byEmail;
+      throw e;
+    }
+  }
+
   /** Our entry in externalIds, keeping any others (an admin's employee id, say). */
-  async function externalIds(id: string, externalId: string | undefined) {
-    const current = (await request("GET", path(id)))?.externalIds ?? [];
-    const others = current.filter((x) => !(x.type === OURS.type && x.customType === OURS.customType));
+  async function externalIds(id: string, userName: string, externalId: string | undefined) {
+    const others = ((await current(id, userName))?.externalIds ?? []).filter((x) => !(x.type === OURS.type && x.customType === OURS.customType));
     return externalId ? [...others, { ...OURS, value: externalId }] : others;
   }
 
+  /**
+   * A change to an existing user. While Google applies an email change (a rename, for a minute or
+   * more), it answers further changes with 409 "Entity already exists" (found live): retried, or a
+   * ban right after an email change would fail for good. Only a new address that another account
+   * holds is a real conflict.
+   */
+  async function change(id: string, body: Record<string, unknown>, newEmail?: string) {
+    try {
+      await request("PATCH", path(id), body);
+    } catch (e) {
+      if (!(e instanceof ScimError && e.status === 409)) throw e;
+      if (newEmail) {
+        const holder = await request("GET", path(newEmail)).catch(() => null);
+        if (holder?.id && holder.id !== id) throw new ScimError(`PATCH ${path(id)}: ${newEmail} belongs to another Workspace account`, 409, false);
+      }
+      throw new ScimError(`PATCH ${path(id)}: 409 (Google is still applying an earlier change, such as a new email; retrying)`, 409, true);
+    }
+  }
+
   async function update(id: string, user: ScimUser) {
-    await request("PATCH", path(id), { ...toGoogle(user), externalIds: await externalIds(id, user.externalId) });
+    await change(id, { ...toGoogle(user), externalIds: await externalIds(id, user.userName, user.externalId) }, user.userName);
   }
 
   const noGroups = async (): Promise<never> => {
@@ -132,10 +168,15 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     replace: update,
     patch: update,
     async setActive(id: string, active: boolean) {
-      await request("PATCH", path(id), { suspended: !active });
+      await change(id, { suspended: !active });
     },
     async remove(id: string) {
-      await request("DELETE", path(id));
+      try {
+        await request("DELETE", path(id));
+      } catch (e) {
+        if (e instanceof ScimError && e.status === 409) throw new ScimError(`DELETE ${path(id)}: 409 (Google is still applying an earlier change; retrying)`, 409, true);
+        throw e;
+      }
     },
     findGroupByName: noGroups,
     createGroup: noGroups,

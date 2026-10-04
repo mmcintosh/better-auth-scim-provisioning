@@ -210,7 +210,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           if (!notFound(e)) throw e;
           // Removed at the app since (create it again), or listed under another id now: only the
           // app's list can tell, and asking it also catches a wrong URL, which 404s for everything.
-          const other = await stillThere(target, client, userId, link.userName, link.externalId ?? null);
+          const other = await stillThere(target, client, userId, link.userName, link.externalId ?? null, link.remoteId);
           if (other) {
             await (target.update === "patch" ? client.patch : client.replace)(other, scim);
             await saveLink(target, userId, { remoteId: other, userName: scim.userName, externalId, active: true });
@@ -289,7 +289,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         await client.remove(link.remoteId);
       } catch (e) {
         if (!notFound(e)) throw e;
-        const other = await stillThere(target, client, userId, link.userName, externalId);
+        const other = await stillThere(target, client, userId, link.userName, externalId, link.remoteId);
         if (other) await client.remove(other);
       }
       await dropLink(key);
@@ -301,7 +301,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         await client.setActive(remoteId, false);
       } catch (e) {
         if (!notFound(e)) throw e;
-        const other = await stillThere(target, client, userId, link.userName, externalId);
+        const other = await stillThere(target, client, userId, link.userName, externalId, remoteId);
         if (other) {
           await client.setActive(other, false);
           remoteId = other;
@@ -318,11 +318,15 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * everything, and taking that 404 as "gone" left users active at the app (found in the field
    * test). Returns the account's id if it's ours, or null when it's gone.
    */
-  async function stillThere(target: Target, client: ReturnType<typeof scimClient>, userId: string, userName: string, externalId: string | null): Promise<string | null> {
+  async function stillThere(target: Target, client: ReturnType<typeof scimClient>, userId: string, userName: string, externalId: string | null, missing: string): Promise<string | null> {
     const found = await client.findByUserName(userName);
     if (!found) return null;
-    if (found.externalId !== null && found.externalId === externalId) return found.id;
-    return found.externalId === null && (await ownerOf(target, found.id)) === userId ? found.id : null;
+    const ours = (found.externalId !== null && found.externalId === externalId) || (found.externalId === null && (await ownerOf(target, found.id)) === userId);
+    if (!ours) return null;
+    // Listed under the very id that just answered 404: the app isn't done creating it (Google, for
+    // a few seconds after a create, found live). Retried, rather than failed by a second 404.
+    if (found.id === missing) throw new ScimError(`${userName}: the app lists the account but answers 404 for it, so it's still being created; retrying`, 404, true);
+    return found.id;
   }
 
   /**

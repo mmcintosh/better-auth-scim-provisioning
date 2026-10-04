@@ -4,6 +4,16 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed
+
+- Google Workspace, found by testing live against a real Workspace: Google takes a while to settle after a create or an email change, and its answers in that time failed jobs for good. Now they're retried:
+  - a 404 for a user created seconds ago;
+  - a 412 "User creation is not complete";
+  - a 409 to any change made while an email change is applied. Before, a ban right after an email change failed and left the user active in Workspace.
+
+  A new email that belongs to another Workspace account still fails, now with a clear message.
+- Any target: if an app answers 404 for an account and then lists it under that same id, it's still being created. That's retried now; before, the second 404 failed the job.
+
 ## [0.2.0] - 2026-10-03
 
 More kinds of targets (Google Workspace, signed webhooks), teams and roles as groups, and profiles for specific apps. Upgrading from 0.1.0 needs no database migration.

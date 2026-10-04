@@ -197,7 +197,7 @@ scimProvisioning({
 
 ### Google Workspace
 
-Google doesn't accept SCIM, so Workspace is its own kind of target, through the Directory API. Users only, for now.
+Google doesn't accept SCIM, so Workspace is its own kind of target, through the Directory API. Users only, for now. Verified live against a real Workspace: create, rename, email change, suspend, unsuspend, deprovision, and the refusals below.
 
 ```ts
 {
@@ -226,6 +226,11 @@ How it maps:
 - Google requires a password when a user is created, so a random one is set. Users sign in through your identity provider (with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) as Workspace's SAML identity provider), so it's never used.
 
 Adoption follows the same rules as SCIM, and an account that merely has the user's email as an *alias* is never taken over. Nor is a suspended account made by hand: taking it over would unsuspend it, so the job fails until an admin unsuspends it (or gives it our id). Right after a create, Google sometimes says an account exists before it can show it; that's retried.
+
+Google takes a while to settle, and the plugin waits it out rather than failing:
+- for a few seconds after a create, the new user answers 404 by id, and 412 "User creation is not complete" to a delete;
+- for a minute or more after an email change, further changes to that user (a ban, say) are answered with 409;
+- reads of a new user can trail its changes by a minute or more, so the Admin console may briefly show older details.
 
 ### Webhooks
 

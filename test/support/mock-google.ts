@@ -3,6 +3,10 @@
 // iss, sub, scope, aud), users are found by id, primary email or alias, primary emails and aliases
 // are unique (409), only the Workspace's domains are accepted (400), a password and both names are
 // required to create, and "not found" is Google's JSON error. Anything else gets a plain 404.
+// `lag`: as found live, a user created moments ago isn't there by id yet (GET and PATCH 404)
+// though it is by email, and can't be deleted yet (412), for the next `lag` requests by id.
+// `renameLag`: as found live, while an email change is applied, the next `renameLag` changes to
+// that user answer 409 "Entity already exists".
 
 export interface GoogleStoredUser {
   id: string;
@@ -15,7 +19,7 @@ export interface GoogleStoredUser {
   password?: string;
 }
 
-export async function mockGoogle(o: { domains?: string[]; admin?: string } = {}) {
+export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: number | undefined; renameLag?: number | undefined } = {}) {
   const domains = o.domains ?? ["example.com"];
   const admin = o.admin ?? "admin@example.com";
   const keys = (await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
@@ -26,6 +30,8 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string } = {})
   const tokenUrl = "https://oauth2.google.test/token";
   const users = new Map<string, GoogleStoredUser>();
   const tokens = new Set<string>();
+  const settling = new Map<string, number>();
+  const renaming = new Map<string, number>();
   const requests: { method: string; path: string; body?: unknown }[] = [];
   const tokenRequests: { claims: Record<string, unknown> }[] = [];
   let next = 1;
@@ -75,14 +81,26 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string } = {})
       if (taken(email)) return gerror(409, "Entity already exists.");
       const stored: GoogleStoredUser = { id: `g${next++}`, primaryEmail: email, name, suspended: body.suspended === true, password: String(body.password), ...(body.externalIds ? { externalIds: body.externalIds as GoogleStoredUser["externalIds"] } : {}), ...(body.orgUnitPath ? { orgUnitPath: String(body.orgUnitPath) } : {}) };
       users.set(stored.id, stored);
+      if (o.lag) settling.set(stored.id, o.lag);
       const { password: _, ...view } = stored;
       return json(200, view);
     }
     const existing = key ? find(key) : undefined;
     if (!existing) return gerror(404, "Resource Not Found: userKey");
+    const left = key === existing.id ? (settling.get(existing.id) ?? 0) : 0;
+    if (left > 0) {
+      settling.set(existing.id, left - 1);
+      if (method === "GET" || method === "PATCH") return gerror(404, "Resource Not Found: userKey");
+      if (method === "DELETE") return gerror(412, "User creation is not complete.");
+    }
     if (method === "GET") {
       const { password: _, ...view } = existing;
       return json(200, view);
+    }
+    const renameLeft = renaming.get(existing.id) ?? 0;
+    if (renameLeft > 0 && (method === "PATCH" || method === "DELETE")) {
+      renaming.set(existing.id, renameLeft - 1);
+      return gerror(409, "Entity already exists.");
     }
     if (method === "PATCH") {
       if (typeof body?.primaryEmail === "string" && body.primaryEmail.toLowerCase() !== existing.primaryEmail.toLowerCase()) {
@@ -90,6 +108,7 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string } = {})
         if (taken(body.primaryEmail, existing.id)) return gerror(409, "Entity already exists.");
       }
       if (body?.name) existing.name = { ...existing.name, ...(body.name as object) };
+      if (o.renameLag && typeof body?.primaryEmail === "string" && body.primaryEmail.toLowerCase() !== existing.primaryEmail.toLowerCase()) renaming.set(existing.id, o.renameLag);
       for (const k of ["primaryEmail", "suspended", "externalIds", "orgUnitPath"] as const) if (body && k in body) (existing as unknown as Record<string, unknown>)[k] = body[k];
       const { password: _, ...view } = existing;
       return json(200, view);
@@ -101,5 +120,5 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string } = {})
     return gerror(405, "method not allowed");
   };
 
-  return { fetch: handler, users, requests, tokenRequests, url, tokenUrl, clientEmail, privateKey, admin };
+  return { fetch: handler, users, settling, requests, tokenRequests, url, tokenUrl, clientEmail, privateKey, admin };
 }
