@@ -37,7 +37,7 @@ beforeAll(async () => {
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) if (typeof v === "string") headers.set(k, v);
     try {
-      const out = await POST(new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers, body: Buffer.concat(chunks) }));
+      const out = await POST(new Request(`http://127.0.0.1${req.url}`, { method: req.method ?? "POST", headers, body: Buffer.concat(chunks) }));
       res.writeHead(out.status).end();
     } catch (e) {
       rejected.push((e as Error).message);
