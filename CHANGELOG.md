@@ -18,6 +18,10 @@ Google Workspace, verified live against a real Workspace, with fixes for what th
   A new email that belongs to another Workspace account still fails, now with a clear message.
 - Any target: if an app answers 404 for an account and then lists it under that same id, it's still being created. That's retried now; before, the second 404 failed the job.
 
+### Documentation
+
+- Google Workspace is marked verified live, and its setup steps are clearer: the service account needs no project role, its client ID is the Unique ID, and an organizational unit can hold the users it creates.
+
 ## [0.2.0] - 2026-10-03
 
 More kinds of targets (Google Workspace, signed webhooks), teams and roles as groups, and profiles for specific apps. Upgrading from 0.1.0 needs no database migration.
