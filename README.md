@@ -174,7 +174,7 @@ scimProvisioning({
 | Slack | `slack` | documented | userNames must be lowercase, at most 21 characters, with only `.` `_` `-`: taken from the email's local part (`slackUserName`). Deleting only deactivates. Since the userName isn't the email, Slack accounts made by hand are never adopted: give them our `externalId`, or remove them, first. |
 | Atlassian | `atlassian` | documented | Groups can't be renamed, so a renamed group is created anew with its members, then the old one deleted (retried until it is). If a group with the new name exists and isn't ours, the job fails. |
 | GitHub Enterprise Managed Users | `githubEnterprise` | documented | GitHub's DELETE permanently suspends an account, so this only deactivates, and refuses `deprovision: "delete"`. |
-| Google Workspace | `type: "google-workspace"` | documented | Not SCIM: see [Google Workspace](#google-workspace). |
+| Google Workspace | `type: "google-workspace"` | verified live | Not SCIM: see [Google Workspace](#google-workspace). |
 | Anything else | `type: "webhook"` | | Signed webhooks to your own code or an automation platform: see [Webhooks](#webhooks). |
 
 "Verified live" means tested against the app itself. "Documented" means built from the app's documentation and tested against a model of it. Run `check` against it first (below), and tell us what you find.
@@ -213,10 +213,11 @@ Google doesn't accept SCIM, so Workspace is its own kind of target, through the 
 ```
 
 Setting it up:
-1. In Google Cloud, create or choose a project and enable the **Admin SDK API**.
-2. Create a **service account**, and a JSON key for it. `client_email` and `private_key` go in the options.
-3. In the Workspace Admin console, go to Security → Access and data control → API controls → **Domain-wide delegation** → Add new. Use the service account's client ID, with the scope `https://www.googleapis.com/auth/admin.directory.user`.
+1. In Google Cloud, create or choose a project (a plain one; no billing needed) and enable the **Admin SDK API**.
+2. Create a **service account** (IAM & Admin → Service Accounts). It needs no role in the project: skip that step. Then add a JSON key (Keys → Add key → JSON). `client_email` and `private_key` go in the options.
+3. In the Workspace Admin console, as a super admin, go to Security → Access and data control → API controls → **Domain-wide delegation** → Add new. The client ID is the service account's **Unique ID** (its Details tab), with the scope `https://www.googleapis.com/auth/admin.directory.user`. It can take a few minutes to apply.
 4. Choose an **admin** for it to act as, with permission to manage users.
+5. Optionally, create an **organizational unit** for the users it creates (Directory → Organizational units) and set `orgUnitPath`: there you decide which Workspace services they get.
 
 How it maps:
 - the email (`userName`) becomes `primaryEmail`, which must be in one of the Workspace's domains;
