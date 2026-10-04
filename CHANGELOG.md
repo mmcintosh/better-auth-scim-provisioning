@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-04
+
+Google Workspace, verified live against a real Workspace, with fixes for what that found. Upgrade if you use a Google Workspace target: on 0.2.0, a ban right after an email change can fail and leave the user active in Workspace.
+
 ### Fixed
 
 - Google Workspace, found by testing live against a real Workspace: Google takes a while to settle after a create or an email change, and its answers in that time failed jobs for good. Now they're retried:

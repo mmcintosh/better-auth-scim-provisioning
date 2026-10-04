@@ -1,6 +1,6 @@
 {
   "name": "better-auth-scim-provisioning",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "SCIM provisioning for Better Auth: create, update and deactivate users in the apps they sign in to.",
   "license": "MIT",
   "author": "Mark McIntosh",
