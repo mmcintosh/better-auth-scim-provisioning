@@ -3,9 +3,9 @@
 [![CI](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml/badge.svg)](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/better-auth-scim-provisioning)](https://www.npmjs.com/package/better-auth-scim-provisioning)
 
-**SCIM provisioning for [Better Auth](https://www.better-auth.com).** When a user is created, changed, banned or deleted in Better Auth, or joins or leaves an organization, their account in the apps they use is created, updated or deactivated over SCIM 2.0. Accounts exist before the first sign-in, and are switched off when someone leaves, not whenever their last session happens to expire.
+**User provisioning for [Better Auth](https://www.better-auth.com): SCIM 2.0, Google Workspace and signed webhooks.** When a user is created, changed, banned or deleted in Better Auth, or joins or leaves an organization, their account in the apps they use is created, updated or deactivated. Accounts exist before the first sign-in, and are switched off when someone leaves, not whenever their last session happens to expire.
 
-It's the outbound direction. Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim) is the inbound one: directories push users *into* your app. This package pushes them *out*, to Cloudflare Access, AWS IAM Identity Center and any other app that accepts SCIM 2.0. It works however those users sign in, and pairs naturally with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) when your app is their identity provider.
+It's the outbound direction. Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim) is the inbound one: directories push users *into* your app. This package pushes them *out*: to Cloudflare Access, AWS IAM Identity Center and any other app that accepts SCIM 2.0; to [Google Workspace](#google-workspace), through its Directory API; and, as [signed webhooks](#webhooks), to your own apps or automation tools. It works however those users sign in, and pairs naturally with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) when your app is their identity provider.
 
 > **0.x:** the API may still change before 1.0. See [what it doesn't do yet](#not-yet).
 
