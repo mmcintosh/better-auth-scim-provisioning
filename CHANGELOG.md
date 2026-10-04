@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-03
+
+More kinds of targets (Google Workspace, signed webhooks), teams and roles as groups, and profiles for specific apps. Upgrading from 0.1.0 needs no database migration.
+
 ### Added
 
 - **Webhook targets** (`type: "webhook"`): every change POSTed as a JSON event with the full current state, signed with HMAC-SHA256; `verifyWebhookSignature` for receivers.
@@ -23,6 +27,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 - `checkScimTarget` and the `check` CLI refuse plain-http URLs, as the plugin does, instead of sending the token over them.
 - `Retry-After` is honoured at every kind of target, not only SCIM.
 - A warning is logged when an organization, user or team has more rows than are read at once (1,000), instead of skipping the rest's groups silently.
+- Reviewed before release, including by an external reviewer; tested on SQLite, PostgreSQL, MySQL and MongoDB. Google Workspace, webhooks, teams and roles, and the AWS, Slack, Atlassian and GitHub profiles are tested against models of those apps, not live.
 
 ## [0.1.0] - 2026-10-02
 
