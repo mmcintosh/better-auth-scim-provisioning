@@ -1,7 +1,7 @@
 {
   "name": "better-auth-scim-provisioning",
   "version": "0.2.1",
-  "description": "SCIM provisioning for Better Auth: create, update and deactivate users in the apps they sign in to.",
+  "description": "User provisioning for Better Auth: create, update and deactivate users in the apps they sign in to, over SCIM 2.0, Google Workspace and signed webhooks.",
   "license": "MIT",
   "author": "Mark McIntosh",
   "type": "module",
@@ -10,7 +10,9 @@
     "scim",
     "provisioning",
     "saml",
-    "identity-provider"
+    "identity-provider",
+    "google-workspace",
+    "webhooks"
   ],
   "homepage": "https://github.com/mmcintosh/better-auth-scim-provisioning#readme",
   "repository": {
