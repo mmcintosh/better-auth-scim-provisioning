@@ -199,7 +199,7 @@ scimProvisioning({
 
 ### Google Workspace
 
-Google doesn't accept SCIM, so Workspace is its own kind of target, through the Directory API: users, and with `groups`, `teamGroups` or `roleGroups`, Google Groups. Users are verified live against a real Workspace: create, rename, email change, suspend, unsuspend, deprovision, and the refusals below. Groups are tested against a model of the Directory API.
+Google doesn't accept SCIM, so Workspace is its own kind of target, through the Directory API: users, and with `groups`, `teamGroups` or `roleGroups`, Google Groups. Verified live against a real Workspace: users (create, rename, email change, suspend, unsuspend, deprovision, and the refusals below) and groups (an organization, a team and a role, through a rename, a member leaving, and removal).
 
 ```ts
 {
@@ -239,7 +239,8 @@ Adoption follows the same rules as SCIM, and an account that merely has the user
 Google takes a while to settle, and the plugin waits it out rather than failing:
 - for a few seconds after a create, the new user answers 404 by id, and 412 "User creation is not complete" to a delete;
 - for a minute or more after an email change, further changes to that user (a ban, say) are answered with 409;
-- reads of a new user can trail its changes by a minute or more, so the Admin console may briefly show older details.
+- reads of a new user can trail its changes by a minute or more, so the Admin console may briefly show older details;
+- a group made seconds ago can answer 404 to its first members, and say "already exists" while a read of it still finds nothing.
 
 ### Webhooks
 

@@ -717,6 +717,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       // whose reply was lost) is updated; anyone else's is never taken over: replacing it would
       // rewrite its members.
       const found = await client.findGroupByName(displayName, externalId);
+      // Google's reads trail its writes: right after our own create it can say "exists" and still
+      // not show the group (found live). Retried, with the pending link kept, as for users.
+      if (!found && target.type === "google-workspace") throw new ScimError(`group ${displayName}: Google says it exists but can't find it yet; retrying`, 409, true);
       const ours = found !== null && !(await otherOwner(found.id)) && (found.externalId === externalId || (found.externalId === null && pendingBefore));
       if (!found || !ours) return refuse();
       await updateGroup(found.id);
