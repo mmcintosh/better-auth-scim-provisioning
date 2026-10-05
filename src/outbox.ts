@@ -604,7 +604,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         } catch (e) {
           if (!notFound(e)) throw e;
           // Gone, or a wrong URL: the list tells (and throws if the app can't be asked).
-          const found = await client.findGroupByName(link.displayName);
+          const found = await client.findGroupByName(link.displayName, externalId);
           if (found && found.externalId === externalId) await client.removeGroup(found.id);
         }
       } else if (target.type === "webhook") {
@@ -612,7 +612,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         await client.removeGroup(externalId);
       } else {
         // Pending: a create whose reply was lost may have made it. Ours is removed.
-        const found = await client.findGroupByName(link.displayName);
+        const found = await client.findGroupByName(link.displayName, externalId);
         if (found && found.externalId === externalId) await client.removeGroup(found.id);
       }
       await adapter.deleteMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }] });
@@ -633,7 +633,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       // The new group may already exist: made by an earlier try whose delete of the old one failed,
       // or whose reply was lost. Ours (our externalId, no other link) is used, never created twice.
       const ours = async () => {
-        const found = await client.findGroupByName(displayName);
+        const found = await client.findGroupByName(displayName, externalId);
         if (!found) return null;
         if (found.externalId !== externalId || (await otherOwner(found.id)))
           throw new ScimError(`group ${displayName}: renaming means creating it anew, and a group with this name already exists at the app`, 409, false);
@@ -668,7 +668,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       } catch (e) {
         if (!notFound(e)) throw e;
         // Removed at the app since, or a wrong URL: asking the list tells which.
-        const found = await client.findGroupByName(link.displayName);
+        const found = await client.findGroupByName(link.displayName, externalId);
         if (found && found.externalId === externalId) {
           await updateGroup(found.id);
           await saveGroupLink(target, ref, organizationId, { remoteId: found.id, displayName });
@@ -680,7 +680,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     // Pending under another name (a lost create's reply, then a rename): the group it made is
     // found under the old name and renamed (or, at apps that can't rename, removed and made anew).
     if (link && pendingBefore && link.displayName !== displayName && target.type !== "webhook") {
-      const found = await client.findGroupByName(link.displayName);
+      const found = await client.findGroupByName(link.displayName, externalId);
       if (found && !(await otherOwner(found.id)) && (found.externalId === externalId || found.externalId === null)) {
         if (compat.groupRename === "recreate") await client.removeGroup(found.id);
         else {
@@ -698,7 +698,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (!pendingBefore) {
       // Look before creating: a group of this name that isn't ours is refused here, before any
       // pending link exists, so a pending link always means "our own create may have made it".
-      const existing = await client.findGroupByName(displayName);
+      const existing = await client.findGroupByName(displayName, externalId);
       if (existing) {
         if (existing.externalId !== externalId || (await otherOwner(existing.id))) return refuse();
         await updateGroup(existing.id);
@@ -716,7 +716,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       // A group with this name exists. Ours (our externalId, or no externalId after our own create
       // whose reply was lost) is updated; anyone else's is never taken over: replacing it would
       // rewrite its members.
-      const found = await client.findGroupByName(displayName);
+      const found = await client.findGroupByName(displayName, externalId);
       const ours = found !== null && !(await otherOwner(found.id)) && (found.externalId === externalId || (found.externalId === null && pendingBefore));
       if (!found || !ours) return refuse();
       await updateGroup(found.id);

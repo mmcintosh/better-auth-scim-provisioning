@@ -199,7 +199,7 @@ scimProvisioning({
 
 ### Google Workspace
 
-Google doesn't accept SCIM, so Workspace is its own kind of target, through the Directory API. Users only, for now. Verified live against a real Workspace: create, rename, email change, suspend, unsuspend, deprovision, and the refusals below.
+Google doesn't accept SCIM, so Workspace is its own kind of target, through the Directory API: users, and with `groups`, `teamGroups` or `roleGroups`, Google Groups. Users are verified live against a real Workspace: create, rename, email change, suspend, unsuspend, deprovision, and the refusals below. Groups are tested against a model of the Directory API.
 
 ```ts
 {
@@ -211,13 +211,14 @@ Google doesn't accept SCIM, so Workspace is its own kind of target, through the 
     adminEmail: "provisioning-admin@your-domain.com", // the Workspace admin it acts as
     orgUnitPath: "/Provisioned",                   // optional: where new users go (existing users are never moved)
   },
+  groups: true,                                    // optional: organizations as Google Groups (also teamGroups, roleGroups)
 }
 ```
 
 Setting it up:
 1. In Google Cloud, create or choose a project (a plain one; no billing needed) and enable the **Admin SDK API**.
 2. Create a **service account** (IAM & Admin → Service Accounts). It needs no role in the project: skip that step. Then add a JSON key (Keys → Add key → JSON). `client_email` and `private_key` go in the options.
-3. In the Workspace Admin console, as a super admin, go to Security → Access and data control → API controls → **Domain-wide delegation** → Add new. The client ID is the service account's **Unique ID** (its Details tab), with the scope `https://www.googleapis.com/auth/admin.directory.user`. It can take a few minutes to apply.
+3. In the Workspace Admin console, as a super admin, go to Security → Access and data control → API controls → **Domain-wide delegation** → Add new. The client ID is the service account's **Unique ID** (its Details tab), with the scope `https://www.googleapis.com/auth/admin.directory.user`, and for groups also `https://www.googleapis.com/auth/admin.directory.group` (comma-separated). It can take a few minutes to apply. A target with groups asks for both, and Google refuses its token if delegation allows only one, so set them together.
 4. Choose an **admin** for it to act as, with permission to manage users.
 5. Optionally, create an **organizational unit** for the users it creates (Directory → Organizational units) and set `orgUnitPath`: there you decide which Workspace services they get.
 
@@ -227,6 +228,11 @@ How it maps:
 - deprovisioning suspends the user, or deletes them with `deprovision: "delete"`;
 - our user id is a custom entry in `externalIds`, and any other external ids an admin set are kept;
 - Google requires a password when a user is created, so a random one is set. Users sign in through your identity provider (with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) as Workspace's SAML identity provider), so it's never used.
+
+Groups (`groups`, `teamGroups`, `roleGroups`, as for SCIM apps):
+- each group is a Google Group at an address made from its externalId, such as `ba-team-<team id>@your-domain.com`, so renaming an organization renames the group without moving it. Set `google.groupDomain` for another domain, or `google.groupEmail: (externalId) => string` to name them yourself, and keep it stable: the address is how the group is found again;
+- the description marks it ours. A group already at that address without our marker is someone else's, and is never taken over;
+- members are the provisioned users, added and removed one request each; members that aren't users (a nested group an admin added) are left alone.
 
 Adoption follows the same rules as SCIM, and an account that merely has the user's email as an *alias* is never taken over. Nor is a suspended account made by hand: taking it over would unsuspend it, so the job fails until an admin unsuspends it (or gives it our id). Right after a create, Google sometimes says an account exists before it can show it; that's retried.
 
@@ -313,7 +319,7 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested
 
 ## Not yet
 
-- **Groups at Google Workspace targets** (Google Groups): users only for now.
+- **Live verification of the Slack, Atlassian and GitHub Enterprise profiles.** They're built from each app's documentation and tested against a model; the table above says which apps are verified live.
 
 ## Development
 

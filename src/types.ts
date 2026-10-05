@@ -101,7 +101,7 @@ export interface ScimTarget extends TargetOptions {
   secret?: undefined;
 }
 
-/** Google Workspace, through its Directory API (users only, for now). */
+/** Google Workspace, through its Directory API: users, and organizations, teams and roles as Google Groups. */
 export interface GoogleWorkspaceTarget extends TargetOptions {
   type: "google-workspace";
   /** For tests; default the Directory API. */
@@ -116,6 +116,14 @@ export interface GoogleWorkspaceTarget extends TargetOptions {
     adminEmail: string;
     /** Where new users go, e.g. "/Provisioned"; default the root. */
     orgUnitPath?: string | undefined;
+    /** The domain of the groups' email addresses; default the admin's. */
+    groupDomain?: string | undefined;
+    /**
+     * A group's email address, from its externalId (an organization's id, `team:<id>` or
+     * `role:<organization id>:<role>`). Keep it stable: it's how the group is found again. Default
+     * `ba-<externalId as a slug>@<groupDomain>`.
+     */
+    groupEmail?: ((externalId: string) => string) | undefined;
     /** For tests: the token endpoint. */
     tokenUrl?: string | undefined;
   };

@@ -31,6 +31,8 @@ const optionsSchema = z.object({
             privateKey: z.string().includes("PRIVATE KEY", { message: "must be the service account's PEM private key" }),
             adminEmail: z.string().min(1),
             orgUnitPath: z.string().startsWith("/").optional(),
+            groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/, "a domain, such as example.com").optional(),
+            groupEmail: z.function().optional(),
             tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
           })
           .optional(),
@@ -78,8 +80,7 @@ const optionsSchema = z.object({
         .refine((t) => t.type === "google-workspace" || t.type === "webhook" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
         .refine((t) => t.type !== "webhook" || (t.secret !== undefined && t.token === undefined && t.auth === undefined && t.google === undefined), "a webhook target takes url and secret, not token, auth or google")
         .refine((t) => t.type === "webhook" || t.secret === undefined, "secret is for webhook targets")
-        .refine((t) => t.type !== "google-workspace" || (t.google !== undefined && t.token === undefined && t.auth === undefined), "a google-workspace target takes google, not token or auth")
-        .refine((t) => t.type !== "google-workspace" || !(t.groups || t.teamGroups || t.roleGroups), "Google Workspace targets don't provision groups yet"),
+        .refine((t) => t.type !== "google-workspace" || (t.google !== undefined && t.token === undefined && t.auth === undefined), "a google-workspace target takes google, not token or auth"),
     )
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
   retry: z.object({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),

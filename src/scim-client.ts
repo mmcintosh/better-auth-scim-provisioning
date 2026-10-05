@@ -221,7 +221,8 @@ export function scimClient(endpoint: ScimEndpoint) {
       await request("DELETE", `/Users/${encodeURIComponent(id)}`);
     },
     /** The group with this displayName (its id and externalId), or null. */
-    async findGroupByName(displayName: string): Promise<{ id: string; externalId: string | null } | null> {
+    /** By displayName; `externalId` is for clients that find groups by it instead (Google Workspace). */
+    async findGroupByName(displayName: string, _externalId?: string | null): Promise<{ id: string; externalId: string | null } | null> {
       const { json } = await request("GET", `/Groups?filter=${encodeURIComponent(`displayName eq ${scimString(displayName)}`)}&count=2`);
       const list = json as { Resources?: unknown; totalResults?: unknown } | null;
       if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number"))

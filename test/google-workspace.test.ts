@@ -111,13 +111,14 @@ describe("Google Workspace", () => {
     expect(await h.links()).toEqual([expect.objectContaining({ active: true })]);
   });
 
-  it("options: google is required, token/auth and groups aren't allowed, url is optional", () => {
+  it("options: google is required, token/auth aren't allowed, groups are, url is optional", () => {
     const google = { clientEmail: "a@b.iam.gserviceaccount.com", privateKey: "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----", adminEmail: "admin@example.com" };
     const t = (x: object) => () => scimProvisioning({ targets: [{ id: "w", ...x } as never] });
     expect(t({ type: "google-workspace", google })).not.toThrow();
     expect(t({ type: "google-workspace" })).toThrow(/takes google/);
     expect(t({ type: "google-workspace", google, token: "t" })).toThrow(/takes google/);
-    expect(t({ type: "google-workspace", google, groups: true })).toThrow(/groups/);
+    expect(t({ type: "google-workspace", google, groups: true, teamGroups: true, roleGroups: ["admin"] })).not.toThrow();
+    expect(t({ type: "google-workspace", google: { ...google, groupDomain: "not a domain" } })).toThrow(/groupDomain/);
     expect(t({ token: "t" })).toThrow(/url is required/);
   });
 });

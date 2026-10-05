@@ -120,7 +120,7 @@ async function fetchGoogleToken(auth: Extract<ScimAuth, { type: "google" }>, o: 
   }
   const signature = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(unsigned)));
   const form = new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${unsigned}.${base64url(signature)}` });
-  return requestToken(tokenUrl, { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, form, o, "the service account and its domain-wide delegation");
+  return requestToken(tokenUrl, { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, form, o, `the service account, and that its domain-wide delegation allows ${auth.scopes.join(", ")}`);
 }
 
 async function requestToken(tokenUrl: string, headers: Record<string, string>, form: URLSearchParams, o: { fetch?: typeof fetch | undefined; timeoutMs?: number | undefined }, check: string) {

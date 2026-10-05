@@ -8,6 +8,14 @@
 // `renameLag`: as found live, while an email change is applied, the next `renameLag` changes to
 // that user answer 409 "Entity already exists".
 
+export interface GoogleStoredGroup {
+  id: string;
+  email: string;
+  name: string;
+  description?: string;
+  members: Set<string>;
+}
+
 export interface GoogleStoredUser {
   id: string;
   primaryEmail: string;
@@ -19,7 +27,7 @@ export interface GoogleStoredUser {
   password?: string;
 }
 
-export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: number | undefined; renameLag?: number | undefined } = {}) {
+export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: number | undefined; renameLag?: number | undefined; groupScope?: boolean | undefined; groupLag?: number | undefined; membersPageSize?: number | undefined } = {}) {
   const domains = o.domains ?? ["example.com"];
   const admin = o.admin ?? "admin@example.com";
   const keys = (await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
@@ -29,6 +37,11 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
   const url = "https://admin.google.test/admin/directory/v1";
   const tokenUrl = "https://oauth2.google.test/token";
   const users = new Map<string, GoogleStoredUser>();
+  const groups = new Map<string, GoogleStoredGroup>();
+  const tokenScopes = new Map<string, string[]>();
+  const groupSettling = new Map<string, number>();
+  const USER_SCOPE = "https://www.googleapis.com/auth/admin.directory.user";
+  const GROUP_SCOPE = "https://www.googleapis.com/auth/admin.directory.group";
   const tokens = new Set<string>();
   const settling = new Map<string, number>();
   const renaming = new Map<string, number>();
@@ -54,10 +67,72 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
     tokenRequests.push({ claims });
     const now = Math.floor(Date.now() / 1000);
     if (!valid || claims.iss !== clientEmail || claims.aud !== tokenUrl || typeof claims.exp !== "number" || claims.exp < now) return json(400, { error: "invalid_grant" });
-    if (claims.sub !== admin || claims.scope !== "https://www.googleapis.com/auth/admin.directory.user") return json(401, { error: "unauthorized_client" });
+    // As Google does: a scope that domain-wide delegation doesn't allow fails the whole token request.
+    const scopes = String(claims.scope ?? "").split(" ");
+    const allowed = [USER_SCOPE, ...(o.groupScope === false ? [] : [GROUP_SCOPE])];
+    if (claims.sub !== admin || !scopes.includes(USER_SCOPE) || scopes.some((sc) => !allowed.includes(sc))) return json(401, { error: "unauthorized_client" });
     const t = `ya29.mock-${next++}`;
     tokens.add(t);
+    tokenScopes.set(t, scopes);
     return json(200, { access_token: t, token_type: "Bearer", expires_in: 3600 });
+  }
+
+  const findGroup = (key: string) => [...groups.values()].find((x) => x.id === key || x.email.toLowerCase() === key.toLowerCase());
+  const groupView = (x: GoogleStoredGroup) => ({ kind: "admin#directory#group", id: x.id, email: x.email, name: x.name, description: x.description ?? "", directMembersCount: String(x.members.size) });
+
+  /** Groups and their members, as the Directory API has them. */
+  function groupsApi(method: string, key: string | undefined, members: boolean, memberKey: string | undefined, body: Record<string, unknown> | undefined, u: URL): Response {
+    if (method === "POST" && !key) {
+      const email = String(body?.email ?? "");
+      if (!email || !body?.name) return gerror(400, "Invalid Input: missing required field");
+      if (!domains.includes(email.split("@")[1] ?? "")) return gerror(400, "Domain not found.");
+      if (findGroup(email) || taken(email)) return gerror(409, "Entity already exists.");
+      const stored: GoogleStoredGroup = { id: `grp${next++}`, email, name: String(body.name), members: new Set(), ...(typeof body.description === "string" ? { description: body.description } : {}) };
+      groups.set(stored.id, stored);
+      if (o.groupLag) groupSettling.set(stored.id, o.groupLag);
+      return json(200, groupView(stored));
+    }
+    const group = key ? findGroup(key) : undefined;
+    if (!group) return gerror(404, "Resource Not Found: groupKey");
+    if (members) {
+      const left = groupSettling.get(group.id) ?? 0;
+      if (left > 0) {
+        groupSettling.set(group.id, left - 1);
+        return gerror(404, "Resource Not Found: groupKey");
+      }
+      if (method === "GET" && !memberKey) {
+        const ids = [...group.members];
+        const size = Math.min(Number(u.searchParams.get("maxResults") ?? 200), o.membersPageSize ?? 200);
+        const start = Number(u.searchParams.get("pageToken") ?? 0);
+        const page = ids.slice(start, start + size).map((id) => ({ kind: "admin#directory#member", id, email: users.get(id)?.primaryEmail, role: "MEMBER", type: "USER" }));
+        return json(200, { kind: "admin#directory#members", ...(page.length ? { members: page } : {}), ...(start + size < ids.length ? { nextPageToken: String(start + size) } : {}) });
+      }
+      if (method === "POST" && !memberKey) {
+        const who = (body?.id ? users.get(String(body.id)) : undefined) ?? (body?.email ? find(String(body.email)) : undefined);
+        if (!who) return gerror(404, "Resource Not Found: memberKey");
+        if (group.members.has(who.id)) return gerror(409, "Member already exists.");
+        group.members.add(who.id);
+        return json(200, { kind: "admin#directory#member", id: who.id, email: who.primaryEmail, role: "MEMBER", type: "USER" });
+      }
+      if (method === "DELETE" && memberKey) {
+        const who = users.get(memberKey) ?? find(memberKey);
+        if (!who || !group.members.has(who.id)) return gerror(404, "Resource Not Found: memberKey");
+        group.members.delete(who.id);
+        return new Response(null, { status: 204 });
+      }
+      return gerror(405, "method not allowed");
+    }
+    if (method === "GET") return json(200, groupView(group));
+    if (method === "PATCH") {
+      if (typeof body?.name === "string") group.name = body.name;
+      if (typeof body?.description === "string") group.description = body.description;
+      return json(200, groupView(group));
+    }
+    if (method === "DELETE") {
+      groups.delete(group.id);
+      return new Response(null, { status: 204 });
+    }
+    return gerror(405, "method not allowed");
   }
 
   const handler: typeof fetch = async (input, init) => {
@@ -67,9 +142,15 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
     const path = u.pathname.replace(/^\/admin\/directory\/v1/, "");
     requests.push({ method, path, ...(body ? { body } : {}) });
+    const bearer = ((init?.headers as Record<string, string> | undefined)?.authorization ?? "").replace(/^Bearer /, "");
+    const g = u.href.startsWith(url) ? /^\/groups(?:\/([^/]+)(?:\/members(?:\/([^/]+))?)?)?$/.exec(path) : null;
+    if (g) {
+      if (!tokens.has(bearer)) return gerror(401, "Invalid Credentials");
+      if (!tokenScopes.get(bearer)?.includes(GROUP_SCOPE)) return gerror(403, "Request had insufficient authentication scopes.");
+      return groupsApi(method, g[1] ? decodeURIComponent(g[1]) : undefined, path.includes("/members"), g[2] ? decodeURIComponent(g[2]) : undefined, body, u);
+    }
     const m = u.href.startsWith(url) ? /^\/users(?:\/([^/]+))?$/.exec(path) : null;
     if (!m) return new Response("<html>Not Found</html>", { status: 404, headers: { "content-type": "text/html" } });
-    const bearer = ((init?.headers as Record<string, string> | undefined)?.authorization ?? "").replace(/^Bearer /, "");
     if (!tokens.has(bearer)) return gerror(401, "Invalid Credentials");
     const key = m[1] ? decodeURIComponent(m[1]) : undefined;
 
@@ -78,7 +159,7 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
       const name = (body?.name ?? {}) as { givenName?: string; familyName?: string };
       if (!email || !name.givenName || !name.familyName || !body?.password) return gerror(400, "Invalid Input: missing required field");
       if (!domains.includes(email.split("@")[1] ?? "")) return gerror(400, "Domain not found.");
-      if (taken(email)) return gerror(409, "Entity already exists.");
+      if (taken(email) || findGroup(email)) return gerror(409, "Entity already exists.");
       const stored: GoogleStoredUser = { id: `g${next++}`, primaryEmail: email, name, suspended: body.suspended === true, password: String(body.password), ...(body.externalIds ? { externalIds: body.externalIds as GoogleStoredUser["externalIds"] } : {}), ...(body.orgUnitPath ? { orgUnitPath: String(body.orgUnitPath) } : {}) };
       users.set(stored.id, stored);
       if (o.lag) settling.set(stored.id, o.lag);
@@ -120,5 +201,5 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
     return gerror(405, "method not allowed");
   };
 
-  return { fetch: handler, users, settling, requests, tokenRequests, url, tokenUrl, clientEmail, privateKey, admin };
+  return { fetch: handler, users, groups, settling, requests, tokenRequests, url, tokenUrl, clientEmail, privateKey, admin };
 }
