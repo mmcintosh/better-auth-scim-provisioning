@@ -94,6 +94,22 @@ describe("Google Workspace groups", () => {
     expect([...[...h.google.groups.values()][0]!.members]).toEqual([googleId(h, "owner@example.com")]);
   });
 
+  it("found live: Google says the group exists but can't show it yet; retried, not refused", async () => {
+    // Members 404 just after the create, so the delivery is retried; the retry's create gets 409,
+    // and reading the group by its address still 404s for a moment.
+    const h = await createHost({ targets: [{ ...G, groups: true }], googleGroupLag: 1, googleGroupReadLag: 2, retry: { baseDelayMs: 0 } });
+    const o = await owner(h);
+    await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers: o.headers });
+    await h.settle();
+    for (let i = 0; i < 6 && (await h.jobs()).length; i++) {
+      expect((await h.jobs()).every((j) => j.failed === false)).toBe(true);
+      await h.auth.api.scimProvisioningRun({ body: {} });
+    }
+    expect(await h.jobs()).toEqual([]);
+    expect(h.google.groups.size).toBe(1);
+    expect([...[...h.google.groups.values()][0]!.members]).toEqual([googleId(h, "owner@example.com")]);
+  });
+
   it("members are read a page at a time: a 90-member group's changes are exact", async () => {
     const h = await createHost({ targets: [{ ...G, groups: true }], googleMembersPageSize: 40 });
     const o = await owner(h);

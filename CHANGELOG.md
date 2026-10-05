@@ -6,7 +6,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Added
 
-- **Google Groups at Google Workspace targets** (`groups`, `teamGroups`, `roleGroups`): organizations, teams and roles become Google Groups. Each is at an address made from its externalId, so a rename doesn't move it (`google.groupDomain`, `google.groupEmail`), and its description marks it ours, so a group someone else made is never taken over. Members are added and removed one at a time and read back a page at a time. Domain-wide delegation must also allow `https://www.googleapis.com/auth/admin.directory.group`.
+- **Google Groups at Google Workspace targets** (`groups`, `teamGroups`, `roleGroups`): organizations, teams and roles become Google Groups. Each is at an address made from its externalId, so a rename doesn't move it (`google.groupDomain`, `google.groupEmail`), and its description marks it ours, so a group someone else made is never taken over. Members are added and removed one at a time and read back a page at a time. Domain-wide delegation must also allow `https://www.googleapis.com/auth/admin.directory.group`. Verified live against a real Workspace. Google's lag right after a group is created (a 404 for its first members, then "already exists" while a read still finds nothing) is retried, not refused.
 
 ### Changed
 

@@ -27,7 +27,7 @@ export interface GoogleStoredUser {
   password?: string;
 }
 
-export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: number | undefined; renameLag?: number | undefined; groupScope?: boolean | undefined; groupLag?: number | undefined; membersPageSize?: number | undefined } = {}) {
+export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: number | undefined; renameLag?: number | undefined; groupScope?: boolean | undefined; groupLag?: number | undefined; groupReadLag?: number | undefined; membersPageSize?: number | undefined } = {}) {
   const domains = o.domains ?? ["example.com"];
   const admin = o.admin ?? "admin@example.com";
   const keys = (await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
@@ -40,6 +40,7 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
   const groups = new Map<string, GoogleStoredGroup>();
   const tokenScopes = new Map<string, string[]>();
   const groupSettling = new Map<string, number>();
+  const groupHidden = new Map<string, number>();
   const USER_SCOPE = "https://www.googleapis.com/auth/admin.directory.user";
   const GROUP_SCOPE = "https://www.googleapis.com/auth/admin.directory.group";
   const tokens = new Set<string>();
@@ -90,10 +91,17 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
       const stored: GoogleStoredGroup = { id: `grp${next++}`, email, name: String(body.name), members: new Set(), ...(typeof body.description === "string" ? { description: body.description } : {}) };
       groups.set(stored.id, stored);
       if (o.groupLag) groupSettling.set(stored.id, o.groupLag);
+      if (o.groupReadLag) groupHidden.set(stored.id, o.groupReadLag);
       return json(200, groupView(stored));
     }
     const group = key ? findGroup(key) : undefined;
     if (!group) return gerror(404, "Resource Not Found: groupKey");
+    // As found live: reading a group made moments ago can still say it doesn't exist.
+    const hidden = groupHidden.get(group.id) ?? 0;
+    if (hidden > 0 && method === "GET" && !members) {
+      groupHidden.set(group.id, hidden - 1);
+      return gerror(404, "Resource Not Found: groupKey");
+    }
     if (members) {
       const left = groupSettling.get(group.id) ?? 0;
       if (left > 0) {
