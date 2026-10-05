@@ -9,7 +9,7 @@ import type { ScimTarget } from "./types";
 const defined = <T extends object>(o: T | undefined): Partial<T> => Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>;
 
 /**
- * AWS IAM Identity Center (documented). Groups have no PUT and their GET lists no members, so
+ * AWS IAM Identity Center (verified live). Groups have no PUT and their GET lists no members, so
  * groups are updated by a diff of members read with `Users?filter=groups.value eq`, at most 100
  * member changes per request. Users need given, family and display names and a single primary
  * email, which the default mapping sends; the SAML NameID must equal the SCIM userName.
