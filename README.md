@@ -1,15 +1,50 @@
 # better-auth-scim-provisioning
 
+Keep your users' accounts in step at the apps they use, straight from your [Better Auth](https://www.better-auth.com) server: **created before their first sign-in, updated when they change, switched off the moment they leave.** Over **SCIM 2.0**, **Google Workspace**'s Directory API, or **signed webhooks**. Runs on **Cloudflare Workers** and **Node.js**.
+
 [![CI](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml/badge.svg)](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/better-auth-scim-provisioning)](https://www.npmjs.com/package/better-auth-scim-provisioning)
+[![Better Auth](https://img.shields.io/badge/better--auth-%E2%89%A51.7.5%20%3C1.8-black)](https://www.better-auth.com)
+[![Runs on](https://img.shields.io/badge/runs%20on-Workers%20%7C%20Node%2022%2B-f38020)](#databases-and-runtimes)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mmcintosh/better-auth-scim-provisioning/badge)](https://scorecard.dev/viewer/?uri=github.com/mmcintosh/better-auth-scim-provisioning)
+[![CodeQL](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/codeql.yml/badge.svg)](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/codeql.yml)
 
-**User provisioning for [Better Auth](https://www.better-auth.com): SCIM 2.0, Google Workspace and signed webhooks.** When a user is created, changed, banned or deleted in Better Auth, or joins or leaves an organization, their account in the apps they use is created, updated or deactivated. Accounts exist before the first sign-in, and are switched off when someone leaves, not whenever their last session happens to expire.
+It's the **outbound** direction. Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim) is the inbound one, where directories push users *into* your app; this package pushes them *out*. It works however your users sign in, and pairs with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) when your app is also their identity provider: see [sign-in and provisioning together](https://github.com/mmcintosh/better-auth-saml-idp/blob/main/docs/guide/provisioning.md).
 
-It's the outbound direction. Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim) is the inbound one: directories push users *into* your app. This package pushes them *out*: to Cloudflare Access, AWS IAM Identity Center and any other app that accepts SCIM 2.0; to [Google Workspace](#google-workspace), through its Directory API; and, as [signed webhooks](#webhooks), to your own apps or automation tools. It works however those users sign in, and pairs naturally with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) when your app is their identity provider: see [sign-in and provisioning together](https://github.com/mmcintosh/better-auth-saml-idp/blob/main/docs/guide/provisioning.md), verified live with Cloudflare Access, Google Workspace and AWS IAM Identity Center.
-
-> **0.x:** the API may still change before 1.0. See [what it doesn't do yet](#not-yet).
+> **Unofficial community plugin.** This project isn't affiliated with or endorsed by Better Auth. Status: **0.3 on npm**, verified live against Cloudflare Access, Google Workspace and AWS IAM Identity Center, and field-tested in a real app on Workers. While it's 0.x, a minor release may change the API; every change is in the [CHANGELOG](CHANGELOG.md), and upgrades so far have needed no database migration.
 
 If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-auth-scim-provisioning) helps others find it.
+
+## ✨ Features
+
+- 🎯 **Three kinds of target**: any **SCIM 2.0** app (Cloudflare Access, AWS IAM Identity Center, Slack, Atlassian, GitHub Enterprise, Zoom…), **Google Workspace** through its Directory API, and **signed webhooks** for your own apps or automation tools (Zapier, Make, n8n).
+- 👥 **Groups**: organizations, teams and roles in your app become groups at the app (SCIM groups or Google Groups), with the provisioned members, kept in sync as people join, leave and change roles.
+- 🚪 **Real offboarding**: a ban or a delete deactivates (or deletes) the account at every app at once, not when a session expires; a timed ban is lifted on time by the scheduled run. Cloudflare Access revoked a live session within 35 seconds in the field test.
+- 📬 **Delivery that holds up**: a database outbox with leases, retries with backoff (honouring `Retry-After`), concurrency, and a scheduled run. Changes are never lost to an outage, a timeout or a reply that never arrived, and a 404 counts as "gone" only when the app's list agrees.
+- 🤝 **Careful adoption**: an account that already exists at the app is taken over only if it's provably this user's (ours by id, or nobody's, with the user's verified email as its userName), never handed to someone who reused a deleted user's email.
+- 🧩 **Profiles for real apps**: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`, each built from the app's documented quirks (no PUT on groups, batches of 100, groups that can't be renamed…).
+- 🔑 **Every sign-in method apps use**: bearer tokens, Basic, an API-key header, OAuth 2.0 client credentials, and Google service accounts with domain-wide delegation.
+- 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time, within a Workers invocation's limits.
+- 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports.
+- 📈 **You can see it**: every job's last error and status is in the database; failures are logged with the app's own message.
+- ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger, and on Node.js 22 and 24, with SQLite, PostgreSQL, MySQL and MongoDB.
+- 📦 **Supply chain**: SHA-pinned actions, CodeQL, dependency review, OpenSSF Scorecard, and a release workflow that publishes with npm provenance and an SBOM.
+
+## ✅ Verified live
+
+| App | Users | Groups | How |
+|---|---|---|---|
+| Cloudflare Access | ✓ | ✓ | the field test (a real app on Workers), the `check` CLI, and the live test |
+| Google Workspace | ✓ | ✓ (Google Groups) | live tests in a real Workspace, which found and fixed how Google settles after creates and email changes |
+| AWS IAM Identity Center | ✓ | ✓ (including a group of over 100) | live tests with the `awsIamIdentityCenter` profile |
+| Webhooks | ✓ | ✓ | over real HTTP, with the receiver written exactly as shown below |
+
+Slack, Atlassian and GitHub Enterprise are built from each app's documentation and tested against a model of it. The code was reviewed before 0.1.0 and before 0.2.0, each time by an outside reviewer as well as a fresh internal one.
+
+## Contents
+
+[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Google Workspace](#google-workspace) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
 
 ## Install
 
@@ -66,6 +101,8 @@ Then:
      ({ next } = await auth.api.scimProvisioningReconcile({ body: { limit: 200, after: next ?? undefined } }));
    } while (next);
    ```
+
+**A complete app to copy:** better-auth-saml-idp's [Workers example](https://github.com/mmcintosh/better-auth-saml-idp/tree/main/examples/workers-hono#provisioning-optional) runs this package on Workers and D1, with a Cron Trigger, and an admin page showing each user's account at each app, the queue and the groups.
 
 **On Workers, give Better Auth `waitUntil`.** Deliveries run in the background, and the runtime cancels work still running after the response unless it runs under `waitUntil`:
 
@@ -194,7 +231,7 @@ scimProvisioning({
   - The token is a classic personal access token of the setup user, with `scim:enterprise`.
   - Only one system may provision the enterprise.
   - GitHub asks for at most 1,000 users an hour, so keep `concurrency` low for a first reconcile.
-- **Anything else that speaks SCIM 2.0**, with a bearer token, Basic auth, an API-key header or OAuth 2.0 client credentials (Okta, Salesforce, Zoom, your own apps).
+- **Anything else that speaks SCIM 2.0**, with a bearer token, Basic auth, an API-key header or OAuth 2.0 client credentials (Salesforce, Zoom, your own apps).
   - If an app differs in a way a profile would cover, `compat` sets the same behaviours by hand: `groupUpdate: "patch"`, `groupMembers: "users-filter"`, `maxGroupMembersPerRequest`, `groupRename: "recreate"`.
 
 ### Google Workspace
@@ -320,7 +357,9 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested
 
 ## Not yet
 
-- **Live verification of the Slack, Atlassian and GitHub Enterprise profiles.** They're built from each app's documentation and tested against a model; the table above says which apps are verified live.
+- **Microsoft 365 / Entra ID** as a target (through Microsoft Graph), the other big suite after Google Workspace.
+- **Live verification of the Slack, Atlassian and GitHub Enterprise profiles.** They're built from each app's documentation and tested against a model.
+- **A 1.0**, once the API has settled with real users.
 
 ## Development
 

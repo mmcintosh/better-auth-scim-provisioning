@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Documentation
+
+- The README opens like the companion's: what it does in a sentence, badges, an up-to-date status in place of the old 0.x note, a features list, what's verified live, and a table of contents. "Not yet" lists what's actually next (Microsoft 365, the remaining live checks, 1.0).
+
 ## [0.3.0] - 2026-10-05
 
 Google Groups at Google Workspace targets, and AWS IAM Identity Center verified live. Upgrading from 0.2.x needs no database migration.
