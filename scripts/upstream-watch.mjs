@@ -29,7 +29,15 @@ const gh = (path, init = {}) =>
     ...init,
     headers: { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", ...(token ? { authorization: `Bearer ${token}` } : {}), ...init.headers },
   });
-const npm = (name) => json(`https://registry.npmjs.org/${name.replace("/", "%2F")}`);
+// Names come from the config file: checked before they go into a URL.
+const NPM_NAME = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+const GH_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const GH_REF = /^[A-Za-z0-9_./-]+$/;
+const checked = (value, pattern, what) => {
+  if (typeof value !== "string" || !pattern.test(value) || value.includes("..")) throw new Error(`.github/upstream-watch.json: invalid ${what} ${JSON.stringify(value)}`);
+  return value;
+};
+const npm = (name) => json(`https://registry.npmjs.org/${checked(name, NPM_NAME, "npm package").replaceAll("/", "%2F")}`);
 
 const num = (v) => v.split(/[.-]/).slice(0, 3).map(Number);
 const lt = (a, b) => { const [x, y] = [num(a), num(b)]; for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i]; return false; };
@@ -66,8 +74,9 @@ const note = (key, fingerprint, summary) => {
     if (!file) throw new Error(`no vendor/${v.vendorPrefix}*.tgz for ${v.name}: update .github/upstream-watch.json`);
     const sha = /-([0-9a-f]{7,40})\.tgz$/.exec(file)?.[1];
     if (!sha) throw new Error(`vendor/${file} has no commit in its name`);
-    const info = await gh(`repos/${v.repo}`);
-    const cmp = await gh(`repos/${v.repo}/compare/${sha}...${info.default_branch}`);
+    const ghRepo = checked(v.repo, GH_REPO, "repository");
+    const info = await gh(`repos/${ghRepo}`);
+    const cmp = await gh(`repos/${ghRepo}/compare/${sha}...${checked(info.default_branch, GH_REF, "branch")}`);
     const meta = await npm(v.npm);
     const latest = meta["dist-tags"].latest;
     const released = latest !== v.releasedWhenVendored;
