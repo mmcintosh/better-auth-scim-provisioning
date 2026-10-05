@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-05
+
+Google Groups at Google Workspace targets, and AWS IAM Identity Center verified live. Upgrading from 0.2.x needs no database migration.
+
 ### Added
 
 - **Google Groups at Google Workspace targets** (`groups`, `teamGroups`, `roleGroups`): organizations, teams and roles become Google Groups. Each is at an address made from its externalId, so a rename doesn't move it (`google.groupDomain`, `google.groupEmail`), and its description marks it ours, so a group someone else made is never taken over. Members are added and removed one at a time and read back a page at a time. Domain-wide delegation must also allow `https://www.googleapis.com/auth/admin.directory.group`. Verified live against a real Workspace. Google's lag right after a group is created (a 404 for its first members, then "already exists" while a read still finds nothing) is retried, not refused.
@@ -14,6 +18,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Documentation
 
+- A link to the guide for using this package with better-auth-saml-idp (sign-in and provisioning together).
 - AWS IAM Identity Center is verified live with the `awsIamIdentityCenter` profile: a user's whole life, organizations, teams and roles as groups, and a group of over 100 members. Nothing needed fixing. The test confirmed that AWS only pages a group's members when the first request carries a `cursor` parameter, which the plugin sends; the test model now requires it too.
 
 ## [0.2.1] - 2026-10-04
