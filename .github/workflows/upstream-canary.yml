@@ -1,0 +1,38 @@
+# Weekly run against Better Auth's latest and next tags, including versions outside the peer
+# range, so a new release that breaks the plugin is known before users find it. Failures open an
+# issue; they never block PRs. The `next` dist-tag can be stale (0.8.7-beta.5 in 2026-09), so
+# the job skips any tag older than the peer range's minimum.
+name: Upstream canary
+on:
+  schedule: [{ cron: "0 6 * * 1" }]
+  workflow_dispatch:
+permissions: { contents: read, issues: write }
+jobs:
+  canary:
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [latest, next]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - id: ver
+        run: |
+          v="$(npm view better-auth@${{ matrix.tag }} version)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          node -e 'const [a,b]=process.argv.slice(1).map(s=>s.split(/[.-]/).slice(0,3).map(Number));process.exit(a[0]>b[0]||(a[0]===b[0]&&(a[1]>b[1]||(a[1]===b[1]&&a[2]>=b[2])))?0:1)' "$v" 1.7.5 \
+            && echo "run=true" >> "$GITHUB_OUTPUT" || echo "run=false" >> "$GITHUB_OUTPUT"
+      - if: steps.ver.outputs.run == 'true'
+        run: scripts/use-better-auth.sh ${{ steps.ver.outputs.version }}
+      - if: steps.ver.outputs.run == 'true'
+        run: pnpm typecheck && pnpm test
+      - if: failure()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh issue create \
+            --title "Upstream canary failed: better-auth ${{ matrix.tag }} (${{ steps.ver.outputs.version }})" \
+            --body "See ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
