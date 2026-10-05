@@ -1,13 +1,19 @@
 // Google Workspace through its Directory API, for targets with `type: "google-workspace"`: the
 // same operations as the SCIM client (find by userName, create, replace, patch, set active,
 // remove), so the outbox treats both alike. Google doesn't speak SCIM: users are `primaryEmail`,
-// `name`, `suspended`, and our id is a custom entry in `externalIds`. Users only, for now.
+// `name`, `suspended`, and our id is a custom entry in `externalIds`. Groups are Google Groups,
+// each with an email address derived from its externalId (so a rename never changes it), marked
+// ours in its description, with members added and removed one at a time.
 import { credentials } from "./credentials";
-import { retryAfterMs, ScimError, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
+import { retryAfterMs, ScimError, type ScimGroup, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
 import type { Target } from "./types";
 
 export const GOOGLE_DIRECTORY_URL = "https://admin.googleapis.com/admin/directory/v1";
 const SCOPE = "https://www.googleapis.com/auth/admin.directory.user";
+/** Asked for only by a target with groups: domain-wide delegation must allow it too. */
+const GROUP_SCOPE = "https://www.googleapis.com/auth/admin.directory.group";
+/** The start of the description that marks a Google Group as ours; the externalId follows. */
+const MANAGED = "Managed by Better Auth (better-auth-scim-provisioning). externalId: ";
 /** The `externalIds` entry that marks a Workspace user as ours. */
 const OURS = { type: "custom", customType: "better-auth" } as const;
 
@@ -16,6 +22,13 @@ interface GoogleUser {
   id?: string;
   primaryEmail?: string;
   externalIds?: { value?: string; type?: string; customType?: string }[];
+  /** Groups. */
+  email?: string;
+  name?: string | { givenName?: string; familyName?: string };
+  description?: string;
+  /** A page of a group's members. */
+  members?: { id?: string; type?: string }[];
+  nextPageToken?: string;
 }
 
 export function googleWorkspaceClient(target: Target): ReturnType<typeof scimClient> {
@@ -25,7 +38,7 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
   const doFetch = target.fetch ?? fetch;
   const timeoutMs = target.timeoutMs ?? 10_000;
   const creds = credentials(
-    { type: "google", clientEmail: google.clientEmail, privateKey: google.privateKey, subject: google.adminEmail, scopes: [SCOPE], tokenUrl: google.tokenUrl },
+    { type: "google", clientEmail: google.clientEmail, privateKey: google.privateKey, subject: google.adminEmail, scopes: target.groups || target.teamGroups || target.roleGroups ? [SCOPE, GROUP_SCOPE] : [SCOPE], tokenUrl: google.tokenUrl },
     { fetch: doFetch, timeoutMs },
   );
 
@@ -129,9 +142,98 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     await change(id, { ...toGoogle(user), externalIds: await externalIds(id, user.userName, user.externalId) }, user.userName);
   }
 
-  const noGroups = async (): Promise<never> => {
-    throw new ScimError(`${target.id}: Google Workspace targets don't provision groups yet`, null, false);
-  };
+  // ---- Groups ----
+
+  const gpath = (key: string) => `/groups/${encodeURIComponent(key)}`;
+  const groupDomain = google.groupDomain ?? google.adminEmail.split("@")[1] ?? "";
+  const hex = async (s: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  /** A group's address: stable, from its externalId, so it's found again after a rename. */
+  async function groupEmail(externalId: string): Promise<string> {
+    if (google?.groupEmail) return google.groupEmail(externalId);
+    let local = `ba-${externalId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
+    // An address's local part is at most 64 characters.
+    if (local.length > 60) local = `ba-${(await hex(externalId)).slice(0, 32)}`;
+    return `${local}@${groupDomain}`;
+  }
+  const markerOf = (description: string | undefined) => (description?.startsWith(MANAGED) ? description.slice(MANAGED.length).trim() || null : null);
+  const notFoundAtGoogle = (e: unknown) => e instanceof ScimError && e.status === 404 && !e.retryable;
+
+  /** The group's user members (nested groups and the like are left alone). */
+  async function memberIds(groupId: string): Promise<string[]> {
+    const ids: string[] = [];
+    for (let token = "", pages = 0; pages < 1000; pages++) {
+      const page = await request("GET", `${gpath(groupId)}/members?maxResults=200${token ? `&pageToken=${encodeURIComponent(token)}` : ""}`);
+      for (const m of page?.members ?? []) if (m.id && (m.type ?? "USER") === "USER") ids.push(m.id);
+      if (!page?.nextPageToken) break;
+      token = page.nextPageToken;
+    }
+    return ids;
+  }
+
+  /** Make the group's user members exactly `wanted`: one request per member added or removed. */
+  async function setMembers(groupId: string, wanted: string[], current?: string[]) {
+    const have = new Set(current ?? (await memberIds(groupId)));
+    const want = new Set(wanted);
+    for (const id of want) {
+      if (have.has(id)) continue;
+      try {
+        await request("POST", `${gpath(groupId)}/members`, { id, role: "MEMBER" });
+      } catch (e) {
+        if (!(e instanceof ScimError && e.status === 409)) throw e; // already a member
+      }
+    }
+    for (const id of have) {
+      if (want.has(id)) continue;
+      try {
+        await request("DELETE", `${gpath(groupId)}/members/${encodeURIComponent(id)}`);
+      } catch (e) {
+        if (!notFoundAtGoogle(e)) throw e; // already gone
+      }
+    }
+  }
+  const memberValues = (group: ScimGroup) => (group.members ?? []).map((m) => m.value);
+
+  /** Ours if its description carries our marker; an address taken by another group is someone else's. */
+  async function findGroup(externalId: string | null | undefined): Promise<{ id: string; externalId: string | null } | null> {
+    if (!externalId) return null;
+    const email = await groupEmail(externalId);
+    try {
+      const g = await request("GET", gpath(email));
+      // Google also answers for a group's alias: only the exact address is a match.
+      if (!g?.id || g.email?.toLowerCase() !== email.toLowerCase()) return null;
+      return { id: g.id, externalId: markerOf(g.description) };
+    } catch (e) {
+      if (notFoundAtGoogle(e)) return null;
+      throw e;
+    }
+  }
+
+  async function createGroup(group: ScimGroup): Promise<string> {
+    const externalId = group.externalId as string;
+    const created = await request("POST", "/groups", { email: await groupEmail(externalId), name: group.displayName, description: `${MANAGED}${externalId}` });
+    if (!created?.id) throw new ScimError("POST /groups: the response has no id", null, false);
+    try {
+      await setMembers(created.id, memberValues(group), []);
+    } catch (e) {
+      // Like users, a group made seconds ago can answer 404: retried, and found again by its address.
+      if (notFoundAtGoogle(e)) throw new ScimError(`group ${group.displayName}: Google is still creating it; retrying`, null, true);
+      throw e;
+    }
+    return created.id;
+  }
+
+  async function updateGroup(id: string, group: ScimGroup) {
+    try {
+      await request("PATCH", gpath(id), { name: group.displayName });
+      await setMembers(id, memberValues(group));
+    } catch (e) {
+      if (!notFoundAtGoogle(e)) throw e;
+      // A 404 for a group that's there by its address: Google hasn't finished creating it.
+      const found = await findGroup(group.externalId);
+      if (found?.id === id) throw new ScimError(`group ${group.displayName}: Google is still creating it; retrying`, null, true);
+      throw e;
+    }
+  }
 
   return {
     async findByUserName(userName: string) {
@@ -178,11 +280,14 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
         throw e;
       }
     },
-    findGroupByName: noGroups,
-    createGroup: noGroups,
-    replaceGroup: noGroups,
-    removeGroup: noGroups,
-    patchGroup: noGroups,
-    createGroupInBatches: noGroups,
+    // By address, from the externalId: Google Groups can't be found by name, and a rename never moves them.
+    findGroupByName: async (_displayName: string, externalId?: string | null) => findGroup(externalId),
+    createGroup,
+    createGroupInBatches: async (group: ScimGroup) => createGroup(group),
+    replaceGroup: updateGroup,
+    patchGroup: async (id: string, group: ScimGroup) => updateGroup(id, group),
+    async removeGroup(id: string) {
+      await request("DELETE", gpath(id));
+    },
   };
 }
