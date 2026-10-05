@@ -1,5 +1,6 @@
 // Live tests against real services, opt-in: they run only with .env.live (git-ignored), holding
-// SCIM_URL and SCIM_TOKEN (a SCIM app), and/or GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY,
+// SCIM_URL and SCIM_TOKEN (a SCIM app), AWS_SCIM_URL and AWS_SCIM_TOKEN (AWS IAM Identity Center),
+// and/or GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY,
 // GOOGLE_ADMIN_EMAIL, GOOGLE_TEST_DOMAIN and GOOGLE_ORG_UNIT (a Google Workspace). Each file runs
 // only when its variables are set. `npx vitest run -c vitest.live.config.ts`. Never in CI.
 import { defineConfig } from "vitest/config";
