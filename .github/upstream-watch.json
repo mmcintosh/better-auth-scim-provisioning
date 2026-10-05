@@ -9,5 +9,13 @@
   ],
   "monthly": [
     "Run the live tests against the real targets (`npx vitest run -c vitest.live.config.ts test/live/<file>`): the providers change without notice."
+  ],
+  "overrides": [
+    {
+      "selector": "@better-auth/utils",
+      "via": "better-auth@1",
+      "dependency": "@better-auth/utils",
+      "why": "Better Auth 1.7 pins 0.4.2; the override keeps one copy in the tree. Remove when the install no longer needs it."
+    }
   ]
 }
