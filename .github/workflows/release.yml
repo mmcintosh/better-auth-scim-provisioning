@@ -3,9 +3,12 @@
 # provenance (a signed statement, from GitHub's OIDC token, of which commit and workflow built it)
 # and attached to a GitHub release with its CycloneDX SBOM.
 #
-# - Push a tag `vX.Y.Z` matching package.json's version (and "private" removed) to publish.
-# - Run it by hand (Actions > Release > Run workflow) for a dry run: everything except publishing,
-#   with the tarball and SBOM kept as workflow artifacts.
+# - A release runs on a tag `vX.Y.Z` matching package.json's version, on main. Normally that tag is
+#   made by tag-release.yml when a release PR (`pnpm release patch|minor|major`) is merged; pushing
+#   the tag by hand works too. Publishing then waits for the `npm` environment's approval, then the
+#   staged publish's approval on npmjs.com.
+# - Run it by hand on main (Actions > Release > Run workflow) for a dry run: everything except
+#   publishing, with the tarball and SBOM kept as workflow artifacts.
 # The npm side: a trusted publisher on npmjs.com for this repository, release.yml and the `npm`
 # environment, which should have required reviewers.
 name: Release
@@ -40,12 +43,13 @@ jobs:
         with: { node-version: 24, cache: pnpm, registry-url: "https://registry.npmjs.org" }
       - run: pnpm install --frozen-lockfile
       - id: meta
-        env: { REF_NAME: "${{ github.ref_name }}", EVENT: "${{ github.event_name }}" }
+        env: { REF_NAME: "${{ github.ref_name }}", REF: "${{ github.ref }}" }
         run: |
           version="$(node -p 'require("./package.json").version')"
           private="$(node -p 'require("./package.json").private === true')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ "$EVENT" = push ]; then
+          # A release runs on a v* tag: pushed, or started on the tag by tag-release.yml. Anything else is a dry run.
+          if case "$REF" in refs/tags/v*) true ;; *) false ;; esac; then
             [ "$REF_NAME" = "v$version" ] || { echo "::error::tag $REF_NAME doesn't match package.json version $version"; exit 1; }
             [ "$private" = false ] || { echo "::error::package.json is still \"private\": true"; exit 1; }
             # Only commits already on main are released, whoever pushed the tag.
@@ -77,7 +81,7 @@ jobs:
   # reviewers to it (Settings > Environments) so every release needs an approval.
   publish:
     needs: package
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     environment: npm
     permissions: { contents: write, id-token: write, attestations: write }

@@ -370,7 +370,9 @@ pnpm typecheck && pnpm lint && pnpm pack:check
 ADAPTER_DB=postgres ADAPTER_URL=postgres://postgres:test@localhost:5432/postgres npx vitest run test/adapters
 ```
 
-The live test (`test/live/`) runs against a real SCIM service when the git-ignored `.env.live` holds `SCIM_URL` and `SCIM_TOKEN`: `npx vitest run -c vitest.live.config.ts`.
+The live tests (`test/live/`) run against real services when the git-ignored `.env.live` holds their settings (`SCIM_URL` and `SCIM_TOKEN`, `AWS_SCIM_URL` and `AWS_SCIM_TOKEN`, the `GOOGLE_*` ones): `npx vitest run -c vitest.live.config.ts`. Each file runs only with its settings.
+
+**Releasing** (maintainers): keep CHANGELOG.md's `[Unreleased]` section current; then, on an up-to-date main, `pnpm release patch|minor|major ["summary"]` opens the **Release X.Y.Z** pull request (version bumped, section dated). Merging it is the go-ahead: [tag-release.yml](.github/workflows/tag-release.yml) tags `vX.Y.Z` and starts [release.yml](.github/workflows/release.yml), which tests, packs and, after the `npm` environment's approval, stages the tarball with provenance and an SBOM; approve the staged version on npmjs.com to publish it.
 
 ## License
 

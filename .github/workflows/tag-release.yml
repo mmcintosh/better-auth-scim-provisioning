@@ -1,0 +1,32 @@
+# When a release PR lands (`pnpm release patch|minor|major` opens it), tag the new version on main
+# and start the release run on that tag. Merging the release PR is the go-ahead: publishing still
+# waits for the `npm` environment's approval, then the staged publish's approval on npmjs.com.
+# (A tag pushed with GITHUB_TOKEN doesn't trigger workflows, so the run is started explicitly, on the
+# tag, which the `npm` environment allows.)
+name: Tag release
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+permissions: { contents: read }
+concurrency: { group: tag-release, cancel-in-progress: false }
+jobs:
+  tag:
+    runs-on: ubuntu-24.04
+    permissions: { contents: write, actions: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - id: version
+        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+      - env: { GH_TOKEN: "${{ github.token }}", VERSION: "${{ steps.version.outputs.version }}", REPO: "${{ github.repository }}" }
+        run: |
+          if gh api "repos/$REPO/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "v$VERSION is already tagged: nothing to release."
+            exit 0
+          fi
+          grep -q "^## \[$VERSION\] - " CHANGELOG.md || { echo "::error::package.json says $VERSION, but CHANGELOG.md has no ## [$VERSION] section"; exit 1; }
+          gh api "repos/$REPO/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$GITHUB_SHA" >/dev/null
+          echo "Tagged v$VERSION at $GITHUB_SHA."
+          gh workflow run release.yml --repo "$REPO" --ref "v$VERSION"
+          echo "Started the release run on v$VERSION: approve the npm environment, then the staged publish on npmjs.com."
