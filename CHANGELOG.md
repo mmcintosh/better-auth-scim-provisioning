@@ -6,6 +6,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Project
 
+- A weekly canary tests against Better Auth's newest releases (`upstream-canary.yml`) and opens an issue when one breaks the plugin, and a weekly **Upstream watch** issue tracks Better Auth against the peer range and updates held back on purpose (`upstream-watch.yml`).
 - Releases are one merge: `pnpm release patch|minor|major` opens the release PR, and merging it tags the version and starts the release run (`tag-release.yml`). Publishing still waits for the two approvals.
 
 ### Documentation

@@ -1,0 +1,13 @@
+{
+  "held": [
+    {
+      "name": "npm's bundled dependencies (release job)",
+      "npm": "npm",
+      "because": "they're bundled inside npm, so they can't be updated alone; their alerts are dismissed as tolerable risk.",
+      "takeWhen": "Dependabot proposes the newer npm (it does on its own); check its alerts close."
+    }
+  ],
+  "monthly": [
+    "Run the live tests against the real targets (`npx vitest run -c vitest.live.config.ts test/live/<file>`): the providers change without notice."
+  ]
+}
