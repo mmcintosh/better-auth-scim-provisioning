@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Project
+
+- Releases are one merge: `pnpm release patch|minor|major` opens the release PR, and merging it tags the version and starts the release run (`tag-release.yml`). Publishing still waits for the two approvals.
+
 ### Documentation
 
 - The README opens like the companion's: what it does in a sentence, badges, an up-to-date status in place of the old 0.x note, a features list, what's verified live, and a table of contents. "Not yet" lists what's actually next (Microsoft 365, the remaining live checks, 1.0).

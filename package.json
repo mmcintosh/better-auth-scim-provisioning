@@ -44,7 +44,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "lint": "biome lint --error-on-warnings",
     "build": "node scripts/build.mjs",
-    "pack:check": "pnpm build && tsc -p tsconfig.strict-host.json && node node_modules/typescript-5/bin/tsc -p tsconfig.strict-host.json && publint --strict && attw --pack . --profile esm-only"
+    "pack:check": "pnpm build && tsc -p tsconfig.strict-host.json && node node_modules/typescript-5/bin/tsc -p tsconfig.strict-host.json && publint --strict && attw --pack . --profile esm-only",
+    "release": "node scripts/release.mjs"
   },
   "peerDependencies": {
     "@better-auth/core": ">=1.7.5 <1.8.0",
