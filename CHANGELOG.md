@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-05
+
+No code changes: the npm page gets the rewritten README (what it does, what's verified live, what's next).
+
 ### Project
 
 - A weekly canary tests against Better Auth's newest releases (`upstream-canary.yml`) and opens an issue when one breaks the plugin, and a weekly **Upstream watch** issue tracks Better Auth against the peer range and updates held back on purpose (`upstream-watch.yml`).
