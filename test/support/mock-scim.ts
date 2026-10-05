@@ -93,7 +93,10 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
       const size = o.pageSize ?? 100;
       const start = Number(url.searchParams.get("cursor") || 0);
       const page = ids.slice(start, start + size).map((uid) => users.get(uid)).filter(Boolean).map((x) => view(x as StoredUser));
-      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], itemsPerPage: page.length, ...(start + size < ids.length ? { nextCursor: String(start + size) } : {}), Resources: page });
+      // As AWS does (found live): without a cursor parameter, even an empty one, one page and no
+      // nextCursor, so a reader that leaves it out sees at most a page of members.
+      const cursored = url.searchParams.has("cursor");
+      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], itemsPerPage: page.length, ...(cursored && start + size < ids.length ? { nextCursor: String(start + size) } : {}), Resources: page });
     }
     if (method === "GET" && !id) {
       const f = /^userName eq "(.*)"$/.exec(url.searchParams.get("filter") ?? "");

@@ -172,7 +172,7 @@ scimProvisioning({
 | App | Profile | Status | What it handles |
 |---|---|---|---|
 | Cloudflare Access | `cloudflareAccess` | verified live | Nothing differs. Turn on **seat deprovisioning** in the identity provider's SCIM settings, or deactivated users keep their seats. |
-| AWS IAM Identity Center | `awsIamIdentityCenter` | documented | Groups have no PUT and list no members, so they're updated by a diff of members, at most 100 per request. |
+| AWS IAM Identity Center | `awsIamIdentityCenter` | verified live | Groups have no PUT and list no members, so they're updated by a diff of members, at most 100 per request, read through AWS's users filter page by page (cursor). Verified with users, organization, team and role groups, and a 105-member group. |
 | Slack | `slack` | documented | userNames must be lowercase, at most 21 characters, with only `.` `_` `-`: taken from the email's local part (`slackUserName`). Deleting only deactivates. Since the userName isn't the email, Slack accounts made by hand are never adopted: give them our `externalId`, or remove them, first. |
 | Atlassian | `atlassian` | documented | Groups can't be renamed, so a renamed group is created anew with its members, then the old one deleted (retried until it is). If a group with the new name exists and isn't ours, the job fails. |
 | GitHub Enterprise Managed Users | `githubEnterprise` | documented | GitHub's DELETE permanently suspends an account, so this only deactivates, and refuses `deprovision: "delete"`. |

@@ -35,7 +35,9 @@ describe.skipIf(!configured)("live AWS IAM Identity Center", () => {
     const ids: string[] = [];
     let cursor = "";
     for (;;) {
-      const q = new URLSearchParams({ filter: `groups.value eq "${groupId}"`, count: "100", ...(cursor ? { cursor } : {}) });
+      // `cursor` on the first request too, even empty: without it AWS returns one page of at most
+      // 100, ignores startIndex and gives no nextCursor (found live, 2026-10-05).
+      const q = new URLSearchParams({ filter: `groups.value eq "${groupId}"`, count: "100", cursor });
       const page = (await get(`/Users?${q}`)) as { Resources?: { id: string }[]; nextCursor?: string } | null;
       for (const r of page?.Resources ?? []) ids.push(r.id);
       if (!page?.nextCursor) return ids.sort();
@@ -58,7 +60,7 @@ describe.skipIf(!configured)("live AWS IAM Identity Center", () => {
           },
         },
       },
-      plugins: [admin(), organization({ teams: { enabled: true } }), scimProvisioning({ targets: [awsIamIdentityCenter({ id: "aws", url: url!, token: token!, ...target })], retry: { baseDelayMs: 1000 } })],
+      plugins: [admin(), organization({ teams: { enabled: true }, membershipLimit: 500 }), scimProvisioning({ targets: [awsIamIdentityCenter({ id: "aws", url: url!, token: token!, ...target })], retry: { baseDelayMs: 1000 } })],
     });
     const ctx = await auth.$context;
     await (await getMigrations(ctx.options)).runMigrations();
@@ -76,11 +78,12 @@ describe.skipIf(!configured)("live AWS IAM Identity Center", () => {
     };
     const remoteOf = async (userId: string) => (await ctx.adapter.findMany<Record<string, any>>({ model: "scimProvisioningLink" })).find((l) => l.userId === userId)?.remoteId as string;
     const groupOf = async (key: string) => (await ctx.adapter.findMany<Record<string, any>>({ model: "scimProvisioningGroupLink" })).find((l) => l.key === `aws:${key}`)?.remoteId as string | undefined;
-    const owner = async () => {
-      const s = await auth.api.signUpEmail({ body: { email: email("owner"), password: "correct-horse-battery", name: "Olive Owner" } });
+    // Each part has its own owner: an owner from an earlier part is another app's user to AWS.
+    const owner = async (label: string) => {
+      const s = await auth.api.signUpEmail({ body: { email: email(`owner-${label}`), password: "correct-horse-battery", name: "Olive Owner" } });
       await ctx.internalAdapter.updateUser(s.user.id, { emailVerified: true });
       await settle();
-      const res = await auth.api.signInEmail({ body: { email: email("owner"), password: "correct-horse-battery" }, asResponse: true });
+      const res = await auth.api.signInEmail({ body: { email: email(`owner-${label}`), password: "correct-horse-battery" }, asResponse: true });
       return { id: s.user.id, headers: { cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") } };
     };
     const user = (n: string, name: string) => ctx.internalAdapter.createUser({ email: email(n), name, emailVerified: true }, { method: "admin" });
@@ -88,6 +91,18 @@ describe.skipIf(!configured)("live AWS IAM Identity Center", () => {
   };
 
   afterAll(async () => {
+    // Also everything named with this run's stamp: a part that fails before settling hasn't
+    // recorded what its background deliveries made (found when one failed at its 101st member).
+    const list = async (path: string) => {
+      const all: Record<string, any>[] = [];
+      for (let start = 1; ; start += 100) {
+        const page = (await get(`${path}${path.includes("?") ? "&" : "?"}startIndex=${start}&count=100`).catch(() => null)) as { Resources?: Record<string, any>[]; totalResults?: number } | null;
+        all.push(...(page?.Resources ?? []));
+        if (!page?.Resources?.length || all.length >= (page.totalResults ?? 0)) return all;
+      }
+    };
+    for (const u of await list("/Users")) if (String(u.userName).startsWith(`scim-live-${stamp}-`)) made.users.add(u.id);
+    for (const g of await list("/Groups")) if (String(g.displayName).includes(stamp)) made.groups.add(g.id);
     for (const id of made.groups) await fetch(`${url}/Groups/${id}`, { method: "DELETE", headers: headers() }).catch(() => {});
     for (const id of made.users) await fetch(`${url}/Users/${id}`, { method: "DELETE", headers: headers() }).catch(() => {});
     let left = 0;
@@ -139,7 +154,7 @@ describe.skipIf(!configured)("live AWS IAM Identity Center", () => {
 
   it("organizations, teams and roles as groups: members, rename, leaving, removal", async () => {
     const h = await setup({ groups: true, teamGroups: true, roleGroups: ["admin"] });
-    const o = await h.owner();
+    const o = await h.owner("groups");
     const org = await h.auth.api.createOrganization({ body: { name: `SCIM Live ${stamp}`, slug: `scim-live-${stamp}` }, headers: o.headers });
     const ada = await h.user("g-ada", "Ada Lovelace");
     const bob = await h.user("g-bob", "Bob Babbage");
@@ -177,7 +192,7 @@ describe.skipIf(!configured)("live AWS IAM Identity Center", () => {
 
   it("a group of over 100 members is created in batches and changed by a diff", async () => {
     const h = await setup({ groups: true });
-    const o = await h.owner();
+    const o = await h.owner("big");
     const org = await h.auth.api.createOrganization({ body: { name: `SCIM Live Big ${stamp}`, slug: `scim-live-big-${stamp}` }, headers: o.headers });
     const people = [];
     for (let i = 0; i < 104; i++) {

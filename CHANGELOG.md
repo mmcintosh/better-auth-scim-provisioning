@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Documentation
+
+- AWS IAM Identity Center is verified live with the `awsIamIdentityCenter` profile: a user's whole life, organizations, teams and roles as groups, and a group of over 100 members. Nothing needed fixing. The test confirmed that AWS only pages a group's members when the first request carries a `cursor` parameter, which the plugin sends; the test model now requires it too.
+
 ## [0.2.1] - 2026-10-04
 
 Google Workspace, verified live against a real Workspace, with fixes for what that found. Upgrade if you use a Google Workspace target: on 0.2.0, a ban right after an email change can fail and leave the user active in Workspace.
