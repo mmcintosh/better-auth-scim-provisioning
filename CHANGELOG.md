@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Tests
+
+- **Bun and Deno in CI:** the built package runs the `check` CLI against a small SCIM app, then a user's life (create, rename, delete) delivered to it and to a signed webhook, on Node, Bun and Deno.
+
 ### Project
 
 - The release job stages with npm 12.2.0 (was 11.20.0).
