@@ -20,6 +20,11 @@ const MIGRATIONS = example("migrations");
 const ORIGIN = "http://localhost:8787";
 const app = mockScim();
 const hook = mockWebhook();
+// An organization's own app, connected at runtime through the registry: a public https URL.
+const ownApp = mockScim({ token: "acme-own-token" });
+const OWN_APP_URL = "https://scim.acme-own-app.example/scim/v2";
+/** Requests to anywhere else (a DNS-over-HTTPS lookup, say): there must be none. */
+const strays: string[] = [];
 const env = {
   BETTER_AUTH_URL: ORIGIN,
   BETTER_AUTH_SECRET: "example-test-secret-that-is-at-least-32-characters",
@@ -96,7 +101,9 @@ beforeAll(async () => {
       outboundService: async (request: Request) => {
         const init = { method: request.method, headers: Object.fromEntries(request.headers), ...(request.method === "GET" || request.method === "HEAD" ? {} : { body: await request.text() }) };
         if (request.url.startsWith(app.url)) return app.fetch(request.url, init);
+        if (request.url.startsWith(OWN_APP_URL)) return ownApp.fetch(request.url, init);
         if (request.url === env.WEBHOOK_URL) return hook.fetch(request.url, init);
+        strays.push(request.url);
         return new Response("no such host in this test", { status: 502 });
       },
     } as never),
@@ -166,6 +173,25 @@ describe("the Workers example", () => {
     const renamed = await call("/api/auth/organization/update", { method: "POST", headers: { cookie: ada, "content-type": "application/json" }, body: JSON.stringify({ organizationId: orgId, data: { name: "Administrators" } }) });
     expect(renamed.status).toBe(403);
     expect(await until(() => hook.events.some((e) => e.type === "group.upsert"))).toBe(true);
+  });
+
+  it("an organization connects its own app at runtime (the registry), and its members are provisioned there", async () => {
+    const orgs = (await (await call("/api/auth/organization/list", { headers: { cookie: admin } })).json()) as { id: string; slug: string }[];
+    const acme = orgs.find((o) => o.slug === "acme")!;
+    const created = await call("/api/auth/scim-provisioning/targets/create", {
+      method: "POST",
+      headers: { cookie: admin, "content-type": "application/json" },
+      body: JSON.stringify({ organizationId: acme.id, settings: { name: "Acme's own app", url: OWN_APP_URL }, credentials: { token: "acme-own-token" } }),
+    });
+    expect(created.status, await created.clone().text()).toBe(200);
+    const { target } = (await created.json()) as { target: { id: string; credentials: { kind: string } } };
+    expect(target.credentials).toEqual({ kind: "bearer" });
+    // Acme's members (Grace, and Ada, added above), through the same fetch every stored target uses.
+    expect(await until(() => [...ownApp.users.values()].map((u) => u.userName).sort().join() === "ada@example.test,admin@example.test")).toBe(true);
+    const checked = await call("/api/auth/scim-provisioning/targets/check", { method: "POST", headers: { cookie: admin, "content-type": "application/json" }, body: JSON.stringify({ id: target.id }) });
+    expect(await checked.json()).toEqual({ ok: true });
+    // No name lookups on Workers (its fetch can't reach private networks; a lookup would be one more request each time).
+    expect(strays).toEqual([]);
   });
 
   it("a failed delivery is retried by the Cron Trigger", async () => {

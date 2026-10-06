@@ -201,6 +201,9 @@ export function guardedFetch(allowHosts: readonly string[] = [], base?: typeof f
 
 /** The addresses a name resolves to, where the runtime can tell (Node.js, Bun, Deno); null elsewhere. */
 async function resolve(host: string): Promise<string[] | null> {
+  // Workers: node:dns would ask a DNS-over-HTTPS service, a request before every request, and its
+  // fetch can't reach private networks anyway.
+  if ((globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent === "Cloudflare-Workers") return null;
   const get = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process?.getBuiltinModule;
   const dns = typeof get === "function" ? (get("node:dns") as { promises?: { lookup(h: string, o: { all: true; verbatim: true }): Promise<{ address: string }[]> } } | undefined) : undefined;
   if (!dns?.promises?.lookup) return null;

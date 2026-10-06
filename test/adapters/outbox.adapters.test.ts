@@ -373,6 +373,11 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ id: target.id, enabled: false, credentials: { kind: "bearer" } })]);
     await h.auth.api.scimProvisioningDeleteTarget({ body: { id: target.id }, headers });
     expect(await h.links()).toEqual([]);
+    // The largest credentials accepted (a 16 KB key, about 33 KB sealed) fit and read back: the
+    // columns are text (64 KB on MySQL), as Better Auth's migrator and generators make them.
+    const key = `-----BEGIN PRIVATE KEY-----${"k".repeat(16_384 - 54)}-----END PRIVATE KEY-----`;
+    const google = await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, enabled: false, settings: { type: "google-workspace", google: { clientEmail: "sa@p.iam.gserviceaccount.com", adminEmail: "admin@example.com" } }, credentials: { privateKey: key } }, headers });
+    expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ id: google.target.id, credentials: { kind: "google-service-account" } })]);
   });
 
   it("a timed ban is lifted when it runs out", async () => {
