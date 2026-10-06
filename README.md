@@ -27,7 +27,7 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 - 🔑 **Every sign-in method apps use**: bearer tokens, Basic, an API-key header, OAuth 2.0 client credentials, and Google service accounts with domain-wide delegation.
 - 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
 - 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports.
-- 📈 **You can see it**: every job's last error and status is in the database; failures are logged with the app's own message.
+- 📈 **You can see it**: `scimProvisioningStatus` counts what's queued, stuck and failed at each target (or shows one user's state), `onFailure` tells you when a delivery gives up or keeps failing, and failures are logged with the app's own message.
 - ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger, and on Node.js 22 and 24, with SQLite, D1, PostgreSQL, MySQL and MongoDB, through Kysely, Drizzle and Prisma.
 - 📦 **Supply chain**: SHA-pinned actions, CodeQL, dependency review, OpenSSF Scorecard, and a release workflow that publishes with npm provenance and an SBOM.
 
@@ -43,7 +43,7 @@ The live tests run by hand with real credentials, not in CI. Webhooks have no th
 
 ## Contents
 
-[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Google Workspace](#google-workspace) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
+[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Google Workspace](#google-workspace) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
 
 ## Install
 
@@ -137,11 +137,36 @@ Options are checked when the plugin starts: an unknown or misspelled option, or 
 
 A change to a target (`include`, `organizationId`, `deprovision`) applies to each user at their next change: run a reconcile to apply it to everyone, once the new version is fully deployed (on Workers, old and new run side by side for a few seconds). Do the same after an app's outage or a token fix, to deliver what's waiting now rather than at its next retry.
 
+## Watching it
+
+```ts
+// Per target: jobs queued, stuck (an app error still retried past retry.maxAttempts, every 6 hours),
+// failed (until the user changes again or a reconcile), and the accounts and groups at the app.
+const { targets } = await auth.api.scimProvisioningStatus({ body: {} });
+// One user's account and pending job at each target.
+const { user } = await auth.api.scimProvisioningStatus({ body: { userId } });
+```
+
+`onFailure` is called when a delivery gives up (an error that won't fix itself) or reaches `retry.maxAttempts`: alert on it, so a deprovisioning that isn't getting through doesn't go unnoticed.
+
+```ts
+scimProvisioning({
+  targets: [/* … */],
+  onFailure: ({ targetId, kind, subjectId, error, status, attempts, failed }) => alert(`provisioning ${kind} ${subjectId} at ${targetId}: ${error}`),
+});
+```
+
+When something changes a user's memberships outside Better Auth's organization endpoints (an SSO sync, inbound SCIM, your own database writes), queue them, and they're delivered in the background:
+
+```ts
+await auth.api.scimProvisioningQueue({ body: { userId } }); // or { userId, targetId }
+```
+
 ## Who is provisioned, and what's sent
 
 A user is at a target when their email is verified (unless `requireVerifiedEmail: false`), they aren't banned (the admin plugin), they're a member of `organizationId` if one is set, and `include` returns true (if set). Otherwise they're deprovisioned there, if they had been provisioned. A timed ban is lifted at the app when it runs out.
 
-Membership changes are seen through the organization plugin's endpoints (add, remove, update role, accept an invitation, leave, delete the organization) and server-side `addMember`. Changes made any other way (the creator of a new organization, SSO or inbound SCIM provisioning, your own database writes) are applied at the user's next change or the next reconcile. **That includes removals:** someone removed from an `organizationId` organization by those means keeps their account at the app until then, so run a reconcile after such changes (or on a schedule, a page at a time).
+Membership changes are seen through the organization plugin's endpoints (add, remove, update role, accept an invitation, leave, delete the organization) and server-side `addMember`. Changes made any other way (the creator of a new organization, SSO or inbound SCIM provisioning, your own database writes) are applied at the user's next change or the next reconcile. **That includes removals:** someone removed from an `organizationId` organization by those means keeps their account at the app until then, so call `scimProvisioningQueue` for them (see [Watching it](#watching-it)), or run a reconcile.
 
 By default the app gets:
 - **`userName`** and the one primary **`emails`** value: the user's email;

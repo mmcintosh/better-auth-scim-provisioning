@@ -12,13 +12,13 @@ import { defaultScimUser, isBanned } from "./mapping";
 import { googleWorkspaceClient } from "./google";
 import { webhookClient } from "./webhook";
 import { SCIM_GROUP_SCHEMA, ScimError, scimClient } from "./scim-client";
-import type { ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
+import type { DeliveryFailure, ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
 
 export const JOB_MODEL = "scimProvisioningJob";
 export const LINK_MODEL = "scimProvisioningLink";
 export const GROUP_LINK_MODEL = "scimProvisioningGroupLink";
 
-type Where = { field: string; value: unknown; operator?: "eq" | "lt" | "gt" | "in" };
+type Where = { field: string; value: unknown; operator?: "eq" | "ne" | "lt" | "gt" | "gte" | "in" };
 export interface Adapter {
   create(a: { model: string; data: Record<string, unknown> }): Promise<unknown>;
   findOne(a: { model: string; where: Where[] }): Promise<unknown>;
@@ -26,6 +26,7 @@ export interface Adapter {
   update(a: { model: string; where: Where[]; update: Record<string, unknown> }): Promise<unknown>;
   updateMany(a: { model: string; where: Where[]; update: Record<string, unknown> }): Promise<number>;
   deleteMany(a: { model: string; where: Where[] }): Promise<number>;
+  count(a: { model: string; where?: Where[] }): Promise<number>;
 }
 
 export interface Job {
@@ -433,6 +434,13 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         where: [{ field: "id", value: current.id }, { field: "version", value: current.version }],
         update: { attempts, lastError: err.message.slice(0, 1000), lastStatus: err.status, lockedUntil: RELEASED, failed: giveUp, nextAttemptAt: new Date(Date.now() + wait), updatedAt: new Date() },
       });
+      if (loud && options.onFailure) {
+        try {
+          await options.onFailure({ targetId: target.id, kind: (isGroup ? current.kind : "user") as DeliveryFailure["kind"], subjectId: current.userId, error: err.message, status: err.status, attempts, failed: giveUp });
+        } catch (hookError) {
+          log.error(`[scim] onFailure threw: ${(hookError as Error).message}`);
+        }
+      }
       // Bumped during delivery (a new change, already due now): free it and try the new state;
       // but an app that asked us to wait (429) is waited for, whatever changed meanwhile.
       if (recorded === 0) {
@@ -864,5 +872,41 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return links.filter((l) => l.targetId === targetId).map((l) => ({ key: l.key, ref: refOfLink(l) }));
   }
 
-  return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, targets };
+  /** Per target: jobs queued, stuck (still retried past maxAttempts) and failed; accounts and groups the app confirmed. */
+  async function status(targetIds: string[]) {
+    const count = (model: string, where: { field: string; value: string | number | boolean; operator?: "lt" | "gte" | "ne" }[]) => adapter.count({ model, where });
+    return Promise.all(
+      targetIds.map(async (id) => {
+        const t = { field: "targetId", value: id };
+        return {
+          id,
+          queued: await count(JOB_MODEL, [t, { field: "failed", value: false }, { field: "attempts", value: maxAttempts, operator: "lt" }]),
+          stuck: await count(JOB_MODEL, [t, { field: "failed", value: false }, { field: "attempts", value: maxAttempts, operator: "gte" }]),
+          failed: await count(JOB_MODEL, [t, { field: "failed", value: true }]),
+          // Confirmed by the app: a pending create's link has no remoteId yet.
+          accounts: await count(LINK_MODEL, [t, { field: "active", value: true }, { field: "remoteId", value: "", operator: "ne" }]),
+          groups: await count(GROUP_LINK_MODEL, [t, { field: "remoteId", value: "", operator: "ne" }]),
+        };
+      }),
+    );
+  }
+
+  /** One user's account and pending job at each target. */
+  async function userStatus(userId: string, targetIds: string[]) {
+    const iso = (d: unknown) => (d ? new Date(d as string).toISOString() : null);
+    return Promise.all(
+      targetIds.map(async (targetId) => {
+        const key = keyOf(targetId, userId);
+        const link = (await adapter.findOne({ model: LINK_MODEL, where: [{ field: "key", value: key }] })) as (Link & { syncedAt?: unknown }) | null;
+        const job = (await jobsFor(key))[0];
+        return {
+          targetId,
+          account: link ? { remoteId: link.remoteId || null, active: link.active, syncedAt: iso(link.syncedAt) } : null,
+          job: job ? { attempts: job.attempts, failed: job.failed, lastStatus: job.lastStatus ?? null, lastError: job.lastError ?? null, nextAttemptAt: iso(job.nextAttemptAt) } : null,
+        };
+      }),
+    );
+  }
+
+  return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, targets, status, userStatus };
 }

@@ -104,18 +104,23 @@ jobs:
       - if: matrix.runtime == 'deno'
         run: deno --version && deno run -A test/runtimes/smoke.mjs
 
-  # The Workers example as a user installs it (from npm): its own typecheck against the Workers
-  # types, and Wrangler's build. test/example/ runs it inside workerd in the test job.
+  # The Workers example as a user installs it: this repository's package, packed as npm would
+  # publish it, into the example's own install; then its typecheck against the Workers types and
+  # Wrangler's build. test/example/ runs it inside workerd in the test job.
   example:
     runs-on: ubuntu-24.04
-    defaults: { run: { working-directory: examples/workers } }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: { node-version: 24 }
-      - run: npm ci --no-audit --no-fund
-      - run: npx tsc -p tsconfig.json
-      - run: npx wrangler deploy --dry-run --outdir dist
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile && pnpm build && pnpm pack --pack-destination "$RUNNER_TEMP"
+      - working-directory: examples/workers
+        run: |
+          npm ci --no-audit --no-fund
+          npm install --no-save --no-audit --no-fund "$RUNNER_TEMP"/better-auth-scim-provisioning-*.tgz
+          npx tsc -p tsconfig.json
+          npx wrangler deploy --dry-run --outdir dist
 
   secrets:
     runs-on: ubuntu-24.04

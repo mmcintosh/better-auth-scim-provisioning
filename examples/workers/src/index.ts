@@ -45,16 +45,8 @@ export default {
 
     if (url.pathname.startsWith("/admin/")) {
       if (!(await admin(request, env))) return json({ error: "admins only" }, 403);
-      const ctx = await auth.$context;
-      if (url.pathname === "/admin/status" && request.method === "GET") {
-        const count = (model: string, where: { field: string; value: string | number | boolean }[] = []) => ctx.adapter.count({ model, where });
-        return json({
-          queued: await count("scimProvisioningJob", [{ field: "failed", value: false }]),
-          failed: await count("scimProvisioningJob", [{ field: "failed", value: true }]),
-          accounts: await count("scimProvisioningLink"),
-          groups: await count("scimProvisioningGroupLink"),
-        });
-      }
+      // Per target: jobs queued, stuck and failed, and the accounts and groups at the app.
+      if (url.pathname === "/admin/status" && request.method === "GET") return json(await auth.api.scimProvisioningStatus({ body: {} }));
       // Deliver what's due now (the Cron Trigger does this on its schedule).
       if (url.pathname === "/admin/run" && request.method === "POST") return json(await auth.api.scimProvisioningRun({ body: {} }));
       // Queue every user and group again, page by page: after an outage, or to adopt existing users.
