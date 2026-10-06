@@ -26,7 +26,7 @@ export interface HostDatabase {
 export function schemaOptions(database?: unknown) {
   return {
     ...(database === undefined ? {} : { database: database as never }),
-    plugins: [admin(), organization({ teams: { enabled: true } }), scimProvisioning({ targets: [{ id: "schema", type: "scim", url: "https://schema.invalid/scim/v2", token: "t" }] as Target[] })],
+    plugins: [admin(), organization({ teams: { enabled: true } }), scimProvisioning({ targets: [{ id: "schema", type: "scim", url: "https://schema.invalid/scim/v2", token: "t" }] as Target[], registry: {} })],
   };
 }
 

@@ -7,7 +7,8 @@ import * as z from "zod";
 import { targetUrl } from "./scim-client";
 import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
 import { registrySource, secretText, TARGET_MODEL } from "./registry";
-import type { ScimProvisioningOptions } from "./types";
+import { registryEndpoints } from "./registry-endpoints";
+import type { ScimProvisioningOptions, Target } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
 export { atlassian, awsIamIdentityCenter, cloudflareAccess, githubEnterprise, profiles, slack, slackUserName } from "./profiles";
@@ -15,6 +16,7 @@ export { SCIM_GROUP_SCHEMA, SCIM_USER_SCHEMA, ScimError, type ScimGroup, type Sc
 export type { ScimAuth } from "./credentials";
 export { type CheckId, type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SCHEMA_VERSION, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, WebhookSignatureError, webhookSignature } from "./webhook";
+export type { StoredTargetView } from "./registry-endpoints";
 export type { DeliveryFailure, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
 
 
@@ -94,7 +96,16 @@ const optionsSchema = z.strictObject({
   retry: z.strictObject({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
   concurrency: z.number().int().min(1).max(32).optional(),
   onFailure: z.function().optional(),
-  registry: z.strictObject({ cacheSeconds: z.number().min(0).max(3600).optional(), allowHosts: z.array(z.string().min(1)).optional(), fetch: z.function().optional() }).optional(),
+  registry: z
+    .strictObject({
+      canManage: z.function().optional(),
+      organizationRoles: z.array(z.string().min(1)).optional(),
+      maxTargetsPerOrganization: z.number().int().min(1).max(1000).optional(),
+      cacheSeconds: z.number().min(0).max(3600).optional(),
+      allowHosts: z.array(z.string().min(1)).optional(),
+      fetch: z.function().optional(),
+    })
+    .optional(),
 });
 
 type SchemaDef = { type?: string; element?: unknown; innerType?: unknown; shape?: Record<string, unknown> };
@@ -249,6 +260,33 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     }
   }
 
+  /** Set at init: whether the organization plugin has teams (a stored target's teamGroups needs them). */
+  let teamsEnabled = false;
+
+  /** A stored target, checked as the options check a target in code. */
+  function targetProblems(target: Target): string[] {
+    const parsed = optionsSchema.safeParse({ targets: [target] });
+    const issues = parsed.success ? [] : parsed.error.issues.flatMap(describeIssue).map((i) => i.replace(/^targets\.0\.?/, "settings."));
+    if (target.teamGroups && !teamsEnabled) issues.push("settings.teamGroups: needs the organization plugin's teams");
+    return issues;
+  }
+
+  /** Queue an organization's members and groups for one target, and deliver them one at a time. */
+  async function queueOrganization(s: State, organizationId: string, targetId: string) {
+    const queued: string[] = [];
+    for (let offset = 0; ; offset += 500) {
+      const page = (await s.adapter.findMany({ model: "member", where: [{ field: "organizationId", value: organizationId }], limit: 500, offset, sortBy: { field: "id", direction: "asc" } })) as { userId: string; organizationId: string }[];
+      for (const m of page) {
+        if (m.organizationId !== organizationId) continue;
+        await s.box.enqueue(targetId, m.userId);
+        queued.push(m.userId);
+      }
+      if (page.length < 500) break;
+    }
+    await groupChanged(s, organizationId, [targetId]);
+    for (const userId of queued) await s.box.runFor(targetId, userId);
+  }
+
   return {
     id: "scim-provisioning",
     schema: {
@@ -327,6 +365,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         if (needs.length && !org) throw new Error(`[scim] target ${t.id}: ${needs.join(", ")} need Better Auth's organization plugin`);
         if (t.teamGroups && !org?.options?.teams?.enabled) throw new Error(`[scim] target ${t.id}: teamGroups needs the organization plugin's teams (organization({ teams: { enabled: true } }))`);
       }
+      teamsEnabled = !!org?.options?.teams?.enabled;
       if (options.registry && !org) throw new Error("[scim] registry needs Better Auth's organization plugin: every stored target belongs to an organization");
       const source = options.registry
         ? registrySource(options.targets, ctx.adapter as unknown as Adapter, ctx.secretConfig, options.registry, ctx.logger)
@@ -473,6 +512,24 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       ],
     },
     endpoints: {
+      ...(options.registry
+        ? registryEndpoints(
+            {
+              options: options.registry,
+              codeIds: options.targets.map((t) => t.id),
+              targetProblems,
+              instance: (ctx) => {
+                const s = stateOf(ctx.context);
+                if (!s) return undefined;
+                return {
+                  forget: () => (s.source as { forget?: () => void }).forget?.(),
+                  queueOrganization: (organizationId, targetId) => s.background(queueOrganization(s, organizationId, targetId)),
+                };
+              },
+            },
+            (ctx) => ctx.context.secretConfig,
+          )
+        : {}),
       /**
        * How provisioning stands, per target: jobs queued, stuck (an app error still retried past
        * `retry.maxAttempts`, every 6 hours) and failed (until the user changes or a reconcile),

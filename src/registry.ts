@@ -37,6 +37,8 @@ export const secretText = (min = 1) =>
 
 /** What a stored target may say about itself: data only (no functions), and no organization (it's the owner's). */
 export const storedSettingsSchema = z.strictObject({
+  /** A label for people: the target's id is generated. */
+  name: z.string().min(1).max(100).refine((t) => !hasControl(t), "must not contain control characters").optional(),
   type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
   url: z.string().optional(),
   profile: z.enum(Object.keys(profiles) as [keyof typeof profiles, ...(keyof typeof profiles)[]]).optional(),
@@ -109,7 +111,9 @@ export function publicUrl(value: string, allowHosts: readonly string[] = [], o: 
   if (u.protocol !== "https:") return "must be https";
   if (u.username || u.password || u.hash || value.includes("#")) return "must have no credentials or fragment";
   if (!o.query && (u.search || value.includes("?"))) return "must have no query";
-  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  // URL has already turned other spellings of IPv4 (2130706433, 0x7f.1, 127.1) into dotted form.
+  // A trailing dot names the same host ("localhost." is localhost).
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
   if (allowHosts.map((h) => h.toLowerCase()).includes(host)) return null;
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || !host.includes(".") && !host.includes(":")) return "must be a public host";
   if (privateAddress(host)) return "must not be a private, loopback or link-local address";
@@ -124,8 +128,9 @@ function privateAddress(host: string): boolean {
   }
   if (!host.includes(":")) return false;
   const h = host.toLowerCase();
-  // An IPv4 address inside IPv6 (::ffff:a.b.c.d, which URL writes as ::ffff:XXXX:XXXX): judged as IPv4.
-  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  // An IPv4 address inside IPv6 (mapped ::ffff:a.b.c.d, compatible ::a.b.c.d, NAT64 64:ff9b::a.b.c.d,
+  // which URL writes in hex): judged as IPv4.
+  const mapped = /^(?:::ffff:|::|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
   if (mapped) {
     const [hi, lo] = [Number.parseInt(mapped[1] as string, 16), Number.parseInt(mapped[2] as string, 16)];
     return privateAddress(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
@@ -135,14 +140,46 @@ function privateAddress(host: string): boolean {
 
 /** A stored row as a target: its settings, its credentials, its profile, tied to its organization. */
 export async function targetOf(key: SealKey, row: TargetRow, fetch?: typeof globalThis.fetch): Promise<Target> {
-  const settings = storedSettingsSchema.parse(JSON.parse(row.config));
-  const credentials = await unseal(key, row);
-  const { profile, google, ...rest } = settings;
+  return assemble(row, storedSettingsSchema.parse(JSON.parse(row.config)), await unseal(key, row), fetch);
+}
+
+/** A target from its parts: settings and credentials already checked. */
+export function assemble(row: Pick<TargetRow, "targetId" | "organizationId">, settings: StoredSettings, credentials: StoredCredentials, fetch?: typeof globalThis.fetch): Target {
+  const { profile, google, name: _, ...rest } = settings;
   const base = { ...rest, id: row.targetId, organizationId: row.organizationId, ...(fetch ? { fetch } : {}) };
   if (settings.type === "webhook") return { ...base, type: "webhook", url: settings.url as string, secret: (credentials as { secret: string }).secret } as Target;
   if (settings.type === "google-workspace") return { ...base, type: "google-workspace", google: { ...(google as object), privateKey: (credentials as { privateKey: string }).privateKey } } as Target;
   const scim = { ...base, type: "scim", url: settings.url as string, ...("token" in credentials ? { token: credentials.token } : "auth" in credentials ? { auth: credentials.auth } : {}) } as ScimTarget;
   return profile ? profiles[profile](scim) : scim;
+}
+
+/**
+ * What's wrong with a stored target's settings and credentials, beyond their shapes: the
+ * credentials its type takes, and URLs that are https and public (`allowHosts` aside).
+ */
+export function storedProblems(settings: StoredSettings, credentials: StoredCredentials, allowHosts: readonly string[] = []): string[] {
+  const issues: string[] = [];
+  const type = settings.type ?? "scim";
+  const kind = credentialsKind(credentials);
+  const takes = { scim: ["bearer", "basic", "header", "oauth2"], webhook: ["webhook-secret"], "google-workspace": ["google-service-account"] }[type];
+  if (!takes.includes(kind)) issues.push(`credentials: a ${type} target takes ${type === "scim" ? "token or auth" : type === "webhook" ? "secret" : "privateKey"}`);
+  if (type === "google-workspace") {
+    if (!settings.google) issues.push("settings.google: required for a google-workspace target");
+    if (settings.url !== undefined) issues.push("settings.url: not for a google-workspace target");
+  } else {
+    if (settings.google) issues.push(`settings.google: not for a ${type} target`);
+    if (settings.url === undefined) issues.push("settings.url: required");
+    else {
+      const problem = publicUrl(settings.url, allowHosts, { query: type === "webhook" });
+      if (problem) issues.push(`settings.url: ${problem}`);
+    }
+  }
+  if (type !== "scim") for (const k of ["profile", "update", "compat"] as const) if (settings[k] !== undefined) issues.push(`settings.${k}: for scim targets only`);
+  if ("auth" in credentials && credentials.auth.type === "oauth2") {
+    const problem = publicUrl(credentials.auth.tokenUrl, allowHosts);
+    if (problem) issues.push(`credentials.auth.tokenUrl: ${problem}`);
+  }
+  return issues;
 }
 
 /** Code targets first, then stored ones: listed from a short cache, but looked up in the database on a miss. */

@@ -137,7 +137,7 @@ const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
 
 /** The client for a target: SCIM, or Google Workspace's Directory API behind the same operations. */
 /** `change` names the change being delivered (its job and version), for webhook event ids. */
-const clientFor = (target: Target, change?: string) =>
+export const clientFor = (target: Target, change?: string) =>
   target.type === "google-workspace"
     ? googleWorkspaceClient(target)
     : target.type === "webhook"
