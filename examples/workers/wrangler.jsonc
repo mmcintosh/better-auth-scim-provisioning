@@ -9,9 +9,10 @@
   "triggers": { "crons": ["*/5 * * * *"] },
   "vars": {
     "BETTER_AUTH_URL": "http://localhost:8787",
-    "ADMIN_EMAILS": "",
-    "DEV_MAILBOX": "true"
+    "ADMIN_EMAILS": ""
   }
+  // DEV_MAILBOX="true" (in .dev.vars, never here: these vars are deployed too) serves verification
+  // links at /dev/mailbox for local development; it only ever answers on localhost.
   // Secrets: BETTER_AUTH_SECRET, and SCIM_URL + SCIM_TOKEN and/or WEBHOOK_URL + WEBHOOK_SECRET
   // (`wrangler secret put …`, or .dev.vars for `wrangler dev`).
 }

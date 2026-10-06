@@ -4,6 +4,12 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Workers example no longer exposes its dev mailbox when deployed.** `wrangler.jsonc` turned it on, and those settings are deployed too, so anyone could fetch the verification link for any address (and verify an admin's address). It's now on only through `.dev.vars`, it only answers on `localhost`, and the README's deploy steps set email up before deploying.
+- **The Workers example no longer stalls after a first request it doesn't serve.** Better Auth finishes setting up its handler on the first call, and workerd cancels what a request leaves unfinished; the request that creates Better Auth now also calls its handler once.
+- The example's `/admin/reconcile` works a page at a time (`limit: 200`).
+
 ### Examples
 
 - **A Workers example** ([examples/workers](examples/workers)): Better Auth on D1 provisioning to a SCIM app and/or a signed webhook, with `waitUntil`, a Cron Trigger for retries, organizations as groups (only admins create them), email verification, and admin routes to see the queue, run and reconcile. CI runs it inside workerd through Miniflare (sign-up to deletion, a retry delivered by the Cron Trigger, the committed migration checked against Better Auth's), and builds it as installed from npm.

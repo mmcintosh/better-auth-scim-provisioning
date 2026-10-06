@@ -1,4 +1,6 @@
 # Copy to .dev.vars for `wrangler dev` (git-ignored). Use `wrangler secret put` when deployed.
+# Local development only: verification links at /dev/mailbox instead of email (localhost only).
+DEV_MAILBOX=true
 BETTER_AUTH_SECRET=change-me-to-at-least-32-random-characters
 SCIM_URL=https://your-app.example.com/scim/v2
 SCIM_TOKEN=the-apps-scim-token
