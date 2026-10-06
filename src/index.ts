@@ -365,29 +365,29 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               }
             }
             // A deleted organization takes its members with it: deprovision everyone linked
-            // through its targets. In the background, one user at a time: never in the way of
-            // the request, and never a burst at the app. Whatever doesn't finish
-            // is left queued for the scheduled run, or found by the next reconcile.
+            // through its targets. They're queued before the response, so none can be lost if the
+            // work after it is cut short (Workers ends it with waitUntil's budget); the deliveries
+            // run in the background, one user at a time (never a burst at the app), and whatever
+            // doesn't finish there is delivered by the scheduled run.
             const orgId = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
             const orgTargets = options.targets.filter((t) => ctx.path === "/organization/delete" && typeof orgId === "string" && t.organizationId === orgId);
-            if (orgTargets.length) {
-              background(
-                (async () => {
-                  const queued: [string, string][] = [];
-                  for (const t of orgTargets) {
-                    for await (const userId of b.allLinkedUsers(t.id)) {
-                      try {
-                        await b.enqueue(t.id, userId);
-                        queued.push([t.id, userId]);
-                      } catch (e) {
-                        ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
-                      }
-                    }
+            const queued: [string, string][] = [];
+            for (const t of orgTargets) {
+              try {
+                for await (const userId of b.allLinkedUsers(t.id)) {
+                  try {
+                    await b.enqueue(t.id, userId);
+                    queued.push([t.id, userId]);
+                  } catch (e) {
+                    ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
                   }
-                  for (const [targetId, userId] of queued) await b.runFor(targetId, userId);
-                })(),
-              );
+                }
+              } catch (e) {
+                // The organization is gone either way: say so loudly rather than fail the delete.
+                ctx.context.logger.error(`[scim] ${t.id}: could not queue the members of deleted organization ${orgId} for deprovisioning; run a reconcile`, e);
+              }
             }
+            if (queued.length) background((async () => { for (const [targetId, userId] of queued) await b.runFor(targetId, userId); })());
           }),
         },
       ],
