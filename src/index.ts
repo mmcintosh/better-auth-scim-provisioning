@@ -17,75 +17,122 @@ export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SIGNATURE_HEADER,
 export type { GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, WebhookTarget } from "./types";
 
 
-const optionsSchema = z.object({
+const targetSchema = z.strictObject({
+  id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
+  type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
+  secret: z.string().min(32, "must be at least 32 characters").optional(),
+  url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment").optional(),
+  google: z
+    .strictObject({
+      clientEmail: z.string().min(1),
+      privateKey: z.string().includes("PRIVATE KEY", { message: "must be the service account's PEM private key" }),
+      adminEmail: z.string().min(1),
+      orgUnitPath: z.string().startsWith("/").optional(),
+      groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/, "a domain, such as example.com").optional(),
+      groupEmail: z.function().optional(),
+      tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
+    })
+    .optional(),
+  token: z.string().min(1).optional(),
+  auth: z
+    .discriminatedUnion("type", [
+      z.strictObject({ type: z.literal("bearer"), token: z.string().min(1) }),
+      z.strictObject({ type: z.literal("basic"), username: z.string().min(1), password: z.string().min(1) }),
+      z.strictObject({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,64}$/), value: z.string().min(1) }),
+      z.strictObject({
+        type: z.literal("oauth2"),
+        tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment"),
+        clientId: z.string().min(1),
+        clientSecret: z.string().min(1),
+        scope: z.string().optional(),
+        clientAuth: z.enum(["body", "basic"]).optional(),
+        params: z.record(z.string(), z.string()).optional(),
+      }),
+    ])
+    .optional(),
+  include: z.function().optional(),
+  requireVerifiedEmail: z.boolean().optional(),
+  organizationId: z.string().min(1).optional(),
+  mapUser: z.function().optional(),
+  deprovision: z.enum(["deactivate", "delete"]).optional(),
+  update: z.enum(["put", "patch"]).optional(),
+  compat: z
+    .strictObject({
+      groupUpdate: z.enum(["put", "patch"]).optional(),
+      groupMembers: z.enum(["group", "users-filter"]).optional(),
+      maxGroupMembersPerRequest: z.number().int().min(1).max(100_000).optional(),
+      groupRename: z.enum(["rename", "recreate"]).optional(),
+    })
+    .optional(),
+  groups: z.union([z.boolean(), z.function()]).optional(),
+  groupName: z.function().optional(),
+  teamGroups: z.union([z.boolean(), z.function()]).optional(),
+  teamGroupName: z.function().optional(),
+  roleGroups: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
+  roleGroupName: z.function().optional(),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  fetch: z.function().optional(),
+});
+
+const optionsSchema = z.strictObject({
   targets: z
     .array(
-      z.object({
-        id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
-        type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
-        secret: z.string().min(32, "must be at least 32 characters").optional(),
-        url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment").optional(),
-        google: z
-          .object({
-            clientEmail: z.string().min(1),
-            privateKey: z.string().includes("PRIVATE KEY", { message: "must be the service account's PEM private key" }),
-            adminEmail: z.string().min(1),
-            orgUnitPath: z.string().startsWith("/").optional(),
-            groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/, "a domain, such as example.com").optional(),
-            groupEmail: z.function().optional(),
-            tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
-          })
-          .optional(),
-        token: z.string().min(1).optional(),
-        auth: z
-          .discriminatedUnion("type", [
-            z.object({ type: z.literal("bearer"), token: z.string().min(1) }),
-            z.object({ type: z.literal("basic"), username: z.string().min(1), password: z.string().min(1) }),
-            z.object({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,64}$/), value: z.string().min(1) }),
-            z.object({
-              type: z.literal("oauth2"),
-              tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment"),
-              clientId: z.string().min(1),
-              clientSecret: z.string().min(1),
-              scope: z.string().optional(),
-              clientAuth: z.enum(["body", "basic"]).optional(),
-              params: z.record(z.string(), z.string()).optional(),
-            }),
-          ])
-          .optional(),
-        include: z.function().optional(),
-        requireVerifiedEmail: z.boolean().optional(),
-        organizationId: z.string().min(1).optional(),
-        mapUser: z.function().optional(),
-        deprovision: z.enum(["deactivate", "delete"]).optional(),
-        update: z.enum(["put", "patch"]).optional(),
-        compat: z
-          .object({
-            groupUpdate: z.enum(["put", "patch"]).optional(),
-            groupMembers: z.enum(["group", "users-filter"]).optional(),
-            maxGroupMembersPerRequest: z.number().int().min(1).max(100_000).optional(),
-            groupRename: z.enum(["rename", "recreate"]).optional(),
-          })
-          .optional(),
-        groups: z.union([z.boolean(), z.function()]).optional(),
-        groupName: z.function().optional(),
-        teamGroups: z.union([z.boolean(), z.function()]).optional(),
-        teamGroupName: z.function().optional(),
-        roleGroups: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
-        roleGroupName: z.function().optional(),
-        timeoutMs: z.number().int().min(100).max(120_000).optional(),
-        fetch: z.function().optional(),
-      })
+      targetSchema
         .refine((t) => t.type === "google-workspace" || t.url !== undefined, { message: "url is required", path: ["url"] })
         .refine((t) => t.type === "google-workspace" || t.type === "webhook" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
         .refine((t) => t.type !== "webhook" || (t.secret !== undefined && t.token === undefined && t.auth === undefined && t.google === undefined), "a webhook target takes url and secret, not token, auth or google")
         .refine((t) => t.type === "webhook" || t.secret === undefined, "secret is for webhook targets")
-        .refine((t) => t.type !== "google-workspace" || (t.google !== undefined && t.token === undefined && t.auth === undefined), "a google-workspace target takes google, not token or auth"),
+        .refine((t) => t.type !== "google-workspace" || (t.google !== undefined && t.token === undefined && t.auth === undefined), "a google-workspace target takes google, not token or auth")
+        .refine((t) => t.type === undefined || t.type === "scim" || t.update === undefined, { message: "update is for scim targets only", path: ["update"] })
+        .refine((t) => t.type === undefined || t.type === "scim" || t.compat === undefined, { message: "compat is for scim targets only", path: ["compat"] }),
     )
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
-  retry: z.object({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
+  retry: z.strictObject({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
   concurrency: z.number().int().min(1).max(32).optional(),
 });
+
+type SchemaDef = { type?: string; element?: unknown; innerType?: unknown; shape?: Record<string, unknown> };
+const defOf = (node: unknown): SchemaDef | undefined => (node as { def?: SchemaDef } | undefined)?.def;
+const unwrap = (node: unknown): unknown => (defOf(node)?.type === "optional" ? unwrap(defOf(node)?.innerType) : node);
+
+/** Every key the options object at `path` accepts, for "did you mean" hints on unknown keys. */
+function knownKeys(schema: unknown, path: PropertyKey[]): string[] {
+  let node = unwrap(schema);
+  for (const step of path) {
+    const def = defOf(node);
+    if (def?.type === "array") node = unwrap(def.element);
+    else if (def?.shape && typeof step === "string") node = unwrap(def.shape[step]);
+    else return [];
+  }
+  return Object.keys(defOf(node)?.shape ?? {});
+}
+
+/** Edit distance, ignoring case, for spelling hints. */
+function distance(a: string, b: string): number {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  let row = Array.from({ length: y.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= x.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= y.length; j++) next[j] = Math.min((row[j] ?? 0) + 1, (next[j - 1] ?? 0) + 1, (row[j - 1] ?? 0) + (x[i - 1] === y[j - 1] ? 0 : 1));
+    row = next;
+  }
+  return row[y.length] ?? 0;
+}
+
+const TARGET_KEYS = new Set(Object.keys(targetSchema.def.shape));
+
+/** One message per problem; an unknown key names its path and, where it's clear, what was meant. */
+function describeIssue(issue: z.core.$ZodIssue): string[] {
+  const at = (key: PropertyKey) => [...issue.path, key].join(".");
+  if (issue.code !== "unrecognized_keys") return [`${issue.path.join(".")}: ${issue.message}`];
+  return issue.keys.map((key) => {
+    if (issue.path.length === 0 && TARGET_KEYS.has(key)) return `${at(key)}: unknown option; ${key} is an option of each target (targets[].${key})`;
+    const close = (k: string) => distance(key, k) <= Math.max(2, Math.floor(k.length / 4)) || (key.length >= 4 && (k.toLowerCase().startsWith(key.toLowerCase()) || key.toLowerCase().startsWith(k.toLowerCase())));
+    const near = knownKeys(optionsSchema, issue.path).filter(close).sort((x, y) => distance(key, x) - distance(key, y))[0];
+    return `${at(key)}: unknown option${near ? `; did you mean ${near}?` : ""}`;
+  });
+}
 
 /**
  * The organization plugin's endpoints that change a membership. Server-side `addMember` has no
@@ -118,7 +165,7 @@ function membersIn(returned: unknown): { userId: string; organizationId: string 
 
 export function scimProvisioning(options: ScimProvisioningOptions) {
   const parsed = optionsSchema.safeParse(options);
-  if (!parsed.success) throw new Error(`[scim] invalid options: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  if (!parsed.success) throw new Error(`[scim] invalid options: ${parsed.error.issues.flatMap(describeIssue).join("; ")}`);
 
   let box: ReturnType<typeof outbox> | undefined;
   let background: (p: Promise<unknown>) => void = (p) => void p.catch(() => {});

@@ -6,12 +6,12 @@ import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { admin, organization } from "better-auth/plugins";
 import { scimProvisioning } from "../../src";
-import type { ScimProvisioningOptions, Target, TargetOptions } from "../../src/types";
+import type { ScimProvisioningOptions, ScimTarget, Target, TargetOptions } from "../../src/types";
 import { mockGoogle } from "./mock-google";
 import { mockScim } from "./mock-scim";
 import { mockWebhook } from "./mock-webhook";
 
-type TargetSpec = Omit<TargetOptions, "fetch"> & { type?: "scim" | "google-workspace" | "webhook"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number };
+type TargetSpec = Omit<TargetOptions, "fetch"> & Pick<ScimTarget, "update" | "compat"> & { type?: "scim" | "google-workspace" | "webhook"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number };
 
 /** A database for Better Auth's `database` option, and whether it needs Better Auth's migrations. */
 export interface HostDatabase {
