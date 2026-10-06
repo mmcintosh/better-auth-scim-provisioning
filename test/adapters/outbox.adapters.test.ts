@@ -217,7 +217,17 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     h.app.fail({ status: 503 });
     await h.user("Bea Berg");
     const status = await h.auth.api.scimProvisioningStatus({ body: {} });
-    expect(status.targets).toEqual([{ id: "app", queued: 0, stuck: 1, failed: 0, accounts: 1, groups: 0 }]);
+    expect(status.targets).toEqual([{ id: "app", queued: 0, waiting: 0, stuck: 1, failed: 0, accounts: 1, groups: 0 }]);
+  });
+
+  it("failures are listed a page at a time (id order, gt)", async () => {
+    const h = await host({ retry: { maxAttempts: 1, baseDelayMs: 0 } });
+    h.app.fail({ status: 400 }, { status: 503 }, { status: 400 });
+    const ids = [(await h.user("Ada Lovelace")).id, (await h.user("Bea Berg")).id, (await h.user("Cy Chen")).id];
+    const first = await h.auth.api.scimProvisioningFailures({ body: { limit: 2 } });
+    const second = await h.auth.api.scimProvisioningFailures({ body: { after: first.next!, limit: 2 } });
+    expect([...first.items, ...second.items].map((i) => i.subjectId).sort()).toEqual(ids.sort());
+    expect(second.next).toBeNull();
   });
 
   it("reconcile covers existing and deleted users", async () => {

@@ -49,17 +49,17 @@ export default {
       if (url.pathname === "/admin/status" && request.method === "GET") return json(await auth.api.scimProvisioningStatus({ body: {} }));
       // Deliver what's due now (the Cron Trigger does this on its schedule).
       if (url.pathname === "/admin/run" && request.method === "POST") return json(await auth.api.scimProvisioningRun({ body: {} }));
-      // Queue every user and group again, page by page: after an outage, or to adopt existing users.
+      // Which jobs failed or are stuck, with the app's last error: GET /admin/failures?after=…
+      if (url.pathname === "/admin/failures" && request.method === "GET") {
+        const after = url.searchParams.get("after") ?? undefined;
+        return json(await auth.api.scimProvisioningFailures({ body: { limit: 100, ...(after ? { after } : {}) } }));
+      }
+      // Queue every user and group again (after an outage, or to adopt existing users), one page
+      // per request so it stays within a Worker's limits: POST again with ?after=<next> until
+      // next is null.
       if (url.pathname === "/admin/reconcile" && request.method === "POST") {
-        let after: string | undefined;
-        let queued = 0;
-        do {
-          // A page at a time: one call over every user would run past a Worker's limits.
-          const page = await auth.api.scimProvisioningReconcile({ body: { limit: 200, ...(after ? { after } : {}) } });
-          queued += page.queued;
-          after = page.next ?? undefined;
-        } while (after);
-        return json({ queued });
+        const after = url.searchParams.get("after") ?? undefined;
+        return json(await auth.api.scimProvisioningReconcile({ body: { limit: 200, ...(after ? { after } : {}) } }));
       }
     }
     return json({ error: "not found" }, 404);

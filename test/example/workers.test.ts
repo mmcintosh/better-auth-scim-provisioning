@@ -188,7 +188,9 @@ describe("the Workers example", () => {
   it("an admin can reconcile and run on demand", async () => {
     const reconciled = await call("/admin/reconcile", { method: "POST", headers: { cookie: admin } });
     expect(reconciled.status).toBe(200);
-    expect(((await reconciled.json()) as { queued: number }).queued).toBeGreaterThan(0);
+    expect(await reconciled.json()).toEqual({ queued: expect.any(Number), next: null }); // one page covers this small app
+    const failures = await call("/admin/failures", { headers: { cookie: admin } });
+    expect(await failures.json()).toEqual({ items: [], next: null });
     const ran = await call("/admin/run", { method: "POST", headers: { cookie: admin } });
     expect(ran.status).toBe(200);
     const { targets } = (await (await call("/admin/status", { headers: { cookie: admin } })).json()) as { targets: { queued: number; stuck: number; failed: number }[] };

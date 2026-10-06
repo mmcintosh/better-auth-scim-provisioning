@@ -2,7 +2,7 @@
 
 A Worker whose Better Auth users are provisioned to a SCIM app, a webhook receiver, or both, with:
 
-- **D1** as Better Auth's database, with the package's tables in [`migrations/0001_init.sql`](migrations/0001_init.sql);
+- **D1** as Better Auth's database, with the package's tables in [`migrations/`](migrations);
 - deliveries right after each response, kept alive with **`waitUntil`**;
 - a **Cron Trigger** that delivers retries (an app that was down, a rate limit);
 - organizations as **groups** at each target, and only admins may create organizations (see [Who can name a group?](../../README.md#groups));
@@ -19,7 +19,8 @@ It's tested in CI inside workerd: [`test/example/workers.test.ts`](../../test/ex
 | `GET /dev/mailbox?email=…` | local development only: the verification link that would have been emailed (with `DEV_MAILBOX="true"`, on `localhost`) |
 | `GET /admin/status` | per target: jobs queued, stuck and failed, accounts and groups at the app (`scimProvisioningStatus`) |
 | `POST /admin/run` | deliver what's due now |
-| `POST /admin/reconcile` | queue every user and group again (after an outage, or to adopt existing users) |
+| `GET /admin/failures` | the jobs that failed or are stuck, with the app's last error (`scimProvisioningFailures`; `?after=` for the next page) |
+| `POST /admin/reconcile` | queue every user and group again (after an outage, or to adopt existing users), a page per request: `?after=<next>` until `next` is null |
 
 `/admin/*` is for signed-in users whose email is in `ADMIN_EMAILS`.
 
@@ -59,7 +60,7 @@ npm run deploy
 | --- | --- |
 | [`src/auth.ts`](src/auth.ts) | Better Auth and the targets, from the Worker's settings |
 | [`src/index.ts`](src/index.ts) | the routes, `waitUntil` and the Cron Trigger |
-| [`migrations/0001_init.sql`](migrations/0001_init.sql) | the tables, as Better Auth's migrator writes them for these options (the test fails if it's out of date) |
+| [`migrations/`](migrations) | the tables (`0001`), and 1.0's group-link columns and index (`0002`); the test fails if they're behind the plugin's schema |
 | [`wrangler.jsonc`](wrangler.jsonc) | D1, the cron schedule and the variables |
 
 For sign-in as well as provisioning, see better-auth-saml-idp's [guide to using both together](https://github.com/mmcintosh/better-auth-saml-idp/blob/main/docs/guide/provisioning.md); its Workers example has an admin page for provisioning too.

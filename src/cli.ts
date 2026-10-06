@@ -16,9 +16,14 @@ const [command, ...rest] = process.argv.slice(2);
 const flags: Record<string, string> = {};
 for (let i = 0; i < rest.length; i += 2) flags[(rest[i] ?? "").replace(/^--/, "")] = rest[i + 1] ?? "";
 
-if (command !== "check" || !flags.url) {
+if (command === "help" || command === "--help" || command === "-h") {
   console.log(usage);
-  process.exit(command === "check" || command === undefined ? 1 : 0);
+  process.exit(0);
+}
+if (command !== "check" || !flags.url) {
+  // An unknown command, or check without --url: a mistake, so a failing exit code.
+  console.error(command && command !== "check" ? `Unknown command: ${command}\n\n${usage}` : usage);
+  process.exit(1);
 }
 let auth: ReturnType<typeof parseAuthFile> | undefined;
 try {

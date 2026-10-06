@@ -205,13 +205,16 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
   }
 
   /** Queue an organization's groups (its own, its teams', its roles') at every target, and deliver them in the background. */
-  async function groupChanged(s: State, organizationId: string) {
+  async function groupChanged(s: State, organizationId: string, targetIds = options.targets.map((t) => t.id)): Promise<number> {
     const { box: b, background } = s;
-    for (const t of options.targets.filter((x) => b.hasGroups(x))) {
+    let queued = 0;
+    for (const t of options.targets.filter((x) => targetIds.includes(x.id) && b.hasGroups(x))) {
       const refs = await b.groupsForOrganization(t, organizationId);
       for (const ref of refs) await b.enqueue(t.id, ref.id, { kind: ref.kind });
+      queued += refs.length;
       background((async () => { for (const ref of refs) await b.runFor(t.id, ref.id, ref.kind); })());
     }
+    return queued;
   }
 
   /** Queue a team's group at every target with team groups (a removed team's group is removed). */
@@ -260,7 +263,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           key: { type: "string", required: true, unique: true },
           targetId: { type: "string", required: true, index: true },
           /** The organization the group belongs to (its own group's, or its team's or role's). */
-          organizationId: { type: "string", required: true },
+          organizationId: { type: "string", required: true, index: true },
           /** "group" (an organization), "team" or "role"; empty in links written before 1.0. */
           kind: { type: "string", required: false },
           /** The organization's, team's or role's id; empty in links written before 1.0. */
@@ -414,7 +417,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
        * and the accounts and groups at the app. With `userId`, that user's account and pending
        * job at each target.
        */
-      scimProvisioningStatus: createAuthEndpoint.serverOnly({ method: "POST", body: z.object({ userId: z.string().min(1).optional() }).optional() }, async (ctx) => {
+      scimProvisioningStatus: createAuthEndpoint.serverOnly({ method: "POST", body: z.strictObject({ userId: z.string().min(1).optional() }).optional() }, async (ctx) => {
         const s = stateOf(ctx.context);
         if (!s) throw new Error("[scim] not initialised");
         const ids = options.targets.map((t) => t.id);
@@ -422,22 +425,52 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         return ctx.json(userId ? { user: await s.box.userStatus(userId, ids) } : { targets: await s.box.status(ids) });
       }),
       /**
-       * Queue a user (and their groups) at every target, or one, and deliver in the background:
-       * for changes Better Auth's endpoints don't show this plugin, such as memberships written by
-       * an SSO sync, inbound SCIM or your own code.
+       * Queue at every target, or one, and deliver in the background, for changes Better Auth's
+       * endpoints don't show this plugin (memberships written by an SSO sync, inbound SCIM or your
+       * own code): a user (and the groups they're in), and/or an organization's groups (its own,
+       * its teams', its roles'). For someone removed from an organization, pass both: the user
+       * isn't in that organization's groups any more, so only `organizationId` updates them.
        */
-      scimProvisioningQueue: createAuthEndpoint.serverOnly({ method: "POST", body: z.object({ userId: z.string().min(1), targetId: z.string().optional() }) }, async (ctx) => {
-        const s = stateOf(ctx.context);
-        if (!s) throw new Error("[scim] not initialised");
-        const all = options.targets.map((t) => t.id);
-        const { userId, targetId } = ctx.body;
-        if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
-        const targetIds = targetId ? [targetId] : all;
-        await changed(s, userId, targetIds);
-        return ctx.json({ queued: targetIds.length });
-      }),
+      scimProvisioningQueue: createAuthEndpoint.serverOnly(
+        {
+          method: "POST",
+          body: z
+            .strictObject({ userId: z.string().min(1).optional(), organizationId: z.string().min(1).optional(), targetId: z.string().optional() })
+            .refine((b) => b.userId !== undefined || b.organizationId !== undefined, "give userId, organizationId, or both"),
+        },
+        async (ctx) => {
+          const s = stateOf(ctx.context);
+          if (!s) throw new Error("[scim] not initialised");
+          const all = options.targets.map((t) => t.id);
+          const { userId, organizationId, targetId } = ctx.body;
+          if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+          const targetIds = targetId ? [targetId] : all;
+          let queued = 0;
+          if (userId) {
+            await changed(s, userId, targetIds);
+            queued += targetIds.length;
+          }
+          if (organizationId) queued += await groupChanged(s, organizationId, targetIds);
+          return ctx.json({ queued });
+        },
+      ),
+      /**
+       * The jobs that need someone to look at them, a page at a time (`limit`, 100 by default;
+       * then `after: next`): failed (until the user or group changes again, or a reconcile) and
+       * stuck (an app error still retried past `retry.maxAttempts`, every 6 hours).
+       */
+      scimProvisioningFailures: createAuthEndpoint.serverOnly(
+        { method: "POST", body: z.strictObject({ targetId: z.string().optional(), after: z.string().optional(), limit: z.number().int().min(1).max(500).optional() }).optional() },
+        async (ctx) => {
+          const s = stateOf(ctx.context);
+          if (!s) throw new Error("[scim] not initialised");
+          const targetId = ctx.body?.targetId;
+          if (targetId !== undefined && !options.targets.some((t) => t.id === targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+          return ctx.json(await s.box.failures({ targetId, after: ctx.body?.after, limit: ctx.body?.limit ?? 100 }));
+        },
+      ),
       /** Deliver what's due (retries included). Call it from a scheduled job, e.g. every minute. */
-      scimProvisioningRun: createAuthEndpoint.serverOnly({ method: "POST", body: z.object({ limit: z.number().int().min(1).max(500).optional() }).optional() }, async (ctx) => {
+      scimProvisioningRun: createAuthEndpoint.serverOnly({ method: "POST", body: z.strictObject({ limit: z.number().int().min(1).max(500).optional() }).optional() }, async (ctx) => {
         const s = stateOf(ctx.context);
         if (!s) throw new Error("[scim] not initialised");
         return ctx.json(await s.box.runDue(ctx.body?.limit ?? 50));
@@ -451,7 +484,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       scimProvisioningReconcile: createAuthEndpoint.serverOnly(
         {
           method: "POST",
-          body: z.object({ targetId: z.string().optional(), after: z.string().optional(), limit: z.number().int().min(1).max(10_000).optional() }).optional(),
+          body: z.strictObject({ targetId: z.string().optional(), after: z.string().optional(), limit: z.number().int().min(1).max(10_000).optional() }).optional(),
         },
         async (ctx) => {
           const s = stateOf(ctx.context);
@@ -467,7 +500,16 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           // The cursor: "u:<last user id>" while walking users, then "l:<target>:<last user id>"
           // while walking each target's links, then the groups ("g:…", "G:…", below).
           const cursor = ctx.body?.after ?? "u:";
+          const handedOut = /^(u:.*|[lgG]:([A-Za-z0-9_-]{1,64}):.*)$/.exec(cursor);
+          if (!handedOut || (handedOut[2] !== undefined && !all.includes(handedOut[2])))
+            throw new APIError("BAD_REQUEST", { message: "[scim] unknown cursor: pass `after` the `next` of a previous reconcile" });
           const page = () => Math.min(500, budget);
+          // A caller from 0.3 (no limit, no cursor) expected everything in one call: say it isn't.
+          const stopped = (next: string) => {
+            if (ctx.body?.limit === undefined && ctx.body?.after === undefined)
+              ctx.context.logger.warn(`[scim] reconcile queued ${queued} and stopped at its default page of 500: call again with \`after: next\` until next is null`);
+            return ctx.json({ queued, next });
+          };
 
           if (cursor.startsWith("u:")) {
             let last = cursor.slice(2) || null;
@@ -486,7 +528,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               }
               budget -= users.length;
               if (users.length < size) break;
-              if (budget <= 0) return ctx.json({ queued, next: `u:${last}` });
+              if (budget <= 0) return stopped(`u:${last}`);
             }
           }
 
@@ -495,7 +537,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             for (const t of targetIds.slice(Math.max(0, targetIds.indexOf(fromTarget as string)))) {
               let last: string | null = t === fromTarget && fromUser ? fromUser : null;
               for (;;) {
-                if (budget <= 0) return ctx.json({ queued, next: `l:${t}:${last ?? ""}` });
+                if (budget <= 0) return stopped(`l:${t}:${last ?? ""}`);
                 const size = page();
                 const linked = await b.linkedUsers(t, last, size);
                 if (linked.length) {
@@ -516,7 +558,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                 }
                 budget -= linked.length;
                 if (linked.length < size) break;
-                if (budget <= 0) return ctx.json({ queued, next: `l:${t}:${last}` });
+                if (budget <= 0) return stopped(`l:${t}:${last}`);
               }
             }
           }
@@ -534,7 +576,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             if (!resuming || phase === "g") {
               let after: string | null = resuming && fromGroup ? fromGroup : null;
               for (;;) {
-                if (budget <= 0) return ctx.json({ queued, next: `g:${t}:${after ?? ""}` });
+                if (budget <= 0) return stopped(`g:${t}:${after ?? ""}`);
                 const size = page();
                 const orgs = (await ctx.context.adapter.findMany({ model: "organization", where: after === null ? [] : [{ field: "id", value: after, operator: "gt" }], limit: size, sortBy: { field: "id", direction: "asc" } })) as { id: string }[];
                 for (const o of orgs) {
@@ -550,7 +592,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             }
             let afterKey: string | null = resuming && phase === "G" && fromGroup ? fromGroup : null;
             for (;;) {
-              if (budget <= 0) return ctx.json({ queued, next: `G:${t}:${afterKey ?? ""}` });
+              if (budget <= 0) return stopped(`G:${t}:${afterKey ?? ""}`);
               const size = page();
               const linked = await b.linkedGroups(t, afterKey, size);
               for (const l of linked) {
