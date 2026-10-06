@@ -67,10 +67,23 @@ describe("provisioning a user's life", () => {
     const h = await createHost();
     const existing = await h.user("Placeholder", false);
     // Provisioned by hand at the app before Better Auth knew.
-    await h.app.fetch(`${h.app.url}/Users`, { method: "POST", headers: { authorization: `Bearer ${h.app.token}` }, body: JSON.stringify({ userName: existing.email.toUpperCase(), name: { givenName: "Old", familyName: "Entry" }, active: false }) });
+    await h.app.fetch(`${h.app.url}/Users`, { method: "POST", headers: { authorization: `Bearer ${h.app.token}` }, body: JSON.stringify({ userName: existing.email.toUpperCase(), name: { givenName: "Old", familyName: "Entry" }, active: true }) });
     await h.ctx.internalAdapter.updateUser(existing.id, { emailVerified: true, name: "Linus Torvalds" });
     await h.settle();
     expect(appUsers(h.app)).toEqual([expect.objectContaining({ displayName: "Linus Torvalds", active: true, externalId: existing.id })]);
+  });
+
+  it("an account deactivated at the app isn't adopted (and so never switched back on)", async () => {
+    const h = await createHost();
+    const existing = await h.user("Placeholder", false);
+    // A former employee's account, switched off by an admin; the address now signs up again.
+    await h.app.fetch(`${h.app.url}/Users`, { method: "POST", headers: { authorization: `Bearer ${h.app.token}` }, body: JSON.stringify({ userName: existing.email, name: { givenName: "Old", familyName: "Entry" }, active: false }) });
+    await h.ctx.internalAdapter.updateUser(existing.id, { emailVerified: true, name: "New Hire" });
+    await h.settle();
+    expect(appUsers(h.app)).toEqual([expect.objectContaining({ userName: existing.email, active: false })]);
+    expect(appUsers(h.app)[0]!.externalId).toBeUndefined();
+    const [job] = (await h.jobs()) as { failed: boolean; lastError: string }[];
+    expect(job).toMatchObject({ failed: true, lastError: expect.stringContaining("deactivated") });
   });
 
   it("a user removed at the app since is created again", async () => {

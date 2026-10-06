@@ -207,10 +207,11 @@ export function scimClient(endpoint: ScimEndpoint) {
       // A page that isn't a SCIM list (a wrong URL that answers 200): never read as "no such user".
       if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number"))
         throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, true);
-      const resources = Array.isArray(list?.Resources) ? (list.Resources as { id?: unknown; userName?: unknown; externalId?: unknown }[]) : [];
+      const resources = Array.isArray(list?.Resources) ? (list.Resources as { id?: unknown; userName?: unknown; externalId?: unknown; active?: unknown }[]) : [];
       // SCIM compares userName case-insensitively; so do we, but only an exact hit is ours.
       const hit = resources.find((r) => typeof r.userName === "string" && r.userName.toLowerCase() === userName.toLowerCase());
-      return hit ? { id: idOf(hit, "GET /Users"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null } : null;
+      // `active` only when the app says: absent is not "deactivated".
+      return hit ? { id: idOf(hit, "GET /Users"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null, ...(typeof hit.active === "boolean" ? { active: hit.active } : {}) } : null;
     },
     async create(user: ScimUser): Promise<string> {
       return idOf((await request("POST", "/Users", user)).json, "POST /Users");

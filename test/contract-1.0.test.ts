@@ -25,6 +25,10 @@ describe("webhooks", () => {
     }
   });
 
+  it("a missing secret (an unset environment variable) is said plainly", async () => {
+    await expect(verifyWebhookSignature({ body, signature: "t=1,v1=x", secret: undefined as never })).rejects.toThrow(/no secret given/);
+  });
+
   it("signature failures are a WebhookSignatureError with a reason", async () => {
     const secret = "the-secret-that-is-at-least-32-characters";
     const fail = (signature: string | null) => verifyWebhookSignature({ body, signature, secret }).catch((e: unknown) => e);

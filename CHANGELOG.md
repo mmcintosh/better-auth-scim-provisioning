@@ -19,6 +19,11 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Fixed
 
+- **OAuth and Google tokens no longer stall deliveries on Workers.** A token fetch in progress was shared by every request in the isolate; on Workers, a fetch started by a request that has ended is cancelled, so later deliveries waiting on it waited for ever (reproduced in workerd). Only tokens that have arrived are shared now.
+- **An account deactivated at a SCIM app is no longer adopted and switched back on.** A new user with the same verified address (a rehire, a recycled address) reactivated it, with its old data and permissions. It's refused now, as Google's suspended accounts already were: reactivate it at the app first if it should be taken over.
+- **Options that need Better Auth's organization plugin** (`organizationId`, `groups`, `roleGroups`), **or its teams** (`teamGroups`), **stop the plugin at startup** without it. Every reconcile, or every user's delivery, failed instead.
+- **At Google, a user whose address is a Google Group's** (at targets with groups) fails, saying so; it was retried for ever as "not visible yet".
+- `verifyWebhookSignature` without a secret (an unset environment variable) says so, instead of a `TypeError`.
 - **A group made by hand is no longer taken over after our first create failed.** At an app that drops externalId, a group created by hand after our create failed (a 503, a timeout) was found on the retry and its members rewritten. A group without our externalId is now taken as ours only if it has members and every one is someone we'd put there; our own create whose reply was lost still is.
 - **Members who leave are removed at apps that list a group's members only when asked**, and at apps that page them by `startIndex`. With `groupUpdate: "patch"`, the members are read back to find who to remove: a group GET without them read as "no members", and index paging stopped at the first page, so leavers kept the group. Members are now asked for by name (`attributes=members`), and both cursor and index paging are followed.
 - **Jobs held by a worker that stopped no longer block the scheduled run.** They stayed at the head of the queue and used up its limit, so jobs behind them (bans included) waited until their hold ran out.

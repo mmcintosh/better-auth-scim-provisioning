@@ -261,6 +261,13 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
           const holder = await request("GET", path(user.userName)).catch(() => null);
           if (holder?.primaryEmail && holder.primaryEmail.toLowerCase() !== user.userName.toLowerCase())
             throw new ScimError(`POST /users: ${user.userName} is an alias of another Workspace account`, null, false);
+          // No user holds it: a Google Group might (an address is a user's or a group's, never
+          // both). Otherwise it would read as "not visible yet" and be retried for ever. Needs
+          // the group scope; without it this is skipped.
+          if (!holder) {
+            const group = await request("GET", `/groups/${encodeURIComponent(user.userName)}`).catch(() => null);
+            if (group?.email) throw new ScimError(`POST /users: ${user.userName} is a Google Group's address; give the user another address, or rename the group`, null, false);
+          }
         }
         throw e;
       }

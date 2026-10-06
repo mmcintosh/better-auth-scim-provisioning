@@ -273,9 +273,14 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // account's userName is that address: a custom userName (mapUser) proves nothing about
           // who the account was made for.
           if ((user as ProvisionedUser).emailVerified !== true) return refuse("an account with this userName exists at the app, and the user's email is not verified");
-          // Taking it over would unsuspend it, restoring someone's mailbox: an admin decides that.
-          if (found.active === false && target.type === "google-workspace")
-            return refuse("the Workspace account is suspended; unsuspend it at Google first if it should be taken over");
+          // Taking it over would switch it back on, with whatever it held (at Google, someone's
+          // mailbox): an admin decides that.
+          if (found.active === false)
+            return refuse(
+              target.type === "google-workspace"
+                ? "the Workspace account is suspended; unsuspend it at Google first if it should be taken over"
+                : "the app's account is deactivated; reactivate it at the app first if it should be taken over",
+            );
           if (scim.userName.toLowerCase() !== (user as ProvisionedUser).email.toLowerCase())
             return refuse("an account with this userName exists at the app, and its userName isn't the user's verified email, so it isn't taken over");
         }

@@ -163,7 +163,10 @@ export interface DeliveryFailure {
   subjectId: string;
   /** The error, with the app's own message where it gave one. */
   error: string;
-  /** The app's HTTP status, or null (a timeout, a network error, the host's own code). */
+  /**
+   * The app's HTTP status, or null: a timeout, a network error, the host's own code, or a
+   * webhook receiver's 404 or redirect (a wrong URL, never "already gone": the error says so).
+   */
   status: number | null;
   attempts: number;
   /** True: given up, until the subject changes again or a reconcile runs. False: still retried. */

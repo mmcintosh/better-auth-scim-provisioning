@@ -31,7 +31,7 @@ describe("scimClient", () => {
   it("creates, finds, replaces, deactivates and deletes a user", async () => {
     const { sp, client } = setup({ requireNames: true });
     const id = await client.create(ada);
-    expect(await client.findByUserName("ADA@example.com")).toEqual({ id, externalId: "user-1" }); // case-insensitive, as SCIM
+    expect(await client.findByUserName("ADA@example.com")).toEqual({ id, externalId: "user-1", active: true }); // case-insensitive, as SCIM
     await client.replace(id, { ...ada, displayName: "Countess of Lovelace" });
     expect(sp.users.get(id)?.displayName).toBe("Countess of Lovelace");
     await client.setActive(id, false);
