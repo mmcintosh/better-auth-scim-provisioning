@@ -5,7 +5,7 @@ import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
-import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
+import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
 import { registrySource, secretText, TARGET_MODEL } from "./registry";
 import { registryEndpoints } from "./registry-endpoints";
 import type { ScimProvisioningOptions, Target } from "./types";
@@ -101,7 +101,6 @@ const optionsSchema = z.strictObject({
       canManage: z.function().optional(),
       organizationRoles: z.array(z.string().min(1)).optional(),
       maxTargetsPerOrganization: z.number().int().min(1).max(1000).optional(),
-      cacheSeconds: z.number().min(0).max(3600).optional(),
       allowHosts: z.array(z.string().min(1)).optional(),
       fetch: z.function().optional(),
     })
@@ -201,62 +200,110 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
   const states = new WeakMap<object, State>();
   const stateOf = (context: { adapter: unknown }) => states.get(context.adapter as object);
 
+  /** Every row matching, a page at a time (an adapter returns 100 by default), exact matches only. */
+  async function findAll<T extends Record<string, unknown>>(adapter: Adapter, model: string, where: { field: string; value: unknown; operator?: "in" }[], keep: (r: T) => boolean): Promise<T[]> {
+    const out: T[] = [];
+    for (let offset = 0; ; offset += 1000) {
+      const page = (await adapter.findMany({ model, where, limit: 1000, offset, sortBy: { field: "id", direction: "asc" } })) as T[];
+      out.push(...page.filter(keep));
+      if (page.length < 1000) return out;
+    }
+  }
+
+  /**
+   * The targets each user's change concerns: the unscoped ones for everyone, and an
+   * organization's only for its members and for users with an account there (to deactivate).
+   * The others' deliveries would do nothing, and with a registry there's a target per organization.
+   */
+  async function relevantFor(s: State, userIds: readonly string[]): Promise<Map<string, Target[]>> {
+    if (!s.source.scoped) {
+      const all = await s.source.every();
+      return new Map(userIds.map((u) => [u, all]));
+    }
+    const orgsOf = new Map<string, Set<string>>();
+    const linkedOf = new Map<string, Set<string>>();
+    const note = (m: Map<string, Set<string>>, k: string, v: string) => m.set(k, (m.get(k) ?? new Set()).add(v));
+    // D1 allows 100 bound parameters per query.
+    for (let i = 0; i < userIds.length; i += IN_BATCH) {
+      const batch = userIds.slice(i, i + IN_BATCH);
+      const where = [{ field: "userId", value: batch, operator: "in" as const }];
+      for (const m of await findAll<{ userId: string; organizationId: string }>(s.adapter, "member", where, (r) => batch.includes(r.userId))) note(orgsOf, m.userId, m.organizationId);
+      for (const l of await findAll<{ userId: string; targetId: string }>(s.adapter, LINK_MODEL, where, (r) => batch.includes(r.userId))) note(linkedOf, l.userId, l.targetId);
+    }
+    const byId = new Map((await s.source.forOrganizations([...new Set([...orgsOf.values()].flatMap((o) => [...o]))])).map((t) => [t.id, t]));
+    // Accounts at targets of organizations they've left (or that are gone).
+    for (const id of new Set([...linkedOf.values()].flatMap((l) => [...l]))) {
+      if (byId.has(id)) continue;
+      const t = await s.source.get(id);
+      if (t) byId.set(id, t);
+    }
+    const targets = [...byId.values()];
+    return new Map(userIds.map((u) => [u, targets.filter((t) => !t.organizationId || orgsOf.get(u)?.has(t.organizationId) || linkedOf.get(u)?.has(t.id))]));
+  }
+
+  /** The targets with these ids that exist. */
+  async function targetsById(s: State, ids: readonly string[]): Promise<Target[]> {
+    const out: Target[] = [];
+    for (const id of ids) {
+      const t = await s.source.get(id);
+      if (t) out.push(t);
+    }
+    return out;
+  }
+
   /**
    * Queue (target, user) and try to deliver it right away, in the background; then, for targets
    * with groups, the user's organizations' groups, so a new user shows up in them at once.
+   * Returns how many targets it was queued at.
    */
-  async function changed(s: State, userId: string, only?: string[], formerGroups?: Map<string, GroupRef[]>) {
+  async function changed(s: State, userId: string, only?: Target[], formerGroups?: Map<string, GroupRef[]>): Promise<number> {
     const { box: b, background } = s;
-    const targetIds = only ?? (await relevantTargets(s, userId));
-    for (const targetId of targetIds) {
+    const targets = only ?? (await relevantFor(s, [userId])).get(userId) ?? [];
+    for (const target of targets) {
+      const targetId = target.id;
       await b.enqueue(targetId, userId);
       // A deleted user's groups, noted before the delete: queued, so they're updated even if this
       // delivery doesn't finish.
       const former = formerGroups?.get(targetId) ?? [];
       for (const ref of former) await b.enqueue(targetId, ref.id, { kind: ref.kind });
-      const target = await s.source.get(targetId);
+      if (isPaused(target)) continue;
       background(
         (async () => {
           await b.runFor(targetId, userId);
-          if (target && target !== "paused" && b.hasGroups(target)) for (const ref of [...former, ...(await b.groupsOf(target, userId))]) await b.runFor(targetId, ref.id, ref.kind);
+          if (b.hasGroups(target)) for (const ref of [...former, ...(await b.groupsOf(target, userId))]) await b.runFor(targetId, ref.id, ref.kind);
         })(),
       );
     }
+    return targets.length;
   }
 
-  /**
-   * The targets a user's change concerns: every target for everyone, but an organization's
-   * target only for its members and for users with an account there (to deactivate). The others'
-   * deliveries would do nothing, and with a registry there's a target per organization.
-   */
-  async function relevantTargets(s: State, userId: string): Promise<string[]> {
-    const targets = await s.source.all();
-    if (!targets.some((t) => t.organizationId)) return targets.map((t) => t.id);
-    const adapter = s.adapter;
-    const orgs = new Set(((await adapter.findMany({ model: "member", where: [{ field: "userId", value: userId }] })) as { userId: string; organizationId: string }[]).filter((m) => m.userId === userId).map((m) => m.organizationId));
-    const linked = new Set(((await adapter.findMany({ model: LINK_MODEL, where: [{ field: "userId", value: userId }] })) as { userId: string; targetId: string }[]).filter((l) => l.userId === userId).map((l) => l.targetId));
-    return targets.filter((t) => !t.organizationId || orgs.has(t.organizationId) || linked.has(t.id)).map((t) => t.id);
-  }
-
-  /** Queue an organization's groups (its own, its teams', its roles') at every target, and deliver them in the background. */
-  async function groupChanged(s: State, organizationId: string, only?: string[]): Promise<number> {
+  /** Queue an organization's groups (its own, its teams', its roles') at its targets with groups, and deliver them in the background. */
+  async function groupChanged(s: State, organizationId: string, only?: Target[]): Promise<number> {
     const { box: b, background } = s;
     let queued = 0;
-    for (const t of (await s.source.all()).filter((x) => (!only || only.includes(x.id)) && b.hasGroups(x))) {
+    for (const t of (only ?? (await s.source.forOrganizations([organizationId]))).filter((x) => b.hasGroups(x))) {
       const refs = await b.groupsForOrganization(t, organizationId);
       for (const ref of refs) await b.enqueue(t.id, ref.id, { kind: ref.kind });
       queued += refs.length;
-      background((async () => { for (const ref of refs) await b.runFor(t.id, ref.id, ref.kind); })());
+      if (!isPaused(t)) background((async () => { for (const ref of refs) await b.runFor(t.id, ref.id, ref.kind); })());
     }
     return queued;
   }
 
-  /** Queue a team's group at every target with team groups (a removed team's group is removed). */
-  async function teamChanged(s: State, teamId: string) {
+  /**
+   * Queue a team's group at the targets with team groups of its organization (a removed team's
+   * group is removed: for a team that's gone, the targets that have its group).
+   */
+  async function teamChanged(s: State, teamId: string, organizationId?: string) {
     const { box: b, background } = s;
-    for (const t of (await s.source.all()).filter((x) => x.teamGroups)) {
+    const team = (await s.adapter.findOne({ model: "team", where: [{ field: "id", value: teamId }] })) as { id: string; organizationId: string } | null;
+    const org = team?.id === teamId ? team.organizationId : organizationId;
+    const byId = new Map((await s.source.forOrganizations(org ? [org] : [])).map((t) => [t.id, t]));
+    const links = await findAll<{ subjectId?: string | null; kind?: string | null; targetId: string }>(s.adapter, GROUP_LINK_MODEL, [{ field: "subjectId", value: teamId }], (l) => l.subjectId === teamId && l.kind === "team");
+    for (const t of await targetsById(s, links.map((l) => l.targetId).filter((id) => !byId.has(id)))) byId.set(t.id, t);
+    for (const t of [...byId.values()].filter((x) => x.teamGroups)) {
       await b.enqueue(t.id, teamId, { kind: "team" });
-      background(b.runFor(t.id, teamId, "team"));
+      if (!isPaused(t)) background(b.runFor(t.id, teamId, "team"));
     }
   }
 
@@ -271,20 +318,37 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     return issues;
   }
 
-  /** Queue an organization's members and groups for one target, and deliver them one at a time. */
-  async function queueOrganization(s: State, organizationId: string, targetId: string) {
-    const queued: string[] = [];
-    for (let offset = 0; ; offset += 500) {
-      const page = (await s.adapter.findMany({ model: "member", where: [{ field: "organizationId", value: organizationId }], limit: 500, offset, sortBy: { field: "id", direction: "asc" } })) as { userId: string; organizationId: string }[];
-      for (const m of page) {
-        if (m.organizationId !== organizationId) continue;
-        await s.box.enqueue(targetId, m.userId);
-        queued.push(m.userId);
+  /**
+   * Queue everything a target of an organization should have: its members, the users with an
+   * account there (to deactivate those who left), and its groups; and make the target's waiting
+   * and failed jobs due. Queued before the response (deliveries run in the background, the rest
+   * by the scheduled run), so nothing is lost if the background work is cut short.
+   */
+  async function resync(s: State, organizationId: string, targetId: string) {
+    const target = await s.source.get(targetId);
+    if (!target) return;
+    await s.box.resume(targetId);
+    const userIds = new Set<string>();
+    for (const m of await findAll<{ userId: string; organizationId: string }>(s.adapter, "member", [{ field: "organizationId", value: organizationId }], (r) => r.organizationId === organizationId)) userIds.add(m.userId);
+    for await (const userId of s.box.allLinkedUsers(targetId)) userIds.add(userId);
+    for (const userId of userIds) await s.box.enqueue(targetId, userId, { now: true });
+    const refs = [...(await s.box.groupsForOrganization(target, organizationId))];
+    for (let after: string | null = null; ; ) {
+      const page = await s.box.linkedGroups(targetId, after, 500);
+      for (const l of page) {
+        if (!refs.some((r) => r.id === l.ref.id && r.kind === l.ref.kind)) refs.push(l.ref);
+        after = l.key;
       }
       if (page.length < 500) break;
     }
-    await groupChanged(s, organizationId, [targetId]);
-    for (const userId of queued) await s.box.runFor(targetId, userId);
+    for (const ref of refs) await s.box.enqueue(targetId, ref.id, { kind: ref.kind, now: true });
+    if (isPaused(target)) return;
+    s.background(
+      (async () => {
+        for (const userId of userIds) await s.box.runFor(targetId, userId);
+        for (const ref of refs) await s.box.runFor(targetId, ref.id, ref.kind);
+      })(),
+    );
   }
 
   return {
@@ -400,7 +464,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                 before: async (user: { id: string }) => {
                   try {
                     const byTarget = new Map<string, GroupRef[]>();
-                    for (const t of await s.source.all()) if (box.hasGroups(t)) byTarget.set(t.id, await box.groupsOf(t, user.id));
+                    for (const t of (await relevantFor(s, [user.id])).get(user.id) ?? []) if (box.hasGroups(t)) byTarget.set(t.id, await box.groupsOf(t, user.id));
                     // Taken by delete.after; a delete stopped after this (another hook, a rollback)
                     // leaves it behind, so old notes are dropped here.
                     for (const [id, note] of deleting) if (note.at < Date.now() - 60_000) deleting.delete(id);
@@ -441,95 +505,80 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             const s = stateOf(ctx.context);
             if (!returned || returned instanceof Error || !s) return;
             const { box: b, background } = s;
-            const queue = async (userId: string, targetIds: string[]) => {
+            // Never fail the write over provisioning (it's done by now): log, and a reconcile catches up.
+            const attempt = async (what: string, f: () => Promise<unknown>) => {
               try {
-                await changed(s, userId, targetIds);
+                await f();
               } catch (e) {
-                ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
+                ctx.context.logger.error(`[scim] could not queue ${what}`, e);
               }
             };
             const members = membersIn(returned);
             for (const m of members) {
-              await queue(m.userId, (await s.source.all()).filter((t) => t.organizationId === m.organizationId).map((t) => t.id));
+              await attempt(`user ${m.userId}`, async () => changed(s, m.userId, (await s.source.forOrganizations([m.organizationId])).filter((t) => t.organizationId === m.organizationId)));
             }
             // Groups: the organization whose membership, roles, name or existence changed, and the
             // team that changed.
-            if ((await s.source.all()).some((t) => t.groups || t.teamGroups || t.roleGroups)) {
-              const teamIds = new Set<string>();
-              if (ctx.path && TEAM_WRITES.has(ctx.path)) {
-                const r = returned as { id?: unknown; teamId?: unknown; organizationId?: unknown } | null;
-                const body = ctx.body as { teamId?: unknown } | undefined;
-                for (const id of [ctx.path.endsWith("-team") ? r?.id : undefined, r?.teamId, body?.teamId]) if (typeof id === "string") teamIds.add(id);
-              }
-              for (const teamId of teamIds) {
-                try {
-                  await teamChanged(s, teamId);
-                } catch (e) {
-                  ctx.context.logger.error(`[scim] could not queue the group of team ${teamId}`, e);
-                }
-              }
-              const orgIds = new Set(members.map((m) => m.organizationId));
-              const teamOrg = (returned as { organizationId?: unknown } | null)?.organizationId;
-              if (ctx.path && TEAM_WRITES.has(ctx.path) && typeof teamOrg === "string") orgIds.add(teamOrg);
-              const own = (returned as { id?: unknown } | null)?.id;
-              if (ctx.path === "/organization/create" || ctx.path === "/organization/update") if (typeof own === "string") orgIds.add(own);
-              const bodyOrg = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
-              if (ctx.path === "/organization/delete" && typeof bodyOrg === "string") orgIds.add(bodyOrg);
-              for (const orgId of orgIds) {
-                try {
-                  await groupChanged(s, orgId);
-                } catch (e) {
-                  ctx.context.logger.error(`[scim] could not queue the group of organization ${orgId}`, e);
-                }
-              }
+            const teamIds = new Set<string>();
+            const teamOrg = (returned as { organizationId?: unknown } | null)?.organizationId;
+            if (ctx.path && TEAM_WRITES.has(ctx.path)) {
+              const r = returned as { id?: unknown; teamId?: unknown } | null;
+              const body = ctx.body as { teamId?: unknown } | undefined;
+              for (const id of [ctx.path.endsWith("-team") ? r?.id : undefined, r?.teamId, body?.teamId]) if (typeof id === "string") teamIds.add(id);
             }
+            for (const teamId of teamIds) await attempt(`the group of team ${teamId}`, () => teamChanged(s, teamId, typeof teamOrg === "string" ? teamOrg : undefined));
+            const orgIds = new Set(members.map((m) => m.organizationId));
+            if (ctx.path && TEAM_WRITES.has(ctx.path) && typeof teamOrg === "string") orgIds.add(teamOrg);
+            const own = (returned as { id?: unknown } | null)?.id;
+            if (ctx.path === "/organization/create" || ctx.path === "/organization/update") if (typeof own === "string") orgIds.add(own);
+            const bodyOrg = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
+            if (ctx.path === "/organization/delete" && typeof bodyOrg === "string") orgIds.add(bodyOrg);
+            for (const orgId of orgIds) await attempt(`the group of organization ${orgId}`, () => groupChanged(s, orgId));
             // A deleted organization takes its members with it: deprovision everyone linked
-            // through its targets. They're queued before the response, so none can be lost if the
-            // work after it is cut short (Workers ends it with waitUntil's budget); the deliveries
-            // run in the background, one user at a time (never a burst at the app), and whatever
-            // doesn't finish there is delivered by the scheduled run.
-            const orgId = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
-            const orgTargets = (await s.source.all()).filter((t) => ctx.path === "/organization/delete" && typeof orgId === "string" && t.organizationId === orgId);
+            // through its targets (paused ones too: their jobs wait). They're queued before the
+            // response, so none can be lost if the work after it is cut short (Workers ends it
+            // with waitUntil's budget); the deliveries run in the background, one user at a time
+            // (never a burst at the app), and whatever doesn't finish there is delivered by the
+            // scheduled run.
+            if (ctx.path !== "/organization/delete" || typeof bodyOrg !== "string") return;
             const queued: [string, string][] = [];
-            for (const t of orgTargets) {
-              try {
+            await attempt(`the members of deleted organization ${bodyOrg} for deprovisioning; run a reconcile`, async () => {
+              for (const t of (await s.source.forOrganizations([bodyOrg])).filter((x) => x.organizationId === bodyOrg)) {
                 for await (const userId of b.allLinkedUsers(t.id)) {
-                  try {
-                    await b.enqueue(t.id, userId);
-                    queued.push([t.id, userId]);
-                  } catch (e) {
-                    ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
-                  }
+                  await b.enqueue(t.id, userId);
+                  if (!isPaused(t)) queued.push([t.id, userId]);
                 }
-              } catch (e) {
-                // The organization is gone either way: say so loudly rather than fail the delete.
-                ctx.context.logger.error(`[scim] ${t.id}: could not queue the members of deleted organization ${orgId} for deprovisioning; run a reconcile`, e);
               }
-            }
+            });
             if (queued.length) background((async () => { for (const [targetId, userId] of queued) await b.runFor(targetId, userId); })());
           }),
         },
       ],
     },
     endpoints: {
-      ...(options.registry
-        ? registryEndpoints(
-            {
-              options: options.registry,
-              codeIds: options.targets.map((t) => t.id),
-              targetProblems,
-              instance: (ctx) => {
-                const s = stateOf(ctx.context);
-                if (!s) return undefined;
-                return {
-                  forget: () => (s.source as { forget?: () => void }).forget?.(),
-                  queueOrganization: (organizationId, targetId) => s.background(queueOrganization(s, organizationId, targetId)),
-                };
+      // Always there, so they're typed for every app; without `registry` they answer 404.
+      ...registryEndpoints(
+        {
+          options: options.registry,
+          codeIds: options.targets.map((t) => t.id),
+          targetProblems,
+          instance: (ctx) => {
+            const s = stateOf(ctx.context);
+            if (!s) return undefined;
+            return {
+              resync: (organizationId, targetId) => resync(s, organizationId, targetId),
+              status: async (targetId) => {
+                const [counts] = await s.box.status([targetId]);
+                const { id: _, ...rest } = counts as NonNullable<typeof counts>;
+                return rest;
               },
-            },
-            (ctx) => ctx.context.secretConfig,
-          )
-        : {}),
+              failures: async (targetId) =>
+                (await s.box.failures({ targetId, limit: 20 })).items.map((f) => ({ kind: f.kind, subjectId: f.subjectId, failed: f.failed, status: f.lastStatus, nextAttemptAt: f.nextAttemptAt })),
+            };
+          },
+        },
+        (ctx) => ctx.context.secretConfig,
+      ),
       /**
        * How provisioning stands, per target: jobs queued, stuck (an app error still retried past
        * `retry.maxAttempts`, every 6 hours) and failed (until the user changes or a reconcile),
@@ -539,7 +588,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       scimProvisioningStatus: createAuthEndpoint.serverOnly({ method: "POST", body: z.strictObject({ userId: z.string().min(1).optional() }).optional() }, async (ctx) => {
         const s = stateOf(ctx.context);
         if (!s) throw new Error("[scim] not initialised");
-        const ids = (await s.source.all()).map((t) => t.id);
+        const ids = (await s.source.every()).map((t) => t.id);
         const userId = ctx.body?.userId;
         return ctx.json(userId ? { user: await s.box.userStatus(userId, ids) } : { targets: await s.box.status(ids) });
       }),
@@ -560,16 +609,13 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         async (ctx) => {
           const s = stateOf(ctx.context);
           if (!s) throw new Error("[scim] not initialised");
-          const all = (await s.source.all()).map((t) => t.id);
           const { userId, organizationId, targetId } = ctx.body;
-          if (targetId !== undefined && !all.includes(targetId) && !(await s.source.get(targetId))) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
-          const targetIds = targetId ? [targetId] : all;
+          const one = targetId === undefined ? undefined : await s.source.get(targetId);
+          if (one === null) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           let queued = 0;
-          if (userId) {
-            await changed(s, userId, targetIds);
-            queued += targetIds.length;
-          }
-          if (organizationId) queued += await groupChanged(s, organizationId, targetIds);
+          // At every target the change concerns (an organization's: its members and those with an account there), or the one named.
+          if (userId) queued += await changed(s, userId, one ? [one] : undefined);
+          if (organizationId) queued += await groupChanged(s, organizationId, one ? [one] : undefined);
           return ctx.json({ queued });
         },
       ),
@@ -609,11 +655,12 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           const s = stateOf(ctx.context);
           if (!s) throw new Error("[scim] not initialised");
           const b = s.box;
-          const targetList = await s.source.all();
-          const all = targetList.map((t) => t.id);
           const targetId = ctx.body?.targetId;
-          if (targetId !== undefined && !all.includes(targetId) && !(await s.source.get(targetId))) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
-          const targetIds = targetId ? [targetId] : all;
+          const one = targetId === undefined ? undefined : await s.source.get(targetId);
+          if (one === null) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+          const targetList = one ? [one] : await s.source.every();
+          const all = targetList.map((t) => t.id);
+          const targetIds = all;
           // A page at a time, 500 by default: all at once would run past a Workers invocation.
           let budget = ctx.body?.limit ?? 500;
           let queued = 0;
@@ -641,9 +688,15 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                 limit: size,
                 sortBy: { field: "id", direction: "asc" },
               })) as { id: string }[];
+              // Each user at the targets that concern them: an organization's target only for its
+              // members (and those with an account there, as the next phase covers too).
+              const relevant = await relevantFor(s, users.map((u) => u.id));
               for (const u of users) {
-                for (const t of targetIds) await b.enqueue(t, u.id, { now: true });
-                queued += targetIds.length;
+                for (const t of relevant.get(u.id) ?? []) {
+                  if (!targetIds.includes(t.id)) continue;
+                  await b.enqueue(t.id, u.id, { now: true });
+                  queued++;
+                }
                 last = u.id;
               }
               budget -= users.length;
@@ -693,7 +746,13 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             const target = targetList.find((x) => x.id === t);
             if (!target) continue;
             const resuming = t === fromGroupTarget;
-            if (!resuming || phase === "g") {
+            if ((!resuming || phase === "g") && target.organizationId) {
+              // An organization's target: its own organization's groups, not a walk of every organization.
+              for (const ref of await b.groupsForOrganization(target, target.organizationId)) {
+                await b.enqueue(t, ref.id, { kind: ref.kind, now: true });
+                queued++;
+              }
+            } else if (!resuming || phase === "g") {
               let after: string | null = resuming && fromGroup ? fromGroup : null;
               for (;;) {
                 if (budget <= 0) return stopped(`g:${t}:${after ?? ""}`);

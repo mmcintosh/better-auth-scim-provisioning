@@ -232,12 +232,6 @@ export interface TargetRegistryOptions {
   /** At most this many stored targets per organization; default 10. */
   maxTargetsPerOrganization?: number | undefined;
   /**
-   * How long the list of stored targets is cached, in seconds; default 60. A target looked up by
-   * id (a job's delivery) is read from the database when it isn't in the cache, so a new target
-   * gets its jobs delivered at once; a change or removal can take this long to reach every server.
-   */
-  cacheSeconds?: number | undefined;
-  /**
    * Hosts a stored target may use although they look internal (a name without a dot, `.internal`,
    * a private address). Stored URLs are otherwise https and public only, since your server is
    * the one that calls them.

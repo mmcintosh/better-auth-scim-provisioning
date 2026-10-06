@@ -409,7 +409,9 @@ scimProvisioning({
 }),
 ```
 
-It needs Better Auth's organization plugin, and adds a table, `scimProvisioningTarget`: run your migration (`npx auth migrate`, or generate your ORM's schema) after turning it on. Without `registry` the table and the endpoints don't exist.
+It needs Better Auth's organization plugin, and adds a table, `scimProvisioningTarget`: run your migration (`npx auth migrate`, or generate your ORM's schema) after turning it on, before deploying: Better Auth refuses requests while a table it expects is missing. Without `registry` the table doesn't exist and the endpoints answer 404.
+
+With the organization plugin's defaults, every signed-up user can create organizations, and so becomes an owner who can connect targets. If that's not what you want, limit who creates organizations (`allowUserToCreateOrganization`), or set `organizationRoles: []` so only `canManage` decides.
 
 ```ts
 // Connect an app to an organization (as one of its owners or admins). The id is generated.
@@ -421,22 +423,24 @@ const { target } = await authClient.$fetch("/scim-provisioning/targets/create", 
     credentials: { token: "xoxp-…" },
   },
 });
-// The organization's members and groups are queued at once; later changes follow as for any target.
+// The organization's members and groups are queued before this answers; later changes follow as for any target.
 
-GET  /scim-provisioning/targets?organizationId=…           // list (a host administrator may omit organizationId)
+GET  /scim-provisioning/targets?organizationId=…&limit=…&offset=…  // list (a host administrator may omit organizationId)
 POST /scim-provisioning/targets/update  { id, settings?, credentials?, enabled? }
-POST /scim-provisioning/targets/check   { id }               // try the URL and credentials, changing nothing
+POST /scim-provisioning/targets/check   { id }   // try the URL and credentials, changing nothing
+POST /scim-provisioning/targets/status  { id }   // queued, waiting, stuck, failed; the latest failures' status
 POST /scim-provisioning/targets/delete  { id }
 ```
 
-On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget` and `…DeleteTarget`, with the user's headers.
+On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget`, `…TargetStatus` and `…DeleteTarget`, with the user's headers.
 
 - **Settings** are the target options that are data: `type`, `url`, `profile` (by name: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`), `update`, `compat`, `groups`, `teamGroups`, `roleGroups`, `adopt`, `deprovision`, `requireVerifiedEmail`, `timeoutMs`, and for Google Workspace `google: { clientEmail, adminEmail, orgUnitPath?, groupDomain? }`; plus a `name` for people. Functions (`mapUser`, `include`, the group name functions) and `organizationId` can't be stored: the organization is always the owner.
-- **Credentials** are one of `{ token }`, `{ auth: { type: "basic" | "header" | "oauth2", … } }` (as in [Targets](#targets)), `{ secret }` for a webhook and `{ privateKey }` for Google Workspace. They're encrypted with Better Auth's secret (its rotation, `secrets`, included), tied to the target and organization, and never returned: a target shows only their `kind`. A webhook URL's query string (an Azure Function's `?code=`) is hidden too. If Better Auth's secret changes without rotation, stored credentials can't be read: those targets pause (logged), and new credentials resume them.
+- **Credentials** are one of `{ token }`, `{ auth: { type: "basic" | "header" | "oauth2", … } }` (as in [Targets](#targets)), `{ secret }` for a webhook and `{ privateKey }` for Google Workspace. They're encrypted with Better Auth's secret, tied to the target and organization, and never shown: a target shows only their `kind`, and a webhook URL only its origin (Slack's and Azure's carry secrets in the path or query). They never go anywhere new either: changing a target's URL (or Google's `clientEmail` or `adminEmail`) needs the credentials given again. When you rotate Better Auth's secret (`secrets`), stored credentials are sealed again with the new one as they're used; keep the old secret until every target has been used once. If the secret changes without rotation, they can't be read: those targets pause (logged), and new credentials resume them.
 - **Who may**: a signed-in user with a fresh session, as the database has them now (not banned, not impersonating): a host administrator (`canManage`) for every organization, or an owner or admin (`organizationRoles`) of the target's organization. Someone else's target is a 404. Changes are logged with the acting user.
-- **URLs** must be `https://` and public, as your server calls them: no `localhost`, names without a dot, `.local` or `.internal`, and no private, loopback, link-local, shared or reserved address, however it's written. Redirects are never followed. `allowHosts: ["scim.internal.example"]` makes exceptions. A public name that resolves to a private address can't be caught by looking at the URL (Workers can't resolve names): if your server can reach internal services, give the registry a `fetch` that refuses them, or one that goes through an egress proxy.
-- **Disabling** (`enabled: false`) pauses a target: its jobs wait and go out when it's enabled again, with the organization queued again. **Deleting** removes the target, its queued jobs and its record of the accounts and groups it made; the accounts at the app stay as they are. Deleting the organization deprovisions its members through its targets as usual; the targets themselves stay until deleted (by a host administrator).
-- **Limits**: `maxTargetsPerOrganization` (default 10). The list of stored targets is cached for `cacheSeconds` (default 60) on each server; a new target's jobs are delivered at once all the same, but a change or removal can take that long to reach every server.
+- **URLs** must be `https://` on the standard port and public, as your server calls them: no `localhost`, names without a dot, `.local`, `.internal`, `.lan`, `.home.arpa` and the like, and no private, loopback, link-local, shared, benchmarking, documentation or reserved address (IPv4 written as a number, or inside IPv6, included). Redirects are never followed. Before each request, the name is looked up (Node.js, Bun, Deno) and refused if it resolves to a private address; on Workers, whose `fetch` can't reach private networks, the URL check is what applies. A name that changes what it resolves to between the check and the request can't be ruled out this way: if your server can reach internal services, route stored targets through an egress proxy with `registry.fetch` (which replaces the lookup). `allowHosts: ["scim.internal.example"]` makes exceptions, ports included. The check endpoint answers in broad terms ("the credentials were refused", "not found: check the URL"), never with the app's own words.
+- **Changes** to a target's settings or credentials, or enabling it, queue its organization again (members, those with an account there, and its groups) before answering, and make what was waiting or failed go again, so a fixed token or a new setting applies to everyone at once. For an organization of many thousands, a host reconcile is gentler.
+- **Disabling** (`enabled: false`) pauses a target: changes are still queued for it, and wait, out of the scheduled run's way, until it's enabled again. **Deleting** removes the target, its queued jobs and its record of the accounts and groups it made; the accounts at the app stay as they are, and nothing tells the app any more. Deleting the organization deprovisions its members through its targets as usual (a disabled target's wait); its targets then belong to no one's organization, so only a host administrator (`canManage`) can enable or remove them.
+- **Every server sees a change at once**: targets are read from the database when they're used (by organization for a change, by id for a delivery), nothing is kept as a list. `maxTargetsPerOrganization` (default 10) limits each organization.
 
 ## Databases and runtimes
 

@@ -6,11 +6,11 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Added
 
-- **Organizations' own targets (`registry`)**: each organization connects its own SCIM app, Google Workspace domain or webhook at runtime, through `/scim-provisioning/targets` (list, create, update, check, delete), managed by its owners and admins (`organizationRoles`) and the host's administrators (`canManage`). Credentials are encrypted with Better Auth's secret, bound to the target and organization, and never returned. URLs must be https and public (`allowHosts` for exceptions), and stored targets use `registry.fetch` if given. A stored target only receives its organization's members and groups; a disabled one keeps its jobs waiting. The `scimProvisioningTarget` table exists only with `registry`: **turning it on needs a migration**; without it, nothing changes.
+- **Organizations' own targets (`registry`)**: each organization connects its own SCIM app, Google Workspace domain or webhook at runtime, through `/scim-provisioning/targets` (list, create, update, check, status, delete), managed by its owners and admins (`organizationRoles`) and the host's administrators (`canManage`). Credentials are encrypted with Better Auth's secret, bound to the target and organization, never shown, never sent anywhere new without being given again, and sealed again when the secret is rotated. URLs must be https, on the standard port and public, and names are looked up before each request (`allowHosts` for exceptions; `registry.fetch` for a proxy). A stored target only receives its organization's members and groups; a disabled one keeps its changes queued and waiting. Stored targets are read from the database when used, so every server sees a change at once. The `scimProvisioningTarget` table exists only with `registry`: **turning it on needs a migration**, before deploying; without it, nothing changes.
 
 ### Changed
 
-- A user's change queues an organization's target (`organizationId`) only for that organization's members and for users with an account at the target; the other deliveries did nothing.
+- A user's change queues an organization's target (`organizationId`) only for that organization's members and for users with an account at the target (however many organizations they're in); the other deliveries did nothing. A team's change queues only the targets of the team's organization.
 
 ## [1.0.0] - 2026-10-06
 
