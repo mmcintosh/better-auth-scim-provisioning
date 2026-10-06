@@ -5,7 +5,11 @@
 import { credentials, type ScimAuth } from "./credentials";
 import { SCIM_USER_SCHEMA, scimString, targetUrl, trimSlashes } from "./scim-client";
 
+/** Each check, by a stable id (the `name` is for people and may change). */
+export type CheckId = "service-provider-config" | "create" | "keeps-external-id" | "find" | "find-any-case" | "duplicate-refused" | "update-put" | "update-patch" | "update-patch-path" | "deactivate" | "delete";
+
 export interface CheckResult {
+  id: CheckId;
   name: string;
   ok: boolean | null; // null: not applicable, or couldn't be checked
   detail: string;
@@ -52,7 +56,7 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   const doFetch = o.fetch ?? fetch;
   const creds = credentials(o.auth ?? { type: "bearer", token: o.token ?? "" }, { fetch: doFetch, timeoutMs: o.timeoutMs });
   const results: CheckResult[] = [];
-  const note = (name: string, ok: boolean | null, detail = "") => results.push({ name, ok, detail });
+  const note = (id: CheckId, name: string, ok: boolean | null, detail = "") => results.push({ id, name, ok, detail });
 
   async function call(method: string, path: string, body?: unknown): Promise<{ status: number; json: Record<string, unknown> | null; error?: string }> {
     try {
@@ -81,8 +85,8 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   if (spc.status === 200 && spc.json) {
     const flag = (k: string) => (spc.json?.[k] as { supported?: unknown } | undefined)?.supported === true;
     const schemes = Array.isArray(spc.json.authenticationSchemes) ? (spc.json.authenticationSchemes as { type?: unknown }[]).map((s) => String(s.type)).join(", ") : "";
-    note("ServiceProviderConfig", true, `patch ${flag("patch")}, filter ${flag("filter")}, bulk ${flag("bulk")}, etag ${flag("etag")}, sort ${flag("sort")}${schemes ? `; auth: ${schemes}` : ""}`);
-  } else note("ServiceProviderConfig", null, `not available (${why(spc)}); fine, it's optional in practice`);
+    note("service-provider-config", "ServiceProviderConfig", true, `patch ${flag("patch")}, filter ${flag("filter")}, bulk ${flag("bulk")}, etag ${flag("etag")}, sort ${flag("sort")}${schemes ? `; auth: ${schemes}` : ""}`);
+  } else note("service-provider-config", "ServiceProviderConfig", null, `not available (${why(spc)}); fine, it's optional in practice`);
 
   // 2. A throwaway user.
   const suffix = crypto.randomUUID().slice(0, 8);
@@ -101,16 +105,16 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   const id = typeof created.json?.id === "string" ? created.json.id : null;
   if (!(created.status >= 200 && created.status < 300 && id)) {
     // The app may have made the user anyway (a 2xx without an id, a timeout after the write).
-    note("create a user", false, `${created.status >= 200 && created.status < 300 ? `${created.status} without an id` : why(created)}; if the app made it anyway, remove the test user ${userName} there by hand`);
+    note("create", "create a user", false, `${created.status >= 200 && created.status < 300 ? `${created.status} without an id` : why(created)}; if the app made it anyway, remove the test user ${userName} there by hand`);
     return results;
   }
-  note("create a user", true, `${created.status}, id ${id}`);
+  note("create", "create a user", true, `${created.status}, id ${id}`);
   const path = `/Users/${encodeURIComponent(id)}`;
   const read = async () => (await call("GET", path)).json;
 
   try {
     const fresh = await read();
-    note("keeps externalId", fresh?.externalId === externalId, fresh?.externalId === externalId ? "" : `got ${JSON.stringify(fresh?.externalId ?? null)}: adoption relies on our own links`);
+    note("keeps-external-id", "keeps externalId", fresh?.externalId === externalId, fresh?.externalId === externalId ? "" : `got ${JSON.stringify(fresh?.externalId ?? null)}: adoption relies on our own links`);
 
     // 3. Finding by userName, exactly and in another case.
     const find = async (name: string) => {
@@ -119,33 +123,33 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
       return { ok: list.some((x) => x.id === id), r };
     };
     const exact = await find(userName);
-    note("find by userName", exact.ok, exact.ok ? "" : why(exact.r));
+    note("find", "find by userName", exact.ok, exact.ok ? "" : why(exact.r));
     const other = await find(userName.toUpperCase());
-    note("find by userName, any case", other.ok, other.ok ? "" : "the filter is case-sensitive");
+    note("find-any-case", "find by userName, any case", other.ok, other.ok ? "" : "the filter is case-sensitive");
 
     // 4. A second create with the same userName: 409 is what adoption expects.
     const dup = await call("POST", "/Users", user("Scim Check Duplicate"));
     const dupId = typeof dup.json?.id === "string" && dup.json.id !== id ? dup.json.id : null;
-    note("duplicate userName refused (409)", dup.status === 409, dup.status === 409 ? "" : `got ${why(dup)}`);
+    note("duplicate-refused", "duplicate userName refused (409)", dup.status === 409, dup.status === 409 ? "" : `got ${why(dup)}`);
     if (dupId) await call("DELETE", `/Users/${encodeURIComponent(dupId)}`);
 
     // 5. Updates: PUT, PATCH without a path, PATCH with paths.
     const shows = async (displayName: string) => (await read())?.displayName === displayName;
     const put = await call("PUT", path, { ...user("Scim Check Put"), id });
-    note("update with PUT", put.status < 300 && (await shows("Scim Check Put")), put.status < 300 ? "" : why(put));
+    note("update-put", "update with PUT", put.status < 300 && (await shows("Scim Check Put")), put.status < 300 ? "" : why(put));
     const bare = await call("PATCH", path, { schemas: [PATCH_OP], Operations: [{ op: "replace", value: { displayName: "Scim Check Patch" } }] });
-    note("update with PATCH (no path)", bare.status < 300 && (await shows("Scim Check Patch")), bare.status < 300 ? "" : why(bare));
+    note("update-patch", "update with PATCH (no path)", bare.status < 300 && (await shows("Scim Check Patch")), bare.status < 300 ? "" : why(bare));
     const withPath = await call("PATCH", path, { schemas: [PATCH_OP], Operations: [{ op: "replace", path: "displayName", value: "Scim Check Path" }] });
-    note("update with PATCH (path)", withPath.status < 300 && (await shows("Scim Check Path")), withPath.status < 300 ? "" : why(withPath));
+    note("update-patch-path", "update with PATCH (path)", withPath.status < 300 && (await shows("Scim Check Path")), withPath.status < 300 ? "" : why(withPath));
 
     // 6. Deactivate, as deprovisioning does by default.
     const off = await call("PATCH", path, { schemas: [PATCH_OP], Operations: [{ op: "replace", value: { active: false } }] });
-    note("deactivate (PATCH active false)", off.status < 300 && (await read())?.active === false, off.status < 300 ? "" : why(off));
+    note("deactivate", "deactivate (PATCH active false)", off.status < 300 && (await read())?.active === false, off.status < 300 ? "" : why(off));
   } finally {
     // 7. Delete, and make sure it's gone; otherwise leave it deactivated.
     const del = await call("DELETE", path);
     const after = await call("GET", path);
-    note("delete", del.status < 300 && after.status === 404, del.status < 300 ? (after.status === 404 ? "" : `still there after delete (${after.status})`) : `${why(del)}; remove the test user ${userName} at the app by hand`);
+    note("delete", "delete", del.status < 300 && after.status === 404, del.status < 300 ? (after.status === 404 ? "" : `still there after delete (${after.status})`) : `${why(del)}; remove the test user ${userName} at the app by hand`);
   }
   return results;
 }

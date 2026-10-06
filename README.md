@@ -117,7 +117,7 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `type` | `"scim"` | `"google-workspace"` for Google Workspace's Directory API (see [Google Workspace](#google-workspace)), or `"webhook"` for signed webhooks (see [Webhooks](#webhooks)). |
 | `url` | required (not for Google Workspace) | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
 | `token` | | Its bearer token. Or `auth`, for anything else: one of the two is required. |
-| `auth` | | `{ type: "bearer", token }` (the same as `token`), `{ type: "basic", username, password }`, `{ type: "header", name, value }` (an API key), or `{ type: "oauth2", tokenUrl, clientId, clientSecret, scope?, clientAuth?, params? }` (client credentials; tokens cached and renewed before they expire). |
+| `auth` | | `{ type: "bearer", token }` (the same as `token`; give one or the other), `{ type: "basic", username, password }`, `{ type: "header", name, value }` (an API key), or `{ type: "oauth2", tokenUrl, clientId, clientSecret, scope?, clientAuth?, params? }` (client credentials; tokens cached and renewed before they expire). |
 | `update` | `"put"` | SCIM targets: `"put"` replaces the whole user at the app; `"patch"` changes only the attributes we send, keeping what an admin set there. |
 | `organizationId` | | Only members of this organization (Better Auth's organization plugin). |
 | `include` | | `(user) => boolean`: who else to leave out. Only `true` includes; anything else deprovisions a provisioned user at their next delivery. |
@@ -317,19 +317,20 @@ Each event holds the full current state, so applying one twice is harmless, and 
 | `group.upsert` | `group`: `displayName`, `externalId`, `members` (the users' `externalId`s); with `groups`, `teamGroups` or `roleGroups` |
 | `group.delete` | `group: { externalId }` |
 
-Every event also carries `id`, `target` and `occurredAt`. Check the signature on the receiving side with the raw body:
+Every event also carries `id`, `schemaVersion` (1; a change a receiver could trip over is a new version, in a major release), `target` and `occurredAt`. Check the signature on the receiving side with the raw body:
 
 ```ts
-import { verifyWebhookSignature } from "better-auth-scim-provisioning";
+import { verifyWebhookSignature, WebhookSignatureError } from "better-auth-scim-provisioning";
 
 export async function POST(request: Request) {
   const body = await request.text();
   let event;
   try {
     event = await verifyWebhookSignature({ body, signature: request.headers.get("x-scim-provisioning-signature"), secret: process.env.PROVISIONING_WEBHOOK_SECRET! });
-  } catch {
+  } catch (e) {
     // 401, not a 500: the sender's error then says "check the target's secret".
-    return new Response(null, { status: 401 });
+    if (e instanceof WebhookSignatureError) return new Response(e.reason, { status: 401 });
+    throw e;
   }
   // event.type, event.user / event.group …
   return new Response(null, { status: 204 });
@@ -337,6 +338,8 @@ export async function POST(request: Request) {
 ```
 
 It throws on a wrong signature, or one more than 5 minutes old, which stops a captured request being replayed later. A retry of the same change carries the same `id` (with a new signature and `occurredAt`), and within those 5 minutes a captured request could be replayed, so make applying an event idempotent: remember the event `id`s you've applied for a while, and drop an event whose `occurredAt` is older than the last one you applied for that user or group.
+
+**Rotating the secret:** let the receiver accept both (`secret: [newSecret, oldSecret]`), switch the target to the new one and deploy, then drop the old one from the receiver.
 
 A user's `externalId` is their id at the receiver. If a `mapUser` changes it for users already sent, the receiver sees new users, and the old ones are never deactivated: keep it stable.
 - **Retried:** 5xx, 429, 408, timeouts, and 401/403 ("check the target's secret").
@@ -397,7 +400,7 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. CI runs [the 
 
 - **Microsoft 365 / Entra ID** as a target (through Microsoft Graph), the other big suite after Google Workspace.
 - **Live verification of the Slack, Atlassian and GitHub Enterprise profiles.** They're built from each app's documentation and tested against a model.
-- **A 1.0**: the API and database schema are being reviewed for it first.
+- **A 1.0**: the API and database schema are being reviewed for it first. What 1.0 will promise: [versioning](docs/versioning.md).
 
 ## Development
 

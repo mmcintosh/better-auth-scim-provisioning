@@ -6,6 +6,12 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Added
 
+- **Webhook events carry `schemaVersion: 1`.** A change a receiver could trip over will be a new version, in a major release.
+- **Rotating a webhook secret:** `verifyWebhookSignature` accepts several secrets (`secret: [newSecret, oldSecret]`) while the target switches over.
+- **`WebhookSignatureError`**, with a `reason` (`malformed`, `expired`, `mismatch`), so a receiver can answer 401 rather than fail with a 500.
+- **`ScimGroup` and `SCIM_GROUP_SCHEMA` are exported**, like `ScimUser` and `SCIM_USER_SCHEMA`.
+- **`check` results have a stable `id`** (`create`, `find`, `update-put`, …; `CheckId`); the human-readable `name` may change.
+- **[docs/versioning.md](docs/versioning.md)**: what 1.0 will promise, what counts as the public API, and how Better Auth's minor releases are followed.
 - **`scimProvisioningStatus`**: per target, the jobs queued, stuck (an app error still retried past `retry.maxAttempts`) and failed, and the accounts and groups the app confirmed; with `userId`, that user's account and pending job at each target. Hosts no longer need to read the plugin's tables.
 - **`onFailure`**: called when a delivery gives up or reaches `retry.maxAttempts`, with the target, what failed, the error and the app's status. Errors it throws are logged.
 - **`scimProvisioningQueue({ userId, targetId? })`**: queue a user (and their groups) whose memberships changed outside Better Auth's organization endpoints.
