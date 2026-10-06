@@ -24,6 +24,16 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 - **Unknown, misspelled or misplaced options are refused at startup** instead of being dropped without a word. A target with `organisationId` (British spelling) used to provision every verified user instead of one organization's members. The error names the option and, where it's clear, what was meant (`did you mean organizationId?`, or that `groups` is an option of each target). `update` and `compat` are refused on webhook and Google Workspace targets, where they did nothing; the types say so too. **Check your options when upgrading:** anything the plugin ignored before now stops it from starting.
 
+### Documentation
+
+- The README now claims only what's checked, after an independent review:
+  - "verified live" says exactly what (Cloudflare Access groups were checked by hand in the field test; the automated live test covers users), and webhooks, which have no third party to verify against, are described as tested over HTTP;
+  - "proven in CI" says which suite runs on which Node.js and Better Auth versions;
+  - delivery promises are qualified ("once queued");
+  - membership **removals** made outside the organization plugin's endpoints wait for the user's next change or a reconcile;
+  - the webhook receiver example answers a bad signature with 401 (a 500 was retried for ever), and a retry keeps its event id;
+  - the targets table shows `url` isn't needed for Google Workspace, `auth` takes `{ type: "bearer" }` too, and `update`/`compat` are for SCIM targets.
+
 ### Examples
 
 - **A Workers example** ([examples/workers](examples/workers)): Better Auth on D1 provisioning to a SCIM app and/or a signed webhook, with `waitUntil`, a Cron Trigger for retries, organizations as groups (only admins create them), email verification, and admin routes to see the queue, run and reconcile. CI runs it inside workerd through Miniflare (sign-up to deletion, a retry delivered by the Cron Trigger, the committed migration checked against Better Auth's), and builds it as installed from npm.

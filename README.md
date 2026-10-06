@@ -1,6 +1,6 @@
 # better-auth-scim-provisioning
 
-Keep your users' accounts in step at the apps they use, straight from your [Better Auth](https://www.better-auth.com) server: **created before their first sign-in, updated when they change, switched off the moment they leave.** Over **SCIM 2.0**, **Google Workspace**'s Directory API, or **signed webhooks**. Runs on **Cloudflare Workers** and **Node.js**.
+Keep your users' accounts in step at the apps they use, straight from your [Better Auth](https://www.better-auth.com) server: **created before their first sign-in, updated when they change, switched off when they leave.** Over **SCIM 2.0**, **Google Workspace**'s Directory API, or **signed webhooks**. Runs on **Cloudflare Workers** and **Node.js**.
 
 [![CI](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml/badge.svg)](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/better-auth-scim-provisioning)](https://www.npmjs.com/package/better-auth-scim-provisioning)
@@ -12,7 +12,7 @@ Keep your users' accounts in step at the apps they use, straight from your [Bett
 
 It's the **outbound** direction. Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim) is the inbound one, where directories push users *into* your app; this package pushes them *out*. It works however your users sign in, and pairs with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) when your app is also their identity provider: see [sign-in and provisioning together](https://github.com/mmcintosh/better-auth-saml-idp/blob/main/docs/guide/provisioning.md).
 
-> **Unofficial community plugin.** This project isn't affiliated with or endorsed by Better Auth. Status: **0.3 on npm**, verified live against Cloudflare Access, Google Workspace and AWS IAM Identity Center, and field-tested in a real app on Workers. While it's 0.x, a minor release may change the API; every change is in the [CHANGELOG](CHANGELOG.md), and upgrades so far have needed no database migration.
+> **Unofficial community plugin.** This project isn't affiliated with or endorsed by Better Auth. Status: **0.3 on npm**, verified live against Cloudflare Access, Google Workspace and AWS IAM Identity Center (see [what exactly](#-verified-live)), and field-tested in a real app on Workers. While it's 0.x, a minor release may change the API; every change is in the [CHANGELOG](CHANGELOG.md), and upgrades so far have needed no database migration.
 
 If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-auth-scim-provisioning) helps others find it.
 
@@ -20,12 +20,12 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 
 - 🎯 **Three kinds of target**: any **SCIM 2.0** app (Cloudflare Access, AWS IAM Identity Center, Slack, Atlassian, GitHub Enterprise, Zoom…), **Google Workspace** through its Directory API, and **signed webhooks** for your own apps or automation tools (Zapier, Make, n8n).
 - 👥 **Groups**: organizations, teams and roles in your app become groups at the app (SCIM groups or Google Groups), with the provisioned members, kept in sync as people join, leave and change roles.
-- 🚪 **Real offboarding**: a ban or a delete deactivates (or deletes) the account at every app at once, not when a session expires; a timed ban is lifted on time by the scheduled run. Cloudflare Access revoked a live session within 35 seconds in the field test.
-- 📬 **Delivery that holds up**: a database outbox with leases, retries with backoff (honouring `Retry-After`), concurrency, and a scheduled run. Changes are never lost to an outage, a timeout or a reply that never arrived, and a 404 counts as "gone" only when the app's list agrees.
+- 🚪 **Real offboarding**: a ban or a delete deactivates (or deletes) the account at every app at once, not when a session expires; a timed ban is lifted on time by the scheduled run. In the field test, Cloudflare Access revoked a live session within 35 seconds.
+- 📬 **Delivery that holds up**: a database outbox with leases, retries with backoff (honouring `Retry-After`), concurrency, and a scheduled run. Once queued, a change isn't lost to an outage, a timeout or a reply that never arrived, and a 404 counts as "gone" only when the app's list agrees.
 - 🤝 **Careful adoption**: an account that already exists at the app is taken over only if it's provably this user's (ours by id, or nobody's, with the user's verified email as its userName), never handed to someone who reused a deleted user's email.
 - 🧩 **Profiles for real apps**: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`, each built from the app's documented quirks (no PUT on groups, batches of 100, groups that can't be renamed…).
 - 🔑 **Every sign-in method apps use**: bearer tokens, Basic, an API-key header, OAuth 2.0 client credentials, and Google service accounts with domain-wide delegation.
-- 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time, within a Workers invocation's limits.
+- 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
 - 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports.
 - 📈 **You can see it**: every job's last error and status is in the database; failures are logged with the app's own message.
 - ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger, and on Node.js 22 and 24, with SQLite, D1, PostgreSQL, MySQL and MongoDB, through Kysely, Drizzle and Prisma.
@@ -35,12 +35,11 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 
 | App | Users | Groups | How |
 |---|---|---|---|
-| Cloudflare Access | ✓ | ✓ | the field test (a real app on Workers), the `check` CLI, and the live test |
+| Cloudflare Access | ✓ | ✓ | users: the automated live test (`test/live/lifecycle.test.ts`), the `check` CLI and the field test; groups: the field test, by hand |
 | Google Workspace | ✓ | ✓ (Google Groups) | live tests in a real Workspace, which found and fixed how Google settles after creates and email changes |
 | AWS IAM Identity Center | ✓ | ✓ (including a group of over 100) | live tests with the `awsIamIdentityCenter` profile |
-| Webhooks | ✓ | ✓ | over real HTTP, with the receiver written exactly as shown below |
 
-Slack, Atlassian and GitHub Enterprise are built from each app's documentation and tested against a model of it. The code was reviewed before 0.1.0 and before 0.2.0, each time by an outside reviewer as well as a fresh internal one.
+The live tests run by hand with real credentials, not in CI. Webhooks have no third party to verify against: CI sends them over HTTP to a receiver written as shown below ([Webhooks](#webhooks)). Slack, Atlassian and GitHub Enterprise are built from each app's documentation and tested against a model of it. The code was reviewed before 0.1.0 and before 0.2.0, each time by an outside reviewer as well as a fresh internal one.
 
 ## Contents
 
@@ -92,7 +91,7 @@ Then:
    ```
 3. **Once, after adding or changing a target** (or to repair drift), queue everyone:
    ```ts
-   await auth.api.scimProvisioningReconcile({ body: {} }); // { queued, next: null }
+   await auth.api.scimProvisioningReconcile({ body: {} }); // { queued, next: null }: all at once
    ```
    With many users, or on Workers (which limits the work per invocation), go a page at a time (groups included):
    ```ts
@@ -102,7 +101,7 @@ Then:
    } while (next);
    ```
 
-**A complete app to copy:** [examples/workers](examples/workers) runs this package on Workers and D1, with `waitUntil`, a Cron Trigger for retries, organizations as groups, and admin routes; CI runs it inside workerd. better-auth-saml-idp's [Workers example](https://github.com/mmcintosh/better-auth-saml-idp/tree/main/examples/workers-hono#provisioning-optional) adds sign-in and an admin page showing each user's account at each app, the queue and the groups.
+**A complete app to copy:** [examples/workers](examples/workers) runs this package on Workers and D1, with `waitUntil`, a Cron Trigger for retries, organizations as groups, and admin routes; CI runs it inside workerd (with this repository's source, the apps mocked). better-auth-saml-idp's [Workers example](https://github.com/mmcintosh/better-auth-saml-idp/tree/main/examples/workers-hono#provisioning-optional) adds sign-in and an admin page showing each user's account at each app, the queue and the groups.
 
 **On Workers, give Better Auth `waitUntil`.** Deliveries run in the background, and the runtime cancels work still running after the response unless it runs under `waitUntil`:
 
@@ -120,10 +119,10 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 |---|---|---|
 | `id` | required | Stable id: letters, digits, `-`, `_`. Jobs, links and logs use it. |
 | `type` | `"scim"` | `"google-workspace"` for Google Workspace's Directory API (see [Google Workspace](#google-workspace)), or `"webhook"` for signed webhooks (see [Webhooks](#webhooks)). |
-| `url` | required | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
+| `url` | required (not for Google Workspace) | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
 | `token` | | Its bearer token. Or `auth`, for anything else: one of the two is required. |
-| `auth` | | `{ type: "basic", username, password }`, `{ type: "header", name, value }` (an API key), or `{ type: "oauth2", tokenUrl, clientId, clientSecret, scope?, clientAuth?, params? }` (client credentials; tokens cached and renewed before they expire). |
-| `update` | `"put"` | `"put"` replaces the whole user at the app; `"patch"` changes only the attributes we send, keeping what an admin set there. |
+| `auth` | | `{ type: "bearer", token }` (the same as `token`), `{ type: "basic", username, password }`, `{ type: "header", name, value }` (an API key), or `{ type: "oauth2", tokenUrl, clientId, clientSecret, scope?, clientAuth?, params? }` (client credentials; tokens cached and renewed before they expire). |
+| `update` | `"put"` | SCIM targets: `"put"` replaces the whole user at the app; `"patch"` changes only the attributes we send, keeping what an admin set there. |
 | `organizationId` | | Only members of this organization (Better Auth's organization plugin). |
 | `include` | | `(user) => boolean`: who else to leave out. Only `true` includes; anything else deprovisions a provisioned user at their next delivery. |
 | `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. An account that already exists at the app is still only taken over for a verified email. |
@@ -134,11 +133,11 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `teamGroupName` | "Org / Team" | `(team, organization) => string`. |
 | `roleGroups` | `false` | Roles as groups: `true` (every role held) or a list, `["admin"]`. |
 | `roleGroupName` | "Org / role" | `(role, organization) => string`. |
-| `compat` | | How the app differs from the standard, usually set by a profile (see [Apps](#apps)). |
+| `compat` | | SCIM targets: how the app differs from the standard, usually set by a profile (see [Apps](#apps)). |
 | `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
 | `timeoutMs` | `10000` | Per request. |
 
-The scheduled run delivers 4 jobs at once by default: `concurrency: 4` (1 to 32), shared by all targets. Retries are shared too: `retry: { maxAttempts: 8, baseDelayMs: 30000 }`. The delay doubles each attempt, or is longer if the app's `Retry-After` asks for it (up to a day). After `maxAttempts`, failures that can fix themselves are retried every 6 hours.
+Options are checked when the plugin starts: an unknown or misspelled option, or one in the wrong place, stops it with a message naming it. The scheduled run delivers 4 jobs at once by default: `concurrency: 4` (1 to 32), shared by all targets. Retries are shared too: `retry: { maxAttempts: 8, baseDelayMs: 30000 }`. The delay doubles each attempt, or is longer if the app's `Retry-After` asks for it (up to a day). After `maxAttempts`, failures that can fix themselves are retried every 6 hours.
 
 A change to a target (`include`, `organizationId`, `deprovision`) applies to each user at their next change: run a reconcile to apply it to everyone, once the new version is fully deployed (on Workers, old and new run side by side for a few seconds). Do the same after an app's outage or a token fix, to deliver what's waiting now rather than at its next retry.
 
@@ -146,7 +145,7 @@ A change to a target (`include`, `organizationId`, `deprovision`) applies to eac
 
 A user is at a target when their email is verified (unless `requireVerifiedEmail: false`), they aren't banned (the admin plugin), they're a member of `organizationId` if one is set, and `include` returns true (if set). Otherwise they're deprovisioned there, if they had been provisioned. A timed ban is lifted at the app when it runs out.
 
-Membership changes are seen through the organization plugin's endpoints (add, remove, update role, accept an invitation, leave, delete the organization) and server-side `addMember`. Members added any other way (the creator of a new organization, SSO or inbound SCIM provisioning, your own database writes) are provisioned at their next change or reconcile.
+Membership changes are seen through the organization plugin's endpoints (add, remove, update role, accept an invitation, leave, delete the organization) and server-side `addMember`. Changes made any other way (the creator of a new organization, SSO or inbound SCIM provisioning, your own database writes) are applied at the user's next change or the next reconcile. **That includes removals:** someone removed from an `organizationId` organization by those means keeps their account at the app until then, so run a reconcile after such changes (or on a schedule, a page at a time).
 
 By default the app gets:
 - **`userName`** and the one primary **`emails`** value: the user's email;
@@ -177,16 +176,16 @@ All three kinds can be used together. Any change in an organization (members, ro
   - the organization or team is renamed (the group is renamed) or deleted (the group is removed at the app);
   - a reconcile runs.
 - **Rebuilt each time:** the group is recomputed from the database on every delivery, so it converges whatever order changes arrive in. A change made in the app is delivered at once; a reconcile updates each group a few times, not once per member.
-- **Never taken over:** a group of the same name that isn't the organization's (another `externalId`, or one made by hand) is refused, because replacing it would rewrite its members. The name is looked up before the first create, so a hand-made group is refused even when that create times out. Rename one of them, or set `groupName`.
-- **Verified live** against Cloudflare Access.
+- **Never taken over:** a group of the same name that isn't the organization's (another `externalId`, or one made by hand) is refused, because replacing it would rewrite its members. The name is looked up before the first create. If that create fails or its reply is lost, a group found later without our `externalId` is taken as ours only when everyone in it is someone we'd put there; otherwise it's refused. Rename one of them, or set `groupName`.
+- **Verified** at Cloudflare Access (in the field test, by hand), Google Workspace and AWS IAM Identity Center (live tests).
 
 Most apps grant access by group: assign the group to the app or role there (AWS permission sets, Atlassian products, Cloudflare Access policies).
 
 ## How it holds up
 
 - **An outbox in your database.** A change queues one job per user and target. The job carries no user data: delivery reads the user as they are then, so quick changes collapse into one request with the latest state.
-- **Never in the way.** Provisioning never fails the user's own write. A failure to queue is logged, and the next reconcile catches up.
-- **Leases.** A job is claimed before delivery, so two workers never deliver it at once. A change that arrives during a delivery goes out straight after it.
+- **Never in the way.** Provisioning never fails the user's own write. A failure to queue is logged, and the next reconcile catches up: until then that change isn't queued.
+- **Leases.** A job is claimed before delivery, so two workers don't deliver it at once; a group delivery renews its claim while it runs. A change that arrives during a delivery goes out straight after it.
 - **Retries.** 429 (honouring `Retry-After`, at every kind of target), 408, 5xx, timeouts, network errors, 401/403 (an expired token is the host's problem, not the user's), and a wrong target URL (a 404 for everything, or a redirect) are retried with backoff, for as long as it takes. The job's last error says which: "check the target's token", "check the target's url". Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
 - **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off. At apps that don't keep `externalId`, we can't tell that account from one made by hand in the meantime, so the job fails with a message instead of guessing.
 - **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, the user's email verified, and the account's userName that same email. With a custom `mapUser` userName (an employee id, a handle), accounts made by hand at the app are therefore never taken over: give them our `externalId` at the app, or remove them, first. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
@@ -304,13 +303,19 @@ import { verifyWebhookSignature } from "better-auth-scim-provisioning";
 
 export async function POST(request: Request) {
   const body = await request.text();
-  const event = await verifyWebhookSignature({ body, signature: request.headers.get("x-scim-provisioning-signature"), secret: process.env.PROVISIONING_WEBHOOK_SECRET! });
+  let event;
+  try {
+    event = await verifyWebhookSignature({ body, signature: request.headers.get("x-scim-provisioning-signature"), secret: process.env.PROVISIONING_WEBHOOK_SECRET! });
+  } catch {
+    // 401, not a 500: the sender's error then says "check the target's secret".
+    return new Response(null, { status: 401 });
+  }
   // event.type, event.user / event.group …
   return new Response(null, { status: 204 });
 }
 ```
 
-It throws on a wrong signature, or one more than 5 minutes old, which stops a captured request being replayed later. Within those 5 minutes the same request can arrive again (a retry, or a replay), so make applying an event idempotent: remember the event `id`s you've applied for a few minutes, and drop an event whose `occurredAt` is older than the last one you applied for that user or group.
+It throws on a wrong signature, or one more than 5 minutes old, which stops a captured request being replayed later. A retry of the same change carries the same `id` (with a new signature and `occurredAt`), and within those 5 minutes a captured request could be replayed, so make applying an event idempotent: remember the event `id`s you've applied for a while, and drop an event whose `occurredAt` is older than the last one you applied for that user or group.
 
 A user's `externalId` is their id at the receiver. If a `mapUser` changes it for users already sent, the receiver sees new users, and the old ones are never deactivated: keep it stable.
 - **Retried:** 5xx, 429, 408, timeouts, and 401/403 ("check the target's secret").
@@ -351,7 +356,7 @@ For other auth methods, `--auth auth.json`, a file holding the `auth` object as 
 
 ## Databases and runtimes
 
-Proven in CI, with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24:
+Proven in CI. The whole suite runs on SQLite with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24; the database suite runs on Node.js 24 with the Better Auth version in the lockfile:
 
 | Database | Through | |
 | --- | --- | --- |
@@ -365,13 +370,13 @@ The outbox suite is what differs between databases: leases, version checks, date
 
 The built package also runs on **Bun** and **Deno**: CI runs the `check` CLI and a user's life, delivered to a SCIM app and a signed webhook, on both.
 
-It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested there in a real app, with D1, `waitUntil` and a Cron Trigger, against Cloudflare Access: 200 users were reconciled and delivered at about 6 users a second with the default concurrency.
+It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. CI runs [the Workers example](examples/workers) inside workerd with D1, `waitUntil` and its Cron Trigger. It was also field-tested in a real app on Workers against Cloudflare Access, where 200 users were reconciled and delivered at about 6 users a second with the default concurrency.
 
 ## Not yet
 
 - **Microsoft 365 / Entra ID** as a target (through Microsoft Graph), the other big suite after Google Workspace.
 - **Live verification of the Slack, Atlassian and GitHub Enterprise profiles.** They're built from each app's documentation and tested against a model.
-- **A 1.0**, once the API has settled with real users.
+- **A 1.0**: the API and database schema are being reviewed for it first.
 
 ## Development
 
