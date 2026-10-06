@@ -167,16 +167,26 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
   const parsed = optionsSchema.safeParse(options);
   if (!parsed.success) throw new Error(`[scim] invalid options: ${parsed.error.issues.flatMap(describeIssue).join("; ")}`);
 
-  let box: ReturnType<typeof outbox> | undefined;
-  let background: (p: Promise<unknown>) => void = (p) => void p.catch(() => {});
+  /**
+   * Each Better Auth instance's queue and background work, by its database adapter: one plugin
+   * object can serve several instances (per-tenant databases; Better Auth also builds a second
+   * context from the same options to run migrations), and each must use its own database.
+   */
+  interface State {
+    box: ReturnType<typeof outbox>;
+    background: (p: Promise<unknown>) => void;
+    /** A user's groups at each target, noted just before they're deleted (see delete.before). */
+    deleting: Map<string, Map<string, GroupRef[]>>;
+  }
+  const states = new WeakMap<object, State>();
+  const stateOf = (context: { adapter: unknown }) => states.get(context.adapter as object);
 
   /**
    * Queue (target, user) and try to deliver it right away, in the background; then, for targets
    * with groups, the user's organizations' groups, so a new user shows up in them at once.
    */
-  async function changed(userId: string, targetIds = options.targets.map((t) => t.id), formerGroups?: Map<string, GroupRef[]>) {
-    if (!box) return;
-    const b = box;
+  async function changed(s: State, userId: string, targetIds = options.targets.map((t) => t.id), formerGroups?: Map<string, GroupRef[]>) {
+    const { box: b, background } = s;
     for (const targetId of targetIds) {
       await b.enqueue(targetId, userId);
       // A deleted user's groups, noted before the delete: queued, so they're updated even if this
@@ -193,17 +203,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     }
   }
 
-  /**
-   * A user's groups at each target, noted just before they're deleted: SQL databases delete the
-   * member rows with the user, so after the delete their groups can't be found, and the user would
-   * stay in them at the app.
-   */
-  const deleting = new Map<string, Map<string, GroupRef[]>>();
-
   /** Queue an organization's groups (its own, its teams', its roles') at every target, and deliver them in the background. */
-  async function groupChanged(organizationId: string) {
-    if (!box) return;
-    const b = box;
+  async function groupChanged(s: State, organizationId: string) {
+    const { box: b, background } = s;
     for (const t of options.targets.filter((x) => b.hasGroups(x))) {
       const refs = await b.groupsForOrganization(t, organizationId);
       for (const ref of refs) await b.enqueue(t.id, ref.id, { kind: ref.kind });
@@ -212,9 +214,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
   }
 
   /** Queue a team's group at every target with team groups (a removed team's group is removed). */
-  async function teamChanged(teamId: string) {
-    if (!box) return;
-    const b = box;
+  async function teamChanged(s: State, teamId: string) {
+    const { box: b, background } = s;
     for (const t of options.targets.filter((x) => x.teamGroups)) {
       await b.enqueue(t.id, teamId, { kind: "team" });
       background(b.runFor(t.id, teamId, "team"));
@@ -265,11 +266,16 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       },
     },
     init(ctx) {
-      box = outbox(options, ctx.adapter as unknown as Adapter, ctx.logger);
-      background = (p) => ctx.runInBackground(p.catch((e) => ctx.logger.error("[scim] delivery failed", e)));
+      const s: State = {
+        box: outbox(options, ctx.adapter as unknown as Adapter, ctx.logger),
+        background: (p) => ctx.runInBackground(p.catch((e) => ctx.logger.error("[scim] delivery failed", e))),
+        deleting: new Map(),
+      };
+      states.set(ctx.adapter as object, s);
+      const { box, deleting } = s;
       const onUser = async (user: { id: string }) => {
         try {
-          await changed(user.id);
+          await changed(s, user.id);
         } catch (e) {
           // Never fail the user's own write over provisioning: the next reconcile catches up.
           ctx.logger.error(`[scim] could not queue user ${user.id}`, e);
@@ -282,8 +288,10 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               create: { after: onUser },
               update: { after: onUser },
               delete: {
+                // A user's groups at each target, noted just before the delete: SQL databases delete
+                // the member rows with the user, so after it their groups can't be found, and the
+                // user would stay in them at the app.
                 before: async (user: { id: string }) => {
-                  if (!box) return;
                   try {
                     const byTarget = new Map<string, GroupRef[]>();
                     for (const t of options.targets) if (box.hasGroups(t)) byTarget.set(t.id, await box.groupsOf(t, user.id));
@@ -297,7 +305,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                   const former = deleting.get(user.id);
                   deleting.delete(user.id);
                   try {
-                    await changed(user.id, undefined, former);
+                    await changed(s, user.id, undefined, former);
                   } catch (e) {
                     ctx.logger.error(`[scim] could not queue user ${user.id}`, e);
                   }
@@ -320,11 +328,12 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path) || ORGANIZATION_WRITES.has(ctx.path) || TEAM_WRITES.has(ctx.path)),
           handler: createAuthMiddleware(async (ctx) => {
             const returned = (ctx.context as { returned?: unknown }).returned;
-            if (!returned || returned instanceof Error || !box) return;
-            const b = box;
+            const s = stateOf(ctx.context);
+            if (!returned || returned instanceof Error || !s) return;
+            const { box: b, background } = s;
             const queue = async (userId: string, targetIds: string[]) => {
               try {
-                await changed(userId, targetIds);
+                await changed(s, userId, targetIds);
               } catch (e) {
                 ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
               }
@@ -344,7 +353,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               }
               for (const teamId of teamIds) {
                 try {
-                  await teamChanged(teamId);
+                  await teamChanged(s, teamId);
                 } catch (e) {
                   ctx.context.logger.error(`[scim] could not queue the group of team ${teamId}`, e);
                 }
@@ -358,7 +367,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               if (ctx.path === "/organization/delete" && typeof bodyOrg === "string") orgIds.add(bodyOrg);
               for (const orgId of orgIds) {
                 try {
-                  await groupChanged(orgId);
+                  await groupChanged(s, orgId);
                 } catch (e) {
                   ctx.context.logger.error(`[scim] could not queue the group of organization ${orgId}`, e);
                 }
@@ -395,8 +404,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     endpoints: {
       /** Deliver what's due (retries included). Call it from a scheduled job, e.g. every minute. */
       scimProvisioningRun: createAuthEndpoint.serverOnly({ method: "POST", body: z.object({ limit: z.number().int().min(1).max(500).optional() }).optional() }, async (ctx) => {
-        if (!box) throw new Error("[scim] not initialised");
-        return ctx.json(await box.runDue(ctx.body?.limit ?? 50));
+        const s = stateOf(ctx.context);
+        if (!s) throw new Error("[scim] not initialised");
+        return ctx.json(await s.box.runDue(ctx.body?.limit ?? 50));
       }),
       /**
        * Queue every user for every target (or one), and every user still linked at a target who no
@@ -410,8 +420,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           body: z.object({ targetId: z.string().optional(), after: z.string().optional(), limit: z.number().int().min(1).max(10_000).optional() }).optional(),
         },
         async (ctx) => {
-          if (!box) throw new Error("[scim] not initialised");
-          const b = box;
+          const s = stateOf(ctx.context);
+          if (!s) throw new Error("[scim] not initialised");
+          const b = s.box;
           const all = options.targets.map((t) => t.id);
           const targetId = ctx.body?.targetId;
           if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });

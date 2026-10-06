@@ -12,6 +12,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 - **A 429's `Retry-After` is kept when the user changed during that delivery**; the new change used to be sent again at once.
 - **A long group delivery renews its hold on the job** while it runs (a large first sync, Google's one request per member), so a second worker can't pick the same group up halfway through.
 - **Deleting an organization queues its members' deprovisioning before the response** (at targets scoped to it with `organizationId`). It was queued only in background work after the response, which Workers ends with `waitUntil`'s budget, so members not queued by then stayed active at the app until a reconcile. The deliveries still run in the background and on the scheduled run.
+- **One `scimProvisioning()` used by several Better Auth instances** (per-tenant databases, for example) gives each its own queue. They all queued and delivered through the last instance's database.
 
 ### Changed
 
