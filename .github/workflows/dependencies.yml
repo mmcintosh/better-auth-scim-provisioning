@@ -30,6 +30,8 @@ jobs:
           fail-on-scopes: runtime
           # Licences a MIT package can depend on at runtime.
           allow-licenses: MIT, ISC, Apache-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD, BlueOak-1.0.0, CC0-1.0, Unlicense, Python-2.0
+          # npm itself (Artistic-2.0) is the release job's CLI (.github/npm-cli), run in CI, never shipped.
+          allow-dependencies-licenses: pkg:npm/npm
           comment-summary-in-pr: never
 
   osv:
