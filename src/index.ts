@@ -18,7 +18,12 @@ export type { DeliveryFailure, GoogleWorkspaceTarget, ProvisionedUser, ScimProvi
 
 
 /** A secret or header value: no control characters (a line break would break the request, and errors could repeat it). */
-const secretText = (min = 1) => z.string().min(min, min > 1 ? `must be at least ${min} characters` : undefined).regex(/^[^\u0000-\u001f\u007f]*$/, "must not contain control characters (a line break or tab, say)");
+const hasControl = (text: string) => [...text].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
+const secretText = (min = 1) =>
+  z
+    .string()
+    .min(min, min > 1 ? `must be at least ${min} characters` : undefined)
+    .refine((text) => !hasControl(text), "must not contain control characters (a line break or tab, say)");
 
 const targetSchema = z.strictObject({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),

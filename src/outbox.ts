@@ -91,8 +91,24 @@ export const groupKeyOf = (targetId: string, organizationId: string) => `${targe
 /** "group" is an organization's group (its key and kind kept from 0.1.0); "team" and "role" are the others. */
 export type Kind = "user" | "group" | "team" | "role";
 export type GroupRef = { kind: Exclude<Kind, "user">; id: string };
+/**
+ * A role group's id is "<organization id>:<role>", and roles are named by people: "Admin" and
+ * "admin" can both exist. Keys must stay distinct under a case-insensitive collation (MySQL's), so
+ * a role with anything beyond [a-z0-9_-] is written as "~" and its UTF-8 in hex. Plain roles keep
+ * the form 0.3 wrote, so their links and jobs are found as before.
+ */
+const SAFE_ROLE = /^[a-z0-9_-]*$/;
+const hexOf = (text: string) => [...new TextEncoder().encode(text)].map((b) => b.toString(16).padStart(2, "0")).join("");
+const textOfHex = (hex: string) => new TextDecoder().decode(Uint8Array.from(hex.match(/../g) ?? [], (h) => Number.parseInt(h, 16)));
+const roleKeyPart = (id: string) => {
+  const at = id.indexOf(":");
+  const role = id.slice(at + 1);
+  return SAFE_ROLE.test(role) ? id : `${id.slice(0, at)}:~${hexOf(role)}`;
+};
 const keyFor = (kind: Kind, targetId: string, id: string) =>
-  kind === "user" ? keyOf(targetId, id) : kind === "group" ? groupKeyOf(targetId, id) : `${targetId}:${kind}:${id}`;
+  kind === "user" ? keyOf(targetId, id) : kind === "group" ? groupKeyOf(targetId, id) : `${targetId}:${kind}:${kind === "role" ? roleKeyPart(id) : id}`;
+/** The key 0.3 wrote for a role group, unencoded: found and moved to the new key once. */
+const legacyRoleKey = (targetId: string, id: string) => `${targetId}:role:${id}`;
 
 export interface GroupLink {
   id: string;
@@ -662,7 +678,15 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const client = clientFor(target, change);
     const key = keyFor(ref.kind, target.id, ref.id);
     const externalId = externalIdOf(ref);
-    const link = await findGroupLink(key);
+    let link = await findGroupLink(key);
+    // A role group linked by 0.3 under its unencoded key: moved to the new key, so it's still ours.
+    if (!link && ref.kind === "role" && key !== legacyRoleKey(target.id, ref.id)) {
+      const legacy = await findGroupLink(legacyRoleKey(target.id, ref.id));
+      if (legacy) {
+        await adapter.updateMany({ model: GROUP_LINK_MODEL, where: [{ field: "id", value: legacy.id }], update: { key, kind: ref.kind, subjectId: ref.id } });
+        link = { ...legacy, key };
+      }
+    }
     const now = await resolveGroup(target, ref);
 
     if (!now?.wanted) {
@@ -855,7 +879,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const rest = l.key.slice(l.targetId.length + 1);
     const at = rest.indexOf(":");
     const kind = rest.slice(0, at);
-    return kind === "team" || kind === "role" ? { kind, id: rest.slice(at + 1) } : { kind: "group", id: l.organizationId };
+    if (kind === "role") {
+      const id = rest.slice(at + 1);
+      const sep = id.indexOf(":");
+      return { kind, id: id.slice(sep + 1).startsWith("~") ? `${id.slice(0, sep)}:${textOfHex(id.slice(sep + 2))}` : id };
+    }
+    return kind === "team" ? { kind, id: rest.slice(at + 1) } : { kind: "group", id: l.organizationId };
   };
   const uniqueRefs = (refs: GroupRef[]) => [...new Map(refs.map((r) => [`${r.kind}:${r.id}`, r])).values()];
 

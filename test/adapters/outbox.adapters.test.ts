@@ -240,6 +240,24 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     expect([...new Set(seen)].sort()).toEqual(ids.sort());
   });
 
+  it("roles differing only by case keep apart (MySQL compares keys case-insensitively)", async () => {
+    const h = await host({ targets: [{ id: "app", roleGroups: true }] });
+    const [a, b] = [await h.user("Ann Admin"), await h.user("Bob Admin")];
+    const org = await h.ctx.adapter.create<{ id: string }>({ model: "organization", data: { name: "Acme", slug: "acme", createdAt: new Date() } });
+    await h.ctx.adapter.create({ model: "member", data: { organizationId: org.id, userId: a.id, role: "Admin", createdAt: new Date() } });
+    await h.ctx.adapter.create({ model: "member", data: { organizationId: org.id, userId: b.id, role: "admin", createdAt: new Date() } });
+    // Queues both roles' groups, rather than failing on a duplicate key.
+    expect(await h.auth.api.scimProvisioningQueue({ body: { organizationId: org.id } })).toEqual({ queued: 2 });
+    await h.settle();
+    const jobs = (await h.jobs()) as { key: string }[];
+    const links = await h.ctx.adapter.findMany<{ key: string; subjectId: string }>({ model: "scimProvisioningGroupLink" });
+    // No two keys that differ only by case, among the jobs or among the links.
+    for (const keys of [jobs.map((j) => j.key), links.map((l) => l.key)]) expect(new Set(keys.map((k) => k.toLowerCase())).size).toBe(new Set(keys).size);
+    // "Acme / admin" is at the app; "Acme / Admin" is the same name to this app, and refused, not merged.
+    expect([...h.app.groups.values()].map((g) => g.displayName)).toHaveLength(1);
+    expect(links.every((l) => l.subjectId === `${org.id}:admin` || l.subjectId === `${org.id}:Admin`)).toBe(true);
+  });
+
   it("reconcile covers existing and deleted users", async () => {
     const h = await host();
     const kept = await h.user("Kept Person");
