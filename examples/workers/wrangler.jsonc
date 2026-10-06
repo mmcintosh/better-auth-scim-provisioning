@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "scim-provisioning-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [{ "binding": "DB", "database_name": "scim-example", "database_id": "REPLACE_WITH_YOUR_DATABASE_ID", "migrations_dir": "migrations" }],
+  // Retries are delivered on this schedule; a change made in the app is delivered at once.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "vars": {
+    "BETTER_AUTH_URL": "http://localhost:8787",
+    "ADMIN_EMAILS": "",
+    "DEV_MAILBOX": "true"
+  }
+  // Secrets: BETTER_AUTH_SECRET, and SCIM_URL + SCIM_TOKEN and/or WEBHOOK_URL + WEBHOOK_SECRET
+  // (`wrangler secret put …`, or .dev.vars for `wrangler dev`).
+}

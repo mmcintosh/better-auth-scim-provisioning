@@ -10,7 +10,9 @@
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "noEmit": true
+    "noEmit": true,
+    // The examples import the package by name; here that is this repository's source.
+    "paths": { "better-auth-scim-provisioning": ["./src/index.ts"] }
   },
   "include": ["src", "test"],
   "exclude": ["test/types"]

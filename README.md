@@ -102,7 +102,7 @@ Then:
    } while (next);
    ```
 
-**A complete app to copy:** better-auth-saml-idp's [Workers example](https://github.com/mmcintosh/better-auth-saml-idp/tree/main/examples/workers-hono#provisioning-optional) runs this package on Workers and D1, with a Cron Trigger, and an admin page showing each user's account at each app, the queue and the groups.
+**A complete app to copy:** [examples/workers](examples/workers) runs this package on Workers and D1, with `waitUntil`, a Cron Trigger for retries, organizations as groups, and admin routes; CI runs it inside workerd. better-auth-saml-idp's [Workers example](https://github.com/mmcintosh/better-auth-saml-idp/tree/main/examples/workers-hono#provisioning-optional) adds sign-in and an admin page showing each user's account at each app, the queue and the groups.
 
 **On Workers, give Better Auth `waitUntil`.** Deliveries run in the background, and the runtime cancels work still running after the response unless it runs under `waitUntil`:
 
