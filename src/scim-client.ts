@@ -21,6 +21,18 @@ export function targetUrl(value: string): boolean {
 }
 
 export const SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User";
+/**
+ * What a failed fetch says, safe to log and store: a timeout, or the error's own text, except
+ * when building the request failed on a header (a token with a line break, say), whose text
+ * would repeat the header, secret and all.
+ */
+export function fetchFailure(e: unknown, timeoutMs: number): string {
+  const err = e as Error;
+  if (err.name === "TimeoutError" || err.name === "AbortError") return `no response within ${timeoutMs} ms`;
+  if (/header/i.test(err.message ?? "")) return "the request couldn't be sent: an invalid header value (check the target's token or auth)";
+  return err.message;
+}
+
 export const SCIM_GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group";
 const PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
@@ -123,8 +135,7 @@ export function scimClient(endpoint: ScimEndpoint) {
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
-      const timedOut = (e as Error).name === "TimeoutError" || (e as Error).name === "AbortError";
-      throw new ScimError(`${method} ${path}: ${timedOut ? `no response within ${timeoutMs} ms` : (e as Error).message}`, null, true);
+      throw new ScimError(`${method} ${path}: ${fetchFailure(e, timeoutMs)}`, null, true);
     }
     const text = await res.text();
     let json: unknown = null;

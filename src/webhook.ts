@@ -3,7 +3,7 @@
 // `group.upsert`, `group.delete`), signed with HMAC-SHA256, so anything that can receive an HTTPS
 // request can be provisioned: your own apps, or automation platforms. Delivery is at least once,
 // and applying an event twice is harmless; `occurredAt` lets a receiver drop an older state.
-import { retryAfterMs, ScimError, type ScimGroup, type ScimUser, type scimClient } from "./scim-client";
+import { fetchFailure, retryAfterMs, ScimError, type ScimGroup, type ScimUser, type scimClient } from "./scim-client";
 import type { WebhookTarget } from "./types";
 
 export const WEBHOOK_SIGNATURE_HEADER = "x-scim-provisioning-signature";
@@ -113,8 +113,7 @@ export function webhookClient(target: WebhookTarget, change?: string): ReturnTyp
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
-      const timedOut = (e as Error).name === "TimeoutError" || (e as Error).name === "AbortError";
-      throw new ScimError(`POST ${event.type}: ${timedOut ? `no response within ${timeoutMs} ms` : (e as Error).message}`, null, true);
+      throw new ScimError(`POST ${event.type}: ${fetchFailure(e, timeoutMs)}`, null, true);
     }
     if (res.ok) return;
     const detail = (await res.text().catch(() => "")).slice(0, 300);
