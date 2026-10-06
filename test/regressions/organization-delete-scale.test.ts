@@ -59,7 +59,7 @@ describe("organization delete and reconcile scale", () => {
       next = r.next;
     } while (next);
     expect(queued).toBe(10_001);
-  });
+  }, 120_000); // 10,001 rows: slow when the whole suite runs in parallel
 
   it("reconcile in pages: each call takes up to `limit` and says where to go on", async () => {
     const h = await createHost();

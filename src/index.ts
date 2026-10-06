@@ -177,7 +177,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     box: ReturnType<typeof outbox>;
     background: (p: Promise<unknown>) => void;
     /** A user's groups at each target, noted just before they're deleted (see delete.before). */
-    deleting: Map<string, Map<string, GroupRef[]>>;
+    deleting: Map<string, { at: number; groups: Map<string, GroupRef[]> }>;
   }
   const states = new WeakMap<object, State>();
   const stateOf = (context: { adapter: unknown }) => states.get(context.adapter as object);
@@ -311,14 +311,17 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                   try {
                     const byTarget = new Map<string, GroupRef[]>();
                     for (const t of options.targets) if (box.hasGroups(t)) byTarget.set(t.id, await box.groupsOf(t, user.id));
-                    deleting.set(user.id, byTarget);
+                    // Taken by delete.after; a delete stopped after this (another hook, a rollback)
+                    // leaves it behind, so old notes are dropped here.
+                    for (const [id, note] of deleting) if (note.at < Date.now() - 60_000) deleting.delete(id);
+                    deleting.set(user.id, { at: Date.now(), groups: byTarget });
                   } catch (e) {
                     // Never stop the delete: the next reconcile updates the groups.
                     ctx.logger.error(`[scim] could not note the groups of user ${user.id}`, e);
                   }
                 },
                 after: async (user: { id: string }) => {
-                  const former = deleting.get(user.id);
+                  const former = deleting.get(user.id)?.groups;
                   deleting.delete(user.id);
                   try {
                     await changed(s, user.id, undefined, former);

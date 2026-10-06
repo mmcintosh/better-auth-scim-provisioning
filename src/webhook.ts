@@ -66,13 +66,16 @@ export async function webhookSignature(secret: string, body: string, timestamp =
  * `secret: [newSecret, oldSecret]`.
  */
 export async function verifyWebhookSignature(o: { body: string; signature: string | null | undefined; secret: string | readonly string[]; toleranceSeconds?: number; now?: number }): Promise<WebhookEvent> {
+  const secrets = typeof o.secret === "string" ? [o.secret] : Array.isArray(o.secret) ? o.secret : [];
+  // A configuration mistake (an unset environment variable), not a bad request: said plainly.
+  if (!secrets.length || secrets.some((x) => typeof x !== "string" || !x)) throw new Error("verifyWebhookSignature: no secret given (check the receiver's environment)");
   const parts = Object.fromEntries((o.signature ?? "").split(",").map((p) => p.split("=", 2) as [string, string]));
   const t = Number(parts.t);
   if (!Number.isInteger(t) || !parts.v1) throw new WebhookSignatureError("webhook: missing or malformed signature", "malformed");
   const now = Math.floor((o.now ?? Date.now()) / 1000);
   if (Math.abs(now - t) > (o.toleranceSeconds ?? 300)) throw new WebhookSignatureError("webhook: signature too old (or from the future)", "expired");
   const given = parts.v1;
-  for (const secret of typeof o.secret === "string" ? [o.secret] : o.secret) {
+  for (const secret of secrets) {
     const expected = await hmac(secret, `${t}.${o.body}`);
     // Constant-time comparison, so the signature can't be guessed a byte at a time.
     let diff = expected.length ^ given.length;
