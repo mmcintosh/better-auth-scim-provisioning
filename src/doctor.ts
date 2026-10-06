@@ -100,7 +100,8 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   const created = await call("POST", "/Users", user("Scim Check"));
   const id = typeof created.json?.id === "string" ? created.json.id : null;
   if (!(created.status >= 200 && created.status < 300 && id)) {
-    note("create a user", false, why(created));
+    // The app may have made the user anyway (a 2xx without an id, a timeout after the write).
+    note("create a user", false, `${created.status >= 200 && created.status < 300 ? `${created.status} without an id` : why(created)}; if the app made it anyway, remove the test user ${userName} there by hand`);
     return results;
   }
   note("create a user", true, `${created.status}, id ${id}`);

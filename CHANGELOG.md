@@ -14,6 +14,8 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 - **Deleting an organization queues its members' deprovisioning before the response** (at targets scoped to it with `organizationId`). It was queued only in background work after the response, which Workers ends with `waitUntil`'s budget, so members not queued by then stayed active at the app until a reconcile. The deliveries still run in the background and on the scheduled run.
 - **One `scimProvisioning()` used by several Better Auth instances** (per-tenant databases, for example) gives each its own queue. They all queued and delivered through the last instance's database.
 - **A webhook event keeps its `id` when it's retried**, so a receiver can recognise a retry by it, as the README advises; the next change gets a new id, even one back to an earlier state. Every attempt used to get a new id.
+- After an OAuth client secret (or a Google service account key) is rotated, a token fetched with the old one is no longer reused until it expires.
+- `check` tells you to remove its test user by hand when the app's create answered without an id or failed after it may have made the user.
 
 ### Changed
 
