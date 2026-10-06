@@ -208,4 +208,31 @@ export interface ScimProvisioningOptions {
    * it throws is logged, never in the way of delivery.
    */
   onFailure?: ((failure: DeliveryFailure) => void | Promise<void>) | undefined;
+  /**
+   * Let organizations connect their own apps at runtime: SCIM apps, Google Workspace domains and
+   * webhooks stored in the database (the `scimProvisioningTarget` table, which exists only with
+   * this option), their credentials encrypted with Better Auth's secret. A stored target always
+   * belongs to one organization and only ever receives its members and groups.
+   */
+  registry?: TargetRegistryOptions | undefined;
+}
+
+export interface TargetRegistryOptions {
+  /**
+   * How long the list of stored targets is cached, in seconds; default 60. A target looked up by
+   * id (a job's delivery) is read from the database when it isn't in the cache, so a new target
+   * gets its jobs delivered at once; a change or removal can take this long to reach every server.
+   */
+  cacheSeconds?: number | undefined;
+  /**
+   * Hosts a stored target may use although they look internal (a name without a dot, `.internal`,
+   * a private address). Stored URLs are otherwise https and public only, since your server is
+   * the one that calls them.
+   */
+  allowHosts?: string[] | undefined;
+  /**
+   * The fetch stored targets use; default the global one. To send them through an egress proxy,
+   * or a fetch that refuses names resolving to private addresses (which the URL check can't see).
+   */
+  fetch?: typeof fetch | undefined;
 }

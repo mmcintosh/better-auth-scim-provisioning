@@ -6,7 +6,7 @@ import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { admin, organization } from "better-auth/plugins";
 import { scimProvisioning } from "../../src";
-import type { ScimProvisioningOptions, ScimTarget, Target, TargetOptions } from "../../src/types";
+import type { ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions } from "../../src/types";
 import { mockGoogle } from "./mock-google";
 import { mockScim } from "./mock-scim";
 import { mockWebhook } from "./mock-webhook";
@@ -30,7 +30,7 @@ export function schemaOptions(database?: unknown) {
   };
 }
 
-export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; onFailure?: ScimProvisioningOptions["onFailure"]; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number } = {}) {
+export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; onFailure?: ScimProvisioningOptions["onFailure"]; registry?: TargetRegistryOptions; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
   const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}), ...(s.membersOnRequest ? { membersOnRequest: true } : {}), ...(s.indexPaged ? { indexPaged: true } : {}) })]));
   // A Google Workspace target gets a mock Directory API instead (one per host).
@@ -68,6 +68,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
         ...(o.retry ? { retry: o.retry } : {}),
         ...(o.concurrency ? { concurrency: o.concurrency } : {}),
         ...(o.onFailure ? { onFailure: o.onFailure } : {}),
+        ...(o.registry ? { registry: o.registry } : {}),
       }),
     ],
   });
@@ -91,5 +92,5 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
 
   const jobs = () => ctx.adapter.findMany<Record<string, unknown>>({ model: "scimProvisioningJob" });
   const links = () => ctx.adapter.findMany<Record<string, unknown>>({ model: "scimProvisioningLink" });
-  return { auth, ctx, db, apps, app: apps[specs[0]!.id]!, google: google as NonNullable<typeof google>, webhook: webhook as NonNullable<typeof webhook>, settle, user, jobs, links };
+  return { auth, ctx, db, apps, app: (specs[0] ? apps[specs[0].id] : undefined) as (typeof apps)[string], google: google as NonNullable<typeof google>, webhook: webhook as NonNullable<typeof webhook>, settle, user, jobs, links };
 }

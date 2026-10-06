@@ -72,6 +72,9 @@ const RELEASED = new Date("2000-01-01T00:00:00.000Z");
  * margin. A group delivery's hold is also renewed while it runs. Shorter, and a second worker
  * could claim a job still being delivered.
  */
+/** How long a paused target's jobs wait before they're looked at again. */
+const PAUSED_RECHECK_MS = 5 * 60_000;
+
 const leaseFor = (target: Target | undefined, kind?: string | null) =>
   kind && kind !== "user"
     ? // A group can take many requests, but its hold is renewed every few seconds while it runs:
@@ -144,11 +147,13 @@ const clientFor = (target: Target, change?: string) =>
 /**
  * Where the targets come from, looked up when they're used: the ones in code, and (with a
  * registry) the ones stored by organizations. `get` is authoritative: null means the target
- * doesn't exist (its jobs are then dropped), never "not in a cache yet".
+ * doesn't exist (its jobs are then dropped), never "not in a cache yet". "paused" means it exists
+ * but isn't delivered to now (disabled, or its stored credentials can't be read): its jobs wait.
+ * `all` lists only the targets delivered to.
  */
 export interface TargetSource {
   all(): Promise<Target[]>;
-  get(id: string): Promise<Target | null>;
+  get(id: string): Promise<Target | "paused" | null>;
 }
 
 /** The targets given in code, fixed at startup. */
@@ -423,7 +428,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    */
   async function run(job: Job, round = 0): Promise<Outcome> {
     const now = Date.now();
-    const lockedUntil = now + leaseFor((await source.get(job.targetId)) ?? undefined, job.kind);
+    const known = await source.get(job.targetId);
+    const lockedUntil = now + leaseFor(typeof known === "object" ? (known ?? undefined) : undefined, job.kind);
     const claimed = await adapter.updateMany({
       model: JOB_MODEL,
       // Still due and not failed, not just free: a worker holding an old list of due jobs must not
@@ -444,6 +450,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       // A target removed from the configuration (or the registry): nothing to deliver to.
       await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }] });
       return "done";
+    }
+    if (target === "paused") {
+      // Kept, not attempted: looked at again in a while, delivered once the target is back.
+      await adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }], update: { lockedUntil: RELEASED, nextAttemptAt: new Date(now + PAUSED_RECHECK_MS) } });
+      return "busy";
     }
     // Duplicates (a database without the UNIQUE key): one delivery per user at a time.
     // Free ones are covered by this delivery, which reads the user after this. Of the held ones,
