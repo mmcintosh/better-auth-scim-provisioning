@@ -18,7 +18,7 @@ export const JOB_MODEL = "scimProvisioningJob";
 export const LINK_MODEL = "scimProvisioningLink";
 export const GROUP_LINK_MODEL = "scimProvisioningGroupLink";
 
-type Where = { field: string; value: unknown; operator?: "eq" | "ne" | "lt" | "gt" | "gte" | "in" };
+type Where = { field: string; value: unknown; operator?: "eq" | "ne" | "lt" | "gt" | "gte" | "in"; connector?: "AND" | "OR" };
 export interface Adapter {
   create(a: { model: string; data: Record<string, unknown> }): Promise<unknown>;
   findOne(a: { model: string; where: Where[] }): Promise<unknown>;
@@ -899,15 +899,18 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   /**
-   * Failed and stuck jobs, by id, a page at a time: two queries (failed; not failed but past
-   * maxAttempts) merged in id order, so the cursor (the last id) works for both.
+   * Failed and stuck jobs, by id, a page at a time. One query (failed, or past maxAttempts), so
+   * the database orders both the page and the cursor: merging two queries in JavaScript would
+   * compare ids differently from a case-insensitive collation (MySQL's) and skip some.
    */
   async function failures(o: { targetId?: string | undefined; after?: string | undefined; limit: number }) {
-    const base = [...(o.targetId ? [{ field: "targetId", value: o.targetId }] : []), ...(o.after ? [{ field: "id", value: o.after, operator: "gt" as const }] : [])];
-    const page = (where: Where[]) => adapter.findMany({ model: JOB_MODEL, where: [...base, ...where], sortBy: { field: "id", direction: "asc" }, limit: o.limit + 1 }) as Promise<Job[]>;
-    const rows = [...(await page([{ field: "failed", value: true }])), ...(await page([{ field: "failed", value: false }, { field: "attempts", value: maxAttempts, operator: "gte" }]))].sort((a, b) =>
-      a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-    );
+    const where: Where[] = [
+      ...(o.targetId ? [{ field: "targetId", value: o.targetId }] : []),
+      ...(o.after ? [{ field: "id", value: o.after, operator: "gt" as const }] : []),
+      { field: "failed", value: true, connector: "OR" },
+      { field: "attempts", value: maxAttempts, operator: "gte", connector: "OR" },
+    ];
+    const rows = (await adapter.findMany({ model: JOB_MODEL, where, sortBy: { field: "id", direction: "asc" }, limit: o.limit + 1 })) as Job[];
     const items = rows.slice(0, o.limit).map((j) => ({
       targetId: j.targetId,
       kind: (j.kind ?? "user") as "user" | "group" | "team" | "role",

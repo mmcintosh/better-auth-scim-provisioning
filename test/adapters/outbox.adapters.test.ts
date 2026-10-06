@@ -220,14 +220,22 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     expect(status.targets).toEqual([{ id: "app", queued: 0, waiting: 0, stuck: 1, failed: 0, accounts: 1, groups: 0 }]);
   });
 
-  it("failures are listed a page at a time (id order, gt)", async () => {
+  it("failures are listed a page at a time (the database's id order, gt): none skipped", async () => {
+    // Enough of them, a few to a page, that mixed-case ids cross page boundaries: MySQL compares
+    // ids case-insensitively, and paging must follow the database's order, not JavaScript's.
     const h = await host({ retry: { maxAttempts: 1, baseDelayMs: 0 } });
-    h.app.fail({ status: 400 }, { status: 503 }, { status: 400 });
-    const ids = [(await h.user("Ada Lovelace")).id, (await h.user("Bea Berg")).id, (await h.user("Cy Chen")).id];
-    const first = await h.auth.api.scimProvisioningFailures({ body: { limit: 2 } });
-    const second = await h.auth.api.scimProvisioningFailures({ body: { after: first.next!, limit: 2 } });
-    expect([...first.items, ...second.items].map((i) => i.subjectId).sort()).toEqual(ids.sort());
-    expect(second.next).toBeNull();
+    h.app.fail(...Array.from({ length: 8 }, (_, i) => ({ status: i % 2 ? 503 : 400 })));
+    const ids: string[] = [];
+    for (let i = 0; i < 8; i++) ids.push((await h.user(`Person Number${i}`)).id);
+    const seen: string[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const r: { items: { subjectId: string }[]; next: string | null } = await h.auth.api.scimProvisioningFailures({ body: { limit: 3, ...(after ? { after } : {}) } });
+      seen.push(...r.items.map((i) => i.subjectId));
+      if (!r.next) break;
+      after = r.next;
+    }
+    expect(seen.sort()).toEqual(ids.sort());
   });
 
   it("reconcile covers existing and deleted users", async () => {
