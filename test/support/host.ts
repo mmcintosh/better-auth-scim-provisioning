@@ -30,7 +30,7 @@ export function schemaOptions(database?: unknown) {
   };
 }
 
-export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number } = {}) {
+export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; onFailure?: ScimProvisioningOptions["onFailure"]; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
   const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}), ...(s.membersOnRequest ? { membersOnRequest: true } : {}), ...(s.indexPaged ? { indexPaged: true } : {}) })]));
   // A Google Workspace target gets a mock Directory API instead (one per host).
@@ -67,6 +67,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
         ) as Target[],
         ...(o.retry ? { retry: o.retry } : {}),
         ...(o.concurrency ? { concurrency: o.concurrency } : {}),
+        ...(o.onFailure ? { onFailure: o.onFailure } : {}),
       }),
     ],
   });

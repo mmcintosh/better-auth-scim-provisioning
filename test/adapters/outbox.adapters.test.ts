@@ -211,6 +211,15 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     expect(await h.jobs()).toEqual([expect.objectContaining({ userId: b.id, failed: true })]);
   });
 
+  it("status counts (count with ne, lt and gte)", async () => {
+    const h = await host({ retry: { maxAttempts: 1, baseDelayMs: 0 } });
+    await h.user("Ada Lovelace");
+    h.app.fail({ status: 503 });
+    await h.user("Bea Berg");
+    const status = await h.auth.api.scimProvisioningStatus({ body: {} });
+    expect(status.targets).toEqual([{ id: "app", queued: 0, stuck: 1, failed: 0, accounts: 1, groups: 0 }]);
+  });
+
   it("reconcile covers existing and deleted users", async () => {
     const h = await host();
     const kept = await h.user("Kept Person");

@@ -4,6 +4,12 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+
+- **`scimProvisioningStatus`**: per target, the jobs queued, stuck (an app error still retried past `retry.maxAttempts`) and failed, and the accounts and groups the app confirmed; with `userId`, that user's account and pending job at each target. Hosts no longer need to read the plugin's tables.
+- **`onFailure`**: called when a delivery gives up or reaches `retry.maxAttempts`, with the target, what failed, the error and the app's status. Errors it throws are logged.
+- **`scimProvisioningQueue({ userId, targetId? })`**: queue a user (and their groups) whose memberships changed outside Better Auth's organization endpoints.
+
 ### Fixed
 
 - **A group made by hand is no longer taken over after our first create failed.** At an app that drops externalId, a group created by hand after our create failed (a 503, a timeout) was found on the retry and its members rewritten. A group without our externalId is now taken as ours only if it has members and every one is someone we'd put there; our own create whose reply was lost still is.

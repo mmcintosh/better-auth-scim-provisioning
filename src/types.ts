@@ -154,6 +154,22 @@ export interface WebhookTarget extends TargetOptions {
 /** A target: an app that speaks SCIM, Google Workspace, or a webhook. */
 export type Target = ScimTarget | GoogleWorkspaceTarget | WebhookTarget;
 
+/** A delivery that gave up, or reached `retry.maxAttempts` (it's then retried every 6 hours). */
+export interface DeliveryFailure {
+  targetId: string;
+  /** What was being delivered: a user, or an organization's, team's or role's group. */
+  kind: "user" | "group" | "team" | "role";
+  /** The user's id, or the organization's, team's or role's. */
+  subjectId: string;
+  /** The error, with the app's own message where it gave one. */
+  error: string;
+  /** The app's HTTP status, or null (a timeout, a network error, the host's own code). */
+  status: number | null;
+  attempts: number;
+  /** True: given up, until the subject changes again or a reconcile runs. False: still retried. */
+  failed: boolean;
+}
+
 export interface ScimProvisioningOptions {
   targets: Target[];
   /**
@@ -171,4 +187,10 @@ export interface ScimProvisioningOptions {
     /** First retry after this; doubles each attempt, capped at 6 hours. Default 30 seconds. */
     baseDelayMs?: number | undefined;
   } | undefined;
+  /**
+   * Called when a delivery gives up (an error that won't fix itself) or reaches
+   * `retry.maxAttempts`: to alert on, say, a deprovisioning that isn't getting through. An error
+   * it throws is logged, never in the way of delivery.
+   */
+  onFailure?: ((failure: DeliveryFailure) => void | Promise<void>) | undefined;
 }

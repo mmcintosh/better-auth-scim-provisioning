@@ -22,6 +22,7 @@ it("a change whose job is deleted between read and bump is still queued and deli
     update: (x) => a.update(x),
     updateMany: (x) => a.updateMany(x),
     deleteMany: (x) => a.deleteMany(x),
+    count: (x) => a.count(x),
     async findMany(x) {
       const rows = await a.findMany(x);
       if (holdNext && x.model === JOB_MODEL) {
