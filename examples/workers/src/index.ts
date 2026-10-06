@@ -8,8 +8,18 @@ import { admins, createAuth, type Env } from "./auth";
 const mailbox = new Map<string, string>();
 
 let cached: { env: Env; auth: ReturnType<typeof createAuth> } | undefined;
-const authFor = (env: Env) => {
-  if (cached?.env !== env) cached = { env, auth: createAuth(env, { waitUntil, mailbox }) };
+/**
+ * Better Auth for this isolate, set up within the request that creates it. Its handler finishes
+ * setting itself up on its first call, and workerd cancels whatever a request leaves unfinished:
+ * if the first request only created the instance (a 404, say), every later request would wait
+ * forever. So the request that creates it also calls the handler once (`/ok`, no database).
+ */
+const authFor = async (env: Env) => {
+  if (cached?.env !== env) {
+    const auth = createAuth(env, { waitUntil, mailbox });
+    await auth.handler(new Request(new URL("/api/auth/ok", env.BETTER_AUTH_URL)));
+    cached = { env, auth };
+  }
   return cached.auth;
 };
 
@@ -17,17 +27,18 @@ const json = (body: unknown, status = 200) => Response.json(body, { status });
 
 /** The signed-in user, if their email is in ADMIN_EMAILS. */
 async function admin(request: Request, env: Env) {
-  const session = await authFor(env).api.getSession({ headers: request.headers });
+  const session = await (await authFor(env)).api.getSession({ headers: request.headers });
   return session && admins(env).includes(session.user.email.toLowerCase()) ? session.user : null;
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const auth = authFor(env);
+    const auth = await authFor(env);
     if (url.pathname.startsWith("/api/auth/")) return auth.handler(request);
 
-    if (url.pathname === "/dev/mailbox" && env.DEV_MAILBOX === "true") {
+    // Development only: never on a deployed host, even if DEV_MAILBOX is switched on there.
+    if (url.pathname === "/dev/mailbox" && env.DEV_MAILBOX === "true" && (url.hostname === "localhost" || url.hostname === "127.0.0.1")) {
       const link = mailbox.get((url.searchParams.get("email") ?? "").toLowerCase());
       return link ? json({ link }) : json({ error: "no mail for that address" }, 404);
     }
@@ -51,7 +62,8 @@ export default {
         let after: string | undefined;
         let queued = 0;
         do {
-          const page = await auth.api.scimProvisioningReconcile({ body: after ? { after } : {} });
+          // A page at a time: one call over every user would run past a Worker's limits.
+          const page = await auth.api.scimProvisioningReconcile({ body: { limit: 200, ...(after ? { after } : {}) } });
           queued += page.queued;
           after = page.next ?? undefined;
         } while (after);
@@ -63,6 +75,6 @@ export default {
 
   // Retries (an app that was down, rate limits) are delivered by the Cron Trigger.
   async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(authFor(env).api.scimProvisioningRun({ body: {} }));
+    ctx.waitUntil(authFor(env).then((auth) => auth.api.scimProvisioningRun({ body: {} })));
   },
 } satisfies ExportedHandler<Env>;
