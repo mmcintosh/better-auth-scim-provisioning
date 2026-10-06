@@ -1,6 +1,7 @@
 // Better Auth with scimProvisioning, configured from the Worker's environment. Kept free of
 // `cloudflare:workers` so Node can load it too (the test compiles the migration from it).
 import { betterAuth } from "better-auth";
+import { APIError } from "better-auth/api";
 import { admin, organization } from "better-auth/plugins";
 import { scimProvisioning, type Target } from "better-auth-scim-provisioning";
 
@@ -54,9 +55,17 @@ export function createAuth(env: Env, o: { database?: unknown; waitUntil?: (promi
     ...(o.waitUntil ? { advanced: { backgroundTasks: { handler: o.waitUntil } } } : {}),
     plugins: [
       admin(),
-      // Each organization becomes a group at the app. Any signed-in user could otherwise create
-      // one with any name (say "Administrators"), so only admins may create them here.
-      organization({ allowUserToCreateOrganization: async (user) => admins(env).includes(user.email.toLowerCase()) }),
+      // Each organization becomes a group at the app, named after it. Any signed-in user could
+      // otherwise create one with any name (say "Administrators"), and an organization's own
+      // admins could rename it to one, so only ADMIN_EMAILS may create or rename them here.
+      organization({
+        allowUserToCreateOrganization: async (user) => admins(env).includes(user.email.toLowerCase()),
+        organizationHooks: {
+          beforeUpdateOrganization: async ({ organization: changes, user }) => {
+            if (changes.name !== undefined && !admins(env).includes(user.email.toLowerCase())) throw new APIError("FORBIDDEN", { message: "only admins may rename organizations (the name is the group's name at the apps)" });
+          },
+        },
+      }),
       scimProvisioning({ targets: targetsFrom(env) }),
     ],
   });

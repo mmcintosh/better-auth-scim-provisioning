@@ -157,6 +157,14 @@ describe("the Workers example", () => {
     const org = await call("/api/auth/organization/create", { method: "POST", headers: { cookie: admin, "content-type": "application/json" }, body: JSON.stringify({ name: "Acme", slug: "acme" }) });
     expect(org.status, await org.clone().text()).toBe(200);
     expect(await until(() => [...app.groups.values()].some((g) => g.displayName === "Acme" && g.members.length === 1))).toBe(true);
+    // An organization admin who isn't in ADMIN_EMAILS can't rename it (and so its group).
+    const { id: orgId } = (await org.clone().json()) as { id: string };
+    // (Added straight into D1: Better Auth's add-member is server-only, and how she joined doesn't matter here.)
+    const adaId = ((await (await call("/api/auth/get-session", { headers: { cookie: ada } })).json()) as { user: { id: string } }).user.id;
+    const d1 = await mf.getD1Database("DB");
+    await d1.prepare('INSERT INTO "member" ("id", "organizationId", "userId", "role", "createdAt") VALUES (?, ?, ?, ?, ?)').bind("m-ada", orgId, adaId, "admin", new Date().toISOString()).run();
+    const renamed = await call("/api/auth/organization/update", { method: "POST", headers: { cookie: ada, "content-type": "application/json" }, body: JSON.stringify({ organizationId: orgId, data: { name: "Administrators" } }) });
+    expect(renamed.status).toBe(403);
     expect(await until(() => hook.events.some((e) => e.type === "group.upsert"))).toBe(true);
   });
 
@@ -191,9 +199,16 @@ describe("the Workers example", () => {
     expect(await reconciled.json()).toEqual({ queued: expect.any(Number), next: null }); // one page covers this small app
     const failures = await call("/admin/failures", { headers: { cookie: admin } });
     expect(await failures.json()).toEqual({ items: [], next: null });
-    const ran = await call("/admin/run", { method: "POST", headers: { cookie: admin } });
-    expect(ran.status).toBe(200);
-    const { targets } = (await (await call("/admin/status", { headers: { cookie: admin } })).json()) as { targets: { queued: number; stuck: number; failed: number }[] };
+    // A delivery can queue follow-ups (a user removed at the app updates their groups), which the
+    // next run takes, as the Cron Trigger would: a few runs, then nothing is left.
+    type Status = { targets: { queued: number; stuck: number; failed: number }[] };
+    let targets: Status["targets"] = [];
+    for (let i = 0; i < 3; i++) {
+      const ran = await call("/admin/run", { method: "POST", headers: { cookie: admin } });
+      expect(ran.status).toBe(200);
+      ({ targets } = (await (await call("/admin/status", { headers: { cookie: admin } })).json()) as Status);
+      if (targets.every((t) => t.queued === 0)) break;
+    }
     expect(targets.every((t) => t.queued === 0 && t.stuck === 0 && t.failed === 0)).toBe(true);
   });
 });
