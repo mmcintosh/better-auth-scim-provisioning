@@ -12,7 +12,7 @@ Keep your users' accounts in step at the apps they use, straight from your [Bett
 
 It's the **outbound** direction. Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim) is the inbound one, where directories push users *into* your app; this package pushes them *out*. It works however your users sign in, and pairs with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) when your app is also their identity provider: see [sign-in and provisioning together](https://github.com/mmcintosh/better-auth-saml-idp/blob/main/docs/guide/provisioning.md).
 
-> **Unofficial community plugin.** This project isn't affiliated with or endorsed by Better Auth. Status: **0.3 on npm**, verified live against Cloudflare Access, Google Workspace and AWS IAM Identity Center (see [what exactly](#-verified-live)), and field-tested in a real app on Workers. While it's 0.x, a minor release may change the API; every change is in the [CHANGELOG](CHANGELOG.md), and upgrades so far have needed no database migration.
+> **Unofficial community plugin.** This project isn't affiliated with or endorsed by Better Auth. Status: **0.3 on npm**, verified live against Cloudflare Access, Google Workspace and AWS IAM Identity Center (see [what exactly](#-verified-live)), and field-tested in a real app on Workers. While it's 0.x, a minor release may change the API; every change is in the [CHANGELOG](CHANGELOG.md). Upgrades within 0.x needed no database migration; **the next release (1.0) does**: see [upgrading from 0.3](docs/upgrading.md).
 
 If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-auth-scim-provisioning) helps others find it.
 
@@ -28,7 +28,7 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 - 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
 - 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports.
 - 📈 **You can see it**: `scimProvisioningStatus` counts what's queued, stuck and failed at each target (or shows one user's state), `onFailure` tells you when a delivery gives up or keeps failing, and failures are logged with the app's own message.
-- ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger, and on Node.js 22 and 24, with SQLite, D1, PostgreSQL, MySQL and MongoDB, through Kysely, Drizzle and Prisma.
+- ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger, and on Node.js 22 and 24, with SQLite, D1, PostgreSQL, MySQL and MongoDB (Drizzle on PostgreSQL and MySQL, Prisma on PostgreSQL: [which combinations](#databases-and-runtimes)).
 - 📦 **Supply chain**: SHA-pinned actions, CodeQL, dependency review, OpenSSF Scorecard, and a release workflow that publishes with npm provenance and an SBOM.
 
 ## ✅ Verified live

@@ -4,6 +4,8 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+**Upgrading from 0.3 needs a database migration, and options or calls 0.3 ignored now stop the plugin: follow [docs/upgrading.md](docs/upgrading.md).**
+
 ### Added
 
 - **Webhook events carry `schemaVersion: 1`.** A change a receiver could trip over will be a new version, in a major release.
@@ -50,6 +52,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Documentation
 
+- [docs/upgrading.md](docs/upgrading.md): upgrading from 0.3 to 1.0, step by step.
 - The README now claims only what's checked, after an independent review:
   - "verified live" says exactly what (Cloudflare Access groups were checked by hand in the field test; the automated live test covers users), and webhooks, which have no third party to verify against, are described as tested over HTTP;
   - "proven in CI" says which suite runs on which Node.js and Better Auth versions;
@@ -60,7 +63,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Examples
 
-- **A Workers example** ([examples/workers](examples/workers)): Better Auth on D1 provisioning to a SCIM app and/or a signed webhook, with `waitUntil`, a Cron Trigger for retries, organizations as groups (only admins create them), email verification, and admin routes to see the queue, run and reconcile. CI runs it inside workerd through Miniflare (sign-up to deletion, a retry delivered by the Cron Trigger, the committed migration checked against Better Auth's), and builds it as installed from npm.
+- **A Workers example** ([examples/workers](examples/workers)): Better Auth on D1 provisioning to a SCIM app and/or a signed webhook, with `waitUntil`, a Cron Trigger for retries, organizations as groups (only admins create or rename them), email verification, and admin routes to see the queue, run and reconcile. CI runs it inside workerd through Miniflare (sign-up to deletion, a retry delivered by the Cron Trigger, the committed migration checked against Better Auth's), and builds it as installed from npm.
 
 ### Tests
 
