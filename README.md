@@ -28,7 +28,7 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 - 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time, within a Workers invocation's limits.
 - 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports.
 - 📈 **You can see it**: every job's last error and status is in the database; failures are logged with the app's own message.
-- ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger, and on Node.js 22 and 24, with SQLite, PostgreSQL, MySQL and MongoDB.
+- ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger, and on Node.js 22 and 24, with SQLite, D1, PostgreSQL, MySQL and MongoDB, through Kysely, Drizzle and Prisma.
 - 📦 **Supply chain**: SHA-pinned actions, CodeQL, dependency review, OpenSSF Scorecard, and a release workflow that publishes with npm provenance and an SBOM.
 
 ## ✅ Verified live
@@ -351,7 +351,17 @@ For other auth methods, `--auth auth.json`, a file holding the `auth` object as 
 
 ## Databases and runtimes
 
-Tested on SQLite (`node:sqlite`), PostgreSQL 17, MySQL 8.4 and MongoDB 8.2 (Better Auth's Kysely and MongoDB adapters), with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24.
+Proven in CI, with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24:
+
+| Database | Through | |
+| --- | --- | --- |
+| SQLite (`node:sqlite`) | Kysely (Better Auth's built-in adapter) | every test |
+| Cloudflare D1 (local, Miniflare) | Kysely | the outbox suite, D1's 100-parameter limit included |
+| PostgreSQL 17 | Kysely, Drizzle, Prisma 7 | the outbox suite |
+| MySQL 8.4 | Kysely, Drizzle | the outbox suite |
+| MongoDB 8.2 | Better Auth's MongoDB adapter | the outbox suite |
+
+The outbox suite is what differs between databases: leases, version checks, dates, booleans, `in` and `gt` queries, groups and reconcile. In the Drizzle and Prisma runs the tables come from Better Auth's migrator and the ORM schema from Better Auth's own table definitions, as `npx auth generate` builds it.
 
 It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested there in a real app, with D1, `waitUntil` and a Cron Trigger, against Cloudflare Access: 200 users were reconciled and delivered at about 6 users a second with the default concurrency.
 
@@ -368,6 +378,7 @@ pnpm install
 pnpm test        # SQLite and a mock SCIM app
 pnpm typecheck && pnpm lint && pnpm pack:check
 ADAPTER_DB=postgres ADAPTER_URL=postgres://postgres:test@localhost:5432/postgres npx vitest run test/adapters
+ADAPTER_DB=d1 npx vitest run test/adapters    # also drizzle-postgres, drizzle-mysql, prisma-postgres, mysql, mongodb
 ```
 
 The live tests (`test/live/`) run against real services when the git-ignored `.env.live` holds their settings (`SCIM_URL` and `SCIM_TOKEN`, `AWS_SCIM_URL` and `AWS_SCIM_TOKEN`, the `GOOGLE_*` ones): `npx vitest run -c vitest.live.config.ts`. Each file runs only with its settings.

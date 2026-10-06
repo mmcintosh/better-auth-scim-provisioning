@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Tests
+
+- **More databases in CI:** Cloudflare D1 (local, through Miniflare), Drizzle on PostgreSQL and MySQL, and Prisma 7 on PostgreSQL join SQLite, PostgreSQL, MySQL and MongoDB. A new test reconciles 150 linked users, more than D1 binds in one query; on D1 it fails without the batching that fixed this.
+
 ### Project
 
 - The release job stages with npm 12.2.0 (was 11.20.0).
