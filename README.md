@@ -89,11 +89,7 @@ Then:
      scheduled: (event, env, ctx) => ctx.waitUntil(getAuth(env).api.scimProvisioningRun({ body: {} })),
    };
    ```
-3. **Once, after adding or changing a target** (or to repair drift), queue everyone:
-   ```ts
-   await auth.api.scimProvisioningReconcile({ body: {} }); // { queued, next: null }: all at once
-   ```
-   With many users, or on Workers (which limits the work per invocation), go a page at a time (groups included):
+3. **Once, after adding or changing a target** (or to repair drift), queue everyone, a page at a time (500 by default, groups included; on Workers, which limits the work per invocation, keep pages small):
    ```ts
    let next: string | null = null;
    do {

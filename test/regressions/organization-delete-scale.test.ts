@@ -51,8 +51,14 @@ describe("organization delete and reconcile scale", () => {
       insert.run(`link-${i}`, `app:${userId}`, "app", userId, `r${i}`, `${userId}@example.com`, Date.now());
     }
     h.db.exec("COMMIT");
-    const r = await h.auth.api.scimProvisioningReconcile({ body: {} });
-    expect(r).toEqual({ queued: 10_001, next: null });
+    let queued = 0;
+    let next: string | null = null;
+    do {
+      const r: { queued: number; next: string | null } = await h.auth.api.scimProvisioningReconcile({ body: next ? { after: next, limit: 10_000 } : { limit: 10_000 } });
+      queued += r.queued;
+      next = r.next;
+    } while (next);
+    expect(queued).toBe(10_001);
   });
 
   it("reconcile in pages: each call takes up to `limit` and says where to go on", async () => {
