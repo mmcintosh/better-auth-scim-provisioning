@@ -6,6 +6,7 @@ import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
 import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
+import { registrySource, secretText, TARGET_MODEL } from "./registry";
 import type { ScimProvisioningOptions } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
@@ -14,16 +15,8 @@ export { SCIM_GROUP_SCHEMA, SCIM_USER_SCHEMA, ScimError, type ScimGroup, type Sc
 export type { ScimAuth } from "./credentials";
 export { type CheckId, type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SCHEMA_VERSION, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, WebhookSignatureError, webhookSignature } from "./webhook";
-export type { DeliveryFailure, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, WebhookTarget } from "./types";
+export type { DeliveryFailure, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
 
-
-/** A secret or header value: no control characters (a line break would break the request, and errors could repeat it). */
-const hasControl = (text: string) => [...text].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
-const secretText = (min = 1) =>
-  z
-    .string()
-    .min(min, min > 1 ? `must be at least ${min} characters` : undefined)
-    .refine((text) => !hasControl(text), "must not contain control characters (a line break or tab, say)");
 
 const targetSchema = z.strictObject({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
@@ -101,6 +94,7 @@ const optionsSchema = z.strictObject({
   retry: z.strictObject({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
   concurrency: z.number().int().min(1).max(32).optional(),
   onFailure: z.function().optional(),
+  registry: z.strictObject({ cacheSeconds: z.number().min(0).max(3600).optional(), allowHosts: z.array(z.string().min(1)).optional(), fetch: z.function().optional() }).optional(),
 });
 
 type SchemaDef = { type?: string; element?: unknown; innerType?: unknown; shape?: Record<string, unknown> };
@@ -188,6 +182,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     box: ReturnType<typeof outbox>;
     /** This instance's targets, looked up when used (in code, and with a registry, stored). */
     source: TargetSource;
+    adapter: Adapter;
     background: (p: Promise<unknown>) => void;
     /** A user's groups at each target, noted just before they're deleted (see delete.before). */
     deleting: Map<string, { at: number; groups: Map<string, GroupRef[]> }>;
@@ -201,7 +196,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
    */
   async function changed(s: State, userId: string, only?: string[], formerGroups?: Map<string, GroupRef[]>) {
     const { box: b, background } = s;
-    const targetIds = only ?? (await s.source.all()).map((t) => t.id);
+    const targetIds = only ?? (await relevantTargets(s, userId));
     for (const targetId of targetIds) {
       await b.enqueue(targetId, userId);
       // A deleted user's groups, noted before the delete: queued, so they're updated even if this
@@ -212,10 +207,24 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       background(
         (async () => {
           await b.runFor(targetId, userId);
-          if (target && b.hasGroups(target)) for (const ref of [...former, ...(await b.groupsOf(target, userId))]) await b.runFor(targetId, ref.id, ref.kind);
+          if (target && target !== "paused" && b.hasGroups(target)) for (const ref of [...former, ...(await b.groupsOf(target, userId))]) await b.runFor(targetId, ref.id, ref.kind);
         })(),
       );
     }
+  }
+
+  /**
+   * The targets a user's change concerns: every target for everyone, but an organization's
+   * target only for its members and for users with an account there (to deactivate). The others'
+   * deliveries would do nothing, and with a registry there's a target per organization.
+   */
+  async function relevantTargets(s: State, userId: string): Promise<string[]> {
+    const targets = await s.source.all();
+    if (!targets.some((t) => t.organizationId)) return targets.map((t) => t.id);
+    const adapter = s.adapter;
+    const orgs = new Set(((await adapter.findMany({ model: "member", where: [{ field: "userId", value: userId }] })) as { userId: string; organizationId: string }[]).filter((m) => m.userId === userId).map((m) => m.organizationId));
+    const linked = new Set(((await adapter.findMany({ model: LINK_MODEL, where: [{ field: "userId", value: userId }] })) as { userId: string; targetId: string }[]).filter((l) => l.userId === userId).map((l) => l.targetId));
+    return targets.filter((t) => !t.organizationId || orgs.has(t.organizationId) || linked.has(t.id)).map((t) => t.id);
   }
 
   /** Queue an organization's groups (its own, its teams', its roles') at every target, and deliver them in the background. */
@@ -289,6 +298,26 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           syncedAt: { type: "date", required: true },
         },
       },
+      // Only with the registry: a table nobody uses would still have to be migrated.
+      ...(options.registry
+        ? {
+            [TARGET_MODEL]: {
+              fields: {
+                targetId: { type: "string", required: true, unique: true },
+                /** The organization the target belongs to: the only one it receives. */
+                organizationId: { type: "string", required: true, index: true },
+                type: { type: "string", required: true },
+                /** Its settings, as JSON: data only. */
+                config: { type: "string", required: true },
+                /** Its credentials, encrypted with Better Auth's secret, bound to this target and organization. */
+                sealed: { type: "string", required: true },
+                enabled: { type: "boolean", required: true },
+                createdAt: { type: "date", required: true },
+                updatedAt: { type: "date", required: true },
+              },
+            },
+          }
+        : {}),
     },
     init(ctx) {
       // Options that need the organization plugin (or its teams) fail here, not on every delivery.
@@ -298,10 +327,14 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         if (needs.length && !org) throw new Error(`[scim] target ${t.id}: ${needs.join(", ")} need Better Auth's organization plugin`);
         if (t.teamGroups && !org?.options?.teams?.enabled) throw new Error(`[scim] target ${t.id}: teamGroups needs the organization plugin's teams (organization({ teams: { enabled: true } }))`);
       }
-      const source = staticTargets(options.targets);
+      if (options.registry && !org) throw new Error("[scim] registry needs Better Auth's organization plugin: every stored target belongs to an organization");
+      const source = options.registry
+        ? registrySource(options.targets, ctx.adapter as unknown as Adapter, ctx.secretConfig, options.registry, ctx.logger)
+        : staticTargets(options.targets);
       const s: State = {
         box: outbox(options, ctx.adapter as unknown as Adapter, ctx.logger, source),
         source,
+        adapter: ctx.adapter as unknown as Adapter,
         background: (p) => ctx.runInBackground(p.catch((e) => ctx.logger.error("[scim] delivery failed", e))),
         deleting: new Map(),
       };
@@ -361,7 +394,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           // returned: a member row names the user whose membership changed. Queue them for the
           // targets of that organization.
           matcher: (ctx) =>
-            options.targets.some((t) => t.organizationId || t.groups || t.teamGroups || t.roleGroups) &&
+            // Stored targets come and go at runtime, and all belong to an organization.
+            (!!options.registry || options.targets.some((t) => t.organizationId || t.groups || t.teamGroups || t.roleGroups)) &&
             (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path) || ORGANIZATION_WRITES.has(ctx.path) || TEAM_WRITES.has(ctx.path)),
           handler: createAuthMiddleware(async (ctx) => {
             const returned = (ctx.context as { returned?: unknown }).returned;
@@ -471,7 +505,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           if (!s) throw new Error("[scim] not initialised");
           const all = (await s.source.all()).map((t) => t.id);
           const { userId, organizationId, targetId } = ctx.body;
-          if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+          if (targetId !== undefined && !all.includes(targetId) && !(await s.source.get(targetId))) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           const targetIds = targetId ? [targetId] : all;
           let queued = 0;
           if (userId) {
@@ -521,7 +555,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           const targetList = await s.source.all();
           const all = targetList.map((t) => t.id);
           const targetId = ctx.body?.targetId;
-          if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+          if (targetId !== undefined && !all.includes(targetId) && !(await s.source.get(targetId))) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           const targetIds = targetId ? [targetId] : all;
           // A page at a time, 500 by default: all at once would run past a Workers invocation.
           let budget = ctx.body?.limit ?? 500;
