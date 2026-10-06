@@ -223,7 +223,7 @@ export interface TargetRegistryOptions {
    * the database has it now (never an impersonated or banned one). Without it, only organizations'
    * own administrators (`organizationRoles`) manage targets, each its own organization's.
    */
-  canManage?: ((ctx: { user: Record<string, unknown> & { id: string }; session: Record<string, unknown> }) => boolean | Promise<boolean>) | undefined;
+  canManage?: ((ctx: { user: { id: string; email: string; emailVerified: boolean } & Record<string, unknown>; session: Record<string, unknown> }) => boolean | Promise<boolean>) | undefined;
   /**
    * The organization roles whose holders manage their organization's targets; default
    * ["owner", "admin"]. [] leaves it to `canManage`.

@@ -73,7 +73,7 @@ export function createAuth(env: Env, o: { database?: unknown; waitUntil?: (promi
       }),
       // Each organization's owners and admins may also connect their own apps (/api/auth/scim-provisioning/targets);
       // ADMIN_EMAILS manage every organization's.
-      scimProvisioning({ targets: targetsFrom(env), registry: { canManage: ({ user }) => isAdmin(env, user as { email: string; emailVerified?: boolean | null }) } }),
+      scimProvisioning({ targets: targetsFrom(env), registry: { canManage: ({ user }) => isAdmin(env, user) } }),
     ],
   });
 }

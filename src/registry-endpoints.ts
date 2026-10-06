@@ -100,7 +100,7 @@ async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptio
   if (!s) throw refuse("FORBIDDEN", "sign in to manage targets");
   // An administrator acting as someone else doesn't manage targets as them.
   if (s.session.impersonatedBy) throw refuse("FORBIDDEN", "not while impersonating");
-  const user = (await ctx.context.internalAdapter.findUserById(s.user.id)) as (Record<string, unknown> & { id: string }) | null;
+  const user = (await ctx.context.internalAdapter.findUserById(s.user.id)) as ({ id: string; email: string; emailVerified: boolean } & Record<string, unknown>) | null;
   if (!user || isBanned(user)) throw refuse("FORBIDDEN", "not allowed");
   let host = false;
   if (options.canManage) {
