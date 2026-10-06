@@ -48,6 +48,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Changed
 
+- **The `@better-auth/core` peer dependency is gone:** nothing in the package uses it, and `better-auth` brings it with it.
 - **Taking over accounts made elsewhere is a choice per target: `adopt`**, on by default, **off by default for Google Workspace**, where it could reach someone's real mailbox. An account taken over is marked on its link (`adopted`) and is **never deleted, only deactivated**, even with `deprovision: "delete"`: it wasn't ours to delete. (Part of the 1.0 migration: links gain the `adopted` column.)
 - **Webhook URLs may have a query string** (Azure Functions' `?code=`, Logic Apps' signatures); SCIM URLs still may not, since paths are appended to them.
 - **`check`** takes `--url=…` as well as `--url …`, refuses unknown flags, and exits 1 only for an app the plugin can't work with: one that can't create, find or deactivate users, or update them with either PUT or PATCH (an app that only takes PATCH works with `update: "patch"`).
@@ -61,6 +62,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Documentation
 
+- The 1.0 contract made explicit ([versioning](docs/versioning.md)): `fetch` and Google's `url`/`tokenUrl` are supported options (a proxy, a service binding), lists of values (event types, failure kinds, check ids) can grow in a minor release, and the missing-column behaviour differs by database adapter. The README says what `occurredAt` (when the attempt was sent), `kind` and a role's `subjectId` mean; the upgrade guide covers the webhook id format, each adapter, and that deleted users' links are kept.
 - [docs/upgrading.md](docs/upgrading.md): upgrading from 0.3 to 1.0, step by step.
 - The README now claims only what's checked, after an independent review:
   - "verified live" says exactly what (Cloudflare Access groups were checked by hand in the field test; the automated live test covers users), and webhooks, which have no third party to verify against, are described as tested over HTTP;
