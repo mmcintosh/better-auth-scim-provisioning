@@ -57,6 +57,8 @@ export interface Link {
   /** The externalId we sent, to recognise the account as ours at the app. */
   externalId?: string | null;
   active: boolean;
+  /** Made elsewhere and taken over (adopt): never deleted by us, only deactivated. */
+  adopted?: boolean | null;
 }
 
 /**
@@ -170,7 +172,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return link && link.key === key ? link : null;
   }
 
-  async function saveLink(target: Target, userId: string, fields: { remoteId: string; userName: string; externalId: string | null; active: boolean }) {
+  async function saveLink(target: Target, userId: string, fields: { remoteId: string; userName: string; externalId: string | null; active: boolean; adopted?: boolean }) {
     const key = keyOf(target.id, userId);
     const update = { ...fields, syncedAt: new Date() };
     if ((await adapter.updateMany({ model: LINK_MODEL, where: [{ field: "key", value: key }], update })) > 0) return;
@@ -236,6 +238,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           return null;
         }
       }
+      // A pending link from an earlier attempt: that create may have made the account (its reply
+      // lost), so an account found now may be ours, whatever it looks like.
+      const pendingBefore = link !== null && !link.remoteId;
       // Pending first: if the reply to the create is lost, we still know to look for it. Pending
       // links have no id, so groups never list a user the app hasn't confirmed.
       await saveLink(target, userId, { remoteId: "", userName: scim.userName, externalId, active: true });
@@ -254,6 +259,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         // but only if it's ours, or nobody's and the email is verified.
         const found = await client.findByUserName(scim.userName);
         const refuse = async (why: string) => {
+          // After a lost reply, the account may be the one our own create made: the pending link
+          // is kept, so a later ban or delete still looks for it (and fails loudly if it can't
+          // tell), instead of leaving an account of ours active at the app with nothing to find it.
+          if (pendingBefore && (!found || found.externalId === null))
+            throw new ScimError(`${scim.userName}: a create's reply was lost, and ${why}, so we can't tell whether the app's account is ours; resolve it at the app`, 409, false);
           await dropLink(key);
           throw new ScimError(`${scim.userName}: ${why}; resolve it at the app`, 409, false);
         };
@@ -273,6 +283,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // account's userName is that address: a custom userName (mapUser) proves nothing about
           // who the account was made for.
           if ((user as ProvisionedUser).emailVerified !== true) return refuse("an account with this userName exists at the app, and the user's email is not verified");
+          // Taking over accounts made elsewhere is a choice per target: on by default, except at
+          // Google Workspace, where it could reach someone's real mailbox.
+          if (!(target.adopt ?? target.type !== "google-workspace"))
+            return refuse(`an account with this userName already exists at the app, and this target doesn't take over existing accounts (adopt: ${target.type === "google-workspace" ? "false, the default for Google Workspace" : "false"})`);
           // Taking it over would switch it back on, with whatever it held (at Google, someone's
           // mailbox): an admin decides that.
           if (found.active === false)
@@ -286,6 +300,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         }
         await (target.update === "patch" ? client.patch : client.replace)(found.id, scim);
         remoteId = found.id;
+        // Made elsewhere (not ours by externalId): adopted, so never deleted by us, only deactivated.
+        if (!ours) {
+          await saveLink(target, userId, { remoteId, userName: scim.userName, externalId, active: true, adopted: true });
+          return null;
+        }
       }
       await saveLink(target, userId, { remoteId, userName: scim.userName, externalId, active: true });
       return null;
@@ -296,7 +315,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (link && !link.remoteId) link = await settlePending(target, client, link);
     if (!link) return recheckAt;
     const externalId = link.externalId ?? null;
-    if ((target.deprovision ?? "deactivate") === "delete") {
+    // An adopted account wasn't made by us: it's deactivated, never deleted, whatever the target says.
+    if ((target.deprovision ?? "deactivate") === "delete" && !link.adopted) {
       // Inactive links too: a target switched from deactivate to delete.
       try {
         await client.remove(link.remoteId);

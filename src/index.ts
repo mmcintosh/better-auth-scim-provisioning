@@ -52,6 +52,7 @@ const targetSchema = z.strictObject({
     .optional(),
   include: z.function().optional(),
   requireVerifiedEmail: z.boolean().optional(),
+  adopt: z.boolean().optional(),
   organizationId: z.string().min(1).optional(),
   mapUser: z.function().optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
@@ -255,6 +256,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           userName: { type: "string", required: true },
           externalId: { type: "string", required: false },
           active: { type: "boolean", required: true },
+          /** Taken over from an account made elsewhere: never deleted, only deactivated. */
+          adopted: { type: "boolean", required: false },
           syncedAt: { type: "date", required: true },
         },
       },

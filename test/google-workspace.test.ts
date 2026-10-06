@@ -51,8 +51,8 @@ describe("Google Workspace", () => {
     expect(atGoogle(h)[0]!.externalIds).toEqual([{ type: "organization", value: "E-1234" }, { type: "custom", customType: "better-auth", value: u.id }]);
   });
 
-  it("adopts a Workspace user made by hand, marking it ours; refuses one that's another user's", async () => {
-    const h = await createHost({ targets: [G] });
+  it("with adopt: true, adopts a Workspace user made by hand, marking it ours; refuses one that's another user's", async () => {
+    const h = await createHost({ targets: [{ ...G, adopt: true }] });
     h.google.users.set("hand", { id: "hand", primaryEmail: "user1@example.com", name: { givenName: "Hand", familyName: "Made" }, suspended: false });
     const u = await h.user("Ada Lovelace");
     expect(h.google.users.get("hand")).toMatchObject({ externalIds: [{ type: "custom", customType: "better-auth", value: u.id }], name: { givenName: "Ada", familyName: "Lovelace" } });
