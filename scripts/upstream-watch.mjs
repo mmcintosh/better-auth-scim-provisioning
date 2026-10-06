@@ -109,6 +109,33 @@ const note = (key, fingerprint, summary) => {
   if (lines.length) sections.push(`## Held back on purpose\n\n${lines.join("\n")}`);
 }
 
+// pnpm overrides: each must be listed, with the package that brings the dependency in ("via",
+// optionally "name@major" for that major's newest stable release). When that release requires a
+// version at or above "fixedIn", the override can go.
+{
+  const overrides = pkg.pnpm?.overrides ?? {};
+  const listed = config.overrides ?? [];
+  const unlisted = Object.keys(overrides).filter((k) => !listed.some((o) => o.selector === k));
+  if (unlisted.length) throw new Error(`package.json pnpm.overrides has unwatched entries: ${unlisted.join(", ")} (add them to .github/upstream-watch.json)`);
+  const lines = [];
+  for (const o of listed) {
+    if (!(o.selector in overrides)) throw new Error(`.github/upstream-watch.json lists override ${o.selector}, which package.json doesn't have`);
+    const [, viaName, major] = /^(@?[^@]+)(?:@(\d+))?$/.exec(o.via) ?? [];
+    const meta = await npm(viaName);
+    const stable = Object.keys(meta.versions).filter((v) => /^\d+\.\d+\.\d+$/.test(v) && (!major || num(v)[0] === Number(major)));
+    const version = major ? stable.reduce((a, b) => (lt(a, b) ? b : a)) : meta["dist-tags"].latest;
+    const range = meta.versions[version]?.dependencies?.[o.dependency] ?? "(not a dependency any more)";
+    const min = /\d+\.\d+\.\d+/.exec(range)?.[0];
+    const fixed = o.fixedIn && min && !lt(min, o.fixedIn);
+    const gone = !min;
+    // The newest release only: our tree may still hold an older one (a test pool pinning an older
+    // miniflare), so "may go" means try removing it and check `pnpm why` and `pnpm audit`.
+    const status = gone || fixed ? `**may go**: ${viaName}@${version} ${gone ? "no longer depends on it" : `requires ${o.dependency} ${range}`}; remove it if \`pnpm why ${o.dependency}\` and \`pnpm audit\` agree.` : `still needed: ${viaName}@${version} requires ${o.dependency} ${range}${o.fixedIn ? ` (fixed in ${o.fixedIn})` : ""}.`;
+    lines.push(note(`override:${o.selector}`, `${version}:${range}`, `- \`${o.selector}\` → \`${overrides[o.selector]}\`: ${status} ${o.why}`));
+  }
+  if (lines.length) sections.push(`## pnpm overrides\n\n${lines.join("\n")}`);
+}
+
 const month = new Date().toISOString().slice(0, 7);
 if (config.monthly?.length) sections.push(`## Every month\n\n${config.monthly.map((m) => `- ${m}`).join("\n")}`);
 
