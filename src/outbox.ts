@@ -141,8 +141,23 @@ const clientFor = (target: Target, change?: string) =>
       ? webhookClient(target, change)
       : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
 
-export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }) {
-  const targets = new Map(options.targets.map((t) => [t.id, t]));
+/**
+ * Where the targets come from, looked up when they're used: the ones in code, and (with a
+ * registry) the ones stored by organizations. `get` is authoritative: null means the target
+ * doesn't exist (its jobs are then dropped), never "not in a cache yet".
+ */
+export interface TargetSource {
+  all(): Promise<Target[]>;
+  get(id: string): Promise<Target | null>;
+}
+
+/** The targets given in code, fixed at startup. */
+export function staticTargets(list: Target[]): TargetSource {
+  const byId = new Map(list.map((t) => [t.id, t]));
+  return { all: async () => list, get: async (id) => byId.get(id) ?? null };
+}
+
+export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }, source: TargetSource = staticTargets(options.targets)) {
   const maxAttempts = options.retry?.maxAttempts ?? 8;
   const baseDelayMs = options.retry?.baseDelayMs ?? 30_000;
   const backoff = (attempts: number) => Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** Math.max(0, attempts - 1));
@@ -408,7 +423,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    */
   async function run(job: Job, round = 0): Promise<Outcome> {
     const now = Date.now();
-    const lockedUntil = now + leaseFor(targets.get(job.targetId), job.kind);
+    const lockedUntil = now + leaseFor((await source.get(job.targetId)) ?? undefined, job.kind);
     const claimed = await adapter.updateMany({
       model: JOB_MODEL,
       // Still due and not failed, not just free: a worker holding an old list of due jobs must not
@@ -424,9 +439,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (claimed === 0) return "busy";
     const current = (await adapter.findOne({ model: JOB_MODEL, where: [{ field: "id", value: job.id }] })) as Job | null;
     if (!current) return "done";
-    const target = targets.get(current.targetId);
+    const target = await source.get(current.targetId);
     if (!target) {
-      // A target removed from the configuration: nothing to deliver to.
+      // A target removed from the configuration (or the registry): nothing to deliver to.
       await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }] });
       return "done";
     }
@@ -998,5 +1013,5 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     );
   }
 
-  return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, targets, status, userStatus, failures };
+  return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures };
 }

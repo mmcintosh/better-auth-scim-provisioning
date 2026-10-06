@@ -5,7 +5,7 @@ import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
-import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, JOB_MODEL, LINK_MODEL, outbox } from "./outbox";
+import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
 import type { ScimProvisioningOptions } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
@@ -186,6 +186,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
    */
   interface State {
     box: ReturnType<typeof outbox>;
+    /** This instance's targets, looked up when used (in code, and with a registry, stored). */
+    source: TargetSource;
     background: (p: Promise<unknown>) => void;
     /** A user's groups at each target, noted just before they're deleted (see delete.before). */
     deleting: Map<string, { at: number; groups: Map<string, GroupRef[]> }>;
@@ -197,15 +199,16 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
    * Queue (target, user) and try to deliver it right away, in the background; then, for targets
    * with groups, the user's organizations' groups, so a new user shows up in them at once.
    */
-  async function changed(s: State, userId: string, targetIds = options.targets.map((t) => t.id), formerGroups?: Map<string, GroupRef[]>) {
+  async function changed(s: State, userId: string, only?: string[], formerGroups?: Map<string, GroupRef[]>) {
     const { box: b, background } = s;
+    const targetIds = only ?? (await s.source.all()).map((t) => t.id);
     for (const targetId of targetIds) {
       await b.enqueue(targetId, userId);
       // A deleted user's groups, noted before the delete: queued, so they're updated even if this
       // delivery doesn't finish.
       const former = formerGroups?.get(targetId) ?? [];
       for (const ref of former) await b.enqueue(targetId, ref.id, { kind: ref.kind });
-      const target = options.targets.find((t) => t.id === targetId);
+      const target = await s.source.get(targetId);
       background(
         (async () => {
           await b.runFor(targetId, userId);
@@ -216,10 +219,10 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
   }
 
   /** Queue an organization's groups (its own, its teams', its roles') at every target, and deliver them in the background. */
-  async function groupChanged(s: State, organizationId: string, targetIds = options.targets.map((t) => t.id)): Promise<number> {
+  async function groupChanged(s: State, organizationId: string, only?: string[]): Promise<number> {
     const { box: b, background } = s;
     let queued = 0;
-    for (const t of options.targets.filter((x) => targetIds.includes(x.id) && b.hasGroups(x))) {
+    for (const t of (await s.source.all()).filter((x) => (!only || only.includes(x.id)) && b.hasGroups(x))) {
       const refs = await b.groupsForOrganization(t, organizationId);
       for (const ref of refs) await b.enqueue(t.id, ref.id, { kind: ref.kind });
       queued += refs.length;
@@ -231,7 +234,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
   /** Queue a team's group at every target with team groups (a removed team's group is removed). */
   async function teamChanged(s: State, teamId: string) {
     const { box: b, background } = s;
-    for (const t of options.targets.filter((x) => x.teamGroups)) {
+    for (const t of (await s.source.all()).filter((x) => x.teamGroups)) {
       await b.enqueue(t.id, teamId, { kind: "team" });
       background(b.runFor(t.id, teamId, "team"));
     }
@@ -295,8 +298,10 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         if (needs.length && !org) throw new Error(`[scim] target ${t.id}: ${needs.join(", ")} need Better Auth's organization plugin`);
         if (t.teamGroups && !org?.options?.teams?.enabled) throw new Error(`[scim] target ${t.id}: teamGroups needs the organization plugin's teams (organization({ teams: { enabled: true } }))`);
       }
+      const source = staticTargets(options.targets);
       const s: State = {
-        box: outbox(options, ctx.adapter as unknown as Adapter, ctx.logger),
+        box: outbox(options, ctx.adapter as unknown as Adapter, ctx.logger, source),
+        source,
         background: (p) => ctx.runInBackground(p.catch((e) => ctx.logger.error("[scim] delivery failed", e))),
         deleting: new Map(),
       };
@@ -323,7 +328,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                 before: async (user: { id: string }) => {
                   try {
                     const byTarget = new Map<string, GroupRef[]>();
-                    for (const t of options.targets) if (box.hasGroups(t)) byTarget.set(t.id, await box.groupsOf(t, user.id));
+                    for (const t of await s.source.all()) if (box.hasGroups(t)) byTarget.set(t.id, await box.groupsOf(t, user.id));
                     // Taken by delete.after; a delete stopped after this (another hook, a rollback)
                     // leaves it behind, so old notes are dropped here.
                     for (const [id, note] of deleting) if (note.at < Date.now() - 60_000) deleting.delete(id);
@@ -372,11 +377,11 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             };
             const members = membersIn(returned);
             for (const m of members) {
-              await queue(m.userId, options.targets.filter((t) => t.organizationId === m.organizationId).map((t) => t.id));
+              await queue(m.userId, (await s.source.all()).filter((t) => t.organizationId === m.organizationId).map((t) => t.id));
             }
             // Groups: the organization whose membership, roles, name or existence changed, and the
             // team that changed.
-            if (options.targets.some((t) => t.groups || t.teamGroups || t.roleGroups)) {
+            if ((await s.source.all()).some((t) => t.groups || t.teamGroups || t.roleGroups)) {
               const teamIds = new Set<string>();
               if (ctx.path && TEAM_WRITES.has(ctx.path)) {
                 const r = returned as { id?: unknown; teamId?: unknown; organizationId?: unknown } | null;
@@ -411,7 +416,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             // run in the background, one user at a time (never a burst at the app), and whatever
             // doesn't finish there is delivered by the scheduled run.
             const orgId = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
-            const orgTargets = options.targets.filter((t) => ctx.path === "/organization/delete" && typeof orgId === "string" && t.organizationId === orgId);
+            const orgTargets = (await s.source.all()).filter((t) => ctx.path === "/organization/delete" && typeof orgId === "string" && t.organizationId === orgId);
             const queued: [string, string][] = [];
             for (const t of orgTargets) {
               try {
@@ -443,7 +448,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       scimProvisioningStatus: createAuthEndpoint.serverOnly({ method: "POST", body: z.strictObject({ userId: z.string().min(1).optional() }).optional() }, async (ctx) => {
         const s = stateOf(ctx.context);
         if (!s) throw new Error("[scim] not initialised");
-        const ids = options.targets.map((t) => t.id);
+        const ids = (await s.source.all()).map((t) => t.id);
         const userId = ctx.body?.userId;
         return ctx.json(userId ? { user: await s.box.userStatus(userId, ids) } : { targets: await s.box.status(ids) });
       }),
@@ -464,7 +469,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         async (ctx) => {
           const s = stateOf(ctx.context);
           if (!s) throw new Error("[scim] not initialised");
-          const all = options.targets.map((t) => t.id);
+          const all = (await s.source.all()).map((t) => t.id);
           const { userId, organizationId, targetId } = ctx.body;
           if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           const targetIds = targetId ? [targetId] : all;
@@ -488,7 +493,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           const s = stateOf(ctx.context);
           if (!s) throw new Error("[scim] not initialised");
           const targetId = ctx.body?.targetId;
-          if (targetId !== undefined && !options.targets.some((t) => t.id === targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+          if (targetId !== undefined && !(await s.source.get(targetId))) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           return ctx.json(await s.box.failures({ targetId, after: ctx.body?.after, limit: ctx.body?.limit ?? 100 }));
         },
       ),
@@ -513,7 +518,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           const s = stateOf(ctx.context);
           if (!s) throw new Error("[scim] not initialised");
           const b = s.box;
-          const all = options.targets.map((t) => t.id);
+          const targetList = await s.source.all();
+          const all = targetList.map((t) => t.id);
           const targetId = ctx.body?.targetId;
           if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           const targetIds = targetId ? [targetId] : all;
@@ -590,10 +596,10 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           // then every linked group, so those whose organization, team or role is gone are removed
           // ("G:<target>:<last link key>"). Paged like the rest: on Workers and D1, doing all of
           // it in one call ran past the per-call limits once there were a few hundred organizations.
-          const groupTargets = options.targets.filter((x) => targetIds.includes(x.id) && b.hasGroups(x)).map((x) => x.id);
+          const groupTargets = targetList.filter((x) => targetIds.includes(x.id) && b.hasGroups(x)).map((x) => x.id);
           const [, phase = "g", fromGroupTarget = groupTargets[0], fromGroup = ""] = /^([gG]):([^:]*):(.*)$/.exec(cursor) ?? [];
           for (const t of groupTargets.slice(Math.max(0, groupTargets.indexOf(fromGroupTarget as string)))) {
-            const target = b.targets.get(t);
+            const target = targetList.find((x) => x.id === t);
             if (!target) continue;
             const resuming = t === fromGroupTarget;
             if (!resuming || phase === "g") {
