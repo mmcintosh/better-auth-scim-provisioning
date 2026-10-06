@@ -8,14 +8,15 @@ import { credentials, type ScimAuth } from "./credentials";
  * A SCIM base URL: https, or http to a loopback address; no credentials, query or fragment, which
  * would send the token elsewhere or break every path built on it.
  */
-export function targetUrl(value: string): boolean {
+export function targetUrl(value: string, o: { query?: boolean } = {}): boolean {
   let u: URL;
   try {
     u = new URL(value);
   } catch {
     return false;
   }
-  if (u.username || u.password || u.search || u.hash || value.includes("?") || value.includes("#")) return false;
+  // A query only where nothing is appended to the URL (a webhook's, e.g. Azure Functions' ?code=).
+  if (u.username || u.password || u.hash || value.includes("#") || (!o.query && (u.search || value.includes("?")))) return false;
   if (u.protocol === "https:") return true;
   return u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
 }

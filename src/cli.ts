@@ -13,12 +13,27 @@ Creates a throwaway user at the app, takes it through find, update, deactivate a
 and reports what works. The test user is deleted at the end.`;
 
 const [command, ...rest] = process.argv.slice(2);
+const KNOWN = new Set(["url", "user-name", "auth"]);
 const flags: Record<string, string> = {};
-for (let i = 0; i < rest.length; i += 2) flags[(rest[i] ?? "").replace(/^--/, "")] = rest[i + 1] ?? "";
+const badFlags: string[] = [];
+// --name value, or --name=value; anything else, or an unknown name, is a mistake worth saying.
+for (let i = 0; i < rest.length; i++) {
+  const arg = rest[i] ?? "";
+  const m = /^--([a-z-]+)(?:=(.*))?$/.exec(arg);
+  if (!m || !KNOWN.has(m[1] as string)) {
+    badFlags.push(arg);
+    continue;
+  }
+  flags[m[1] as string] = m[2] ?? rest[++i] ?? "";
+}
 
 if (command === "help" || command === "--help" || command === "-h") {
   console.log(usage);
   process.exit(0);
+}
+if (command === "check" && badFlags.length) {
+  console.error(`Unknown or malformed argument: ${badFlags.join(" ")}\n\n${usage}`);
+  process.exit(1);
 }
 if (command !== "check" || !flags.url) {
   // An unknown command, or check without --url: a mistake, so a failing exit code.
@@ -41,5 +56,8 @@ const results = await checkScimTarget({ url: flags.url, token: process.env.SCIM_
   process.exit(1);
 });
 for (const r of results) console.log(`${r.ok === true ? "✓" : r.ok === false ? "✗" : "–"} ${r.name}${r.detail ? `: ${r.detail}` : ""}`);
-const essential = ["create", "find", "update-put", "deactivate"];
-process.exit(results.some((r) => essential.includes(r.id) && r.ok === false) || !results.some((r) => r.id === "create" && r.ok) ? 1 : 0);
+// Fails an app the plugin can't work with: it can't create, find or deactivate users, or update
+// them either way (an app that only takes PATCH works with update: "patch").
+const failed = (id: string) => results.some((r) => r.id === id && r.ok === false);
+const unusable = ["create", "find", "deactivate"].some(failed) || (failed("update-put") && failed("update-patch")) || !results.some((r) => r.id === "create" && r.ok);
+process.exit(unusable ? 1 : 0);

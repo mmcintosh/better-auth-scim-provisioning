@@ -277,7 +277,7 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
       await h.ctx.adapter.create({ model: "scimProvisioningLink", data: { key: `app:gone-${i}`, targetId: "app", userId: `gone-${i}`, remoteId: `r${i}`, userName: `gone-${i}@example.com`, active: false, syncedAt: new Date() } });
     }
     expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({ queued: 150, next: null });
-  });
+  }, 120_000); // 150 rows written one at a time: slow on local D1 under load
 
   it("reconcile in pages (id order, gt and in queries)", async () => {
     const h = await host();

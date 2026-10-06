@@ -73,10 +73,15 @@ const RELEASED = new Date("2000-01-01T00:00:00.000Z");
  * could claim a job still being delivered.
  */
 const leaseFor = (target: Target | undefined, kind?: string | null) =>
-  // A group can take many requests (members read a page at a time, changed in batches).
-  (kind && kind !== "user" ? 60 : 12) * (target?.timeoutMs ?? 10_000) + 30_000;
+  kind && kind !== "user"
+    ? // A group can take many requests, but its hold is renewed every few seconds while it runs:
+      // short, so one cut off (a Worker ended) frees the group soon.
+      Math.max(3 * RENEW_EVERY_MS, 2 * (target?.timeoutMs ?? 10_000)) + 30_000
+    : 12 * (target?.timeoutMs ?? 10_000) + 30_000;
 /** How often a long (group) delivery renews its hold on the job. */
 const RENEW_EVERY_MS = 5_000;
+/** How long a delivery waits for the host's onFailure. */
+const ON_FAILURE_TIMEOUT_MS = 5_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
 const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
@@ -475,9 +480,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         where: [{ field: "id", value: current.id }, { field: "version", value: current.version }],
         update: { attempts, lastError: err.message.slice(0, 1000), lastStatus: err.status, lockedUntil: RELEASED, failed: giveUp, nextAttemptAt: new Date(Date.now() + wait), updatedAt: new Date() },
       });
-      if (loud && options.onFailure) {
+      // Only a failure that was recorded: a job bumped during delivery goes out again at once,
+      // so it hasn't failed. The host's hook gets a few seconds; this worker still holds the job.
+      if (loud && recorded > 0 && options.onFailure) {
+        const failure: DeliveryFailure = { targetId: target.id, kind: (isGroup ? current.kind : "user") as DeliveryFailure["kind"], subjectId: current.userId, error: err.message, status: err.status, attempts, failed: giveUp };
         try {
-          await options.onFailure({ targetId: target.id, kind: (isGroup ? current.kind : "user") as DeliveryFailure["kind"], subjectId: current.userId, error: err.message, status: err.status, attempts, failed: giveUp });
+          await Promise.race([options.onFailure(failure), new Promise((_, reject) => setTimeout(() => reject(new Error(`no answer within ${ON_FAILURE_TIMEOUT_MS / 1000} s`)), ON_FAILURE_TIMEOUT_MS))]);
         } catch (hookError) {
           log.error(`[scim] onFailure threw: ${(hookError as Error).message}`);
         }

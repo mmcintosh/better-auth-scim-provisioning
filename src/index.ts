@@ -29,7 +29,7 @@ const targetSchema = z.strictObject({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
   type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
   secret: secretText(32).optional(),
-  url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment").optional(),
+  url: z.string().optional(),
   google: z
     .strictObject({
       clientEmail: z.string().min(1),
@@ -88,6 +88,8 @@ const optionsSchema = z.strictObject({
     .array(
       targetSchema
         .refine((t) => t.type === "google-workspace" || t.url !== undefined, { message: "url is required", path: ["url"] })
+        .refine((t) => t.url === undefined || t.type === "webhook" || targetUrl(t.url), { message: "must be an https URL (http only for localhost), without credentials, query or fragment", path: ["url"] })
+        .refine((t) => t.url === undefined || t.type !== "webhook" || targetUrl(t.url, { query: true }), { message: "must be an https URL (http only for localhost), without credentials or fragment", path: ["url"] })
         .refine((t) => t.type === "google-workspace" || t.type === "webhook" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
         .refine((t) => t.type !== "webhook" || (t.secret !== undefined && t.token === undefined && t.auth === undefined && t.google === undefined), "a webhook target takes url and secret, not token, auth or google")
         .refine((t) => t.type === "webhook" || t.secret === undefined, "secret is for webhook targets")
