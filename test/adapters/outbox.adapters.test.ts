@@ -235,7 +235,9 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
       if (!r.next) break;
       after = r.next;
     }
-    expect(seen.sort()).toEqual(ids.sort());
+    // Every user's failure, none skipped. (MongoDB, without the UNIQUE key index, can hold a
+    // duplicate job for a user, listed too.)
+    expect([...new Set(seen)].sort()).toEqual(ids.sort());
   });
 
   it("reconcile covers existing and deleted users", async () => {
