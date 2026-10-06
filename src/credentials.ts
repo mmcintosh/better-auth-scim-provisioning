@@ -1,7 +1,7 @@
 // How a target's requests are authorised: a bearer token (most SCIM apps), Basic, a header of the
 // app's own (an API key), or OAuth 2.0 client credentials (Salesforce, Zoom, Microsoft Graph…),
 // whose access tokens are fetched, cached per isolate, and refreshed before they expire.
-import { ScimError } from "./scim-client";
+import { fetchFailure, ScimError } from "./scim-client";
 
 export type ScimAuth =
   | { type: "bearer"; token: string }
@@ -136,7 +136,7 @@ async function requestToken(tokenUrl: string, headers: Record<string, string>, f
   try {
     res = await (o.fetch ?? fetch)(tokenUrl, { method: "POST", headers, body: form.toString(), redirect: "manual", signal: AbortSignal.timeout(o.timeoutMs ?? 10_000) });
   } catch (e) {
-    throw new ScimError(`token request to ${host}: ${(e as Error).name === "TimeoutError" ? "no response" : (e as Error).message}`, null, true);
+    throw new ScimError(`token request to ${host}: ${fetchFailure(e, o.timeoutMs ?? 10_000)}`, null, true);
   }
   const json = (await res.json().catch(() => null)) as { access_token?: unknown; expires_in?: unknown; token_type?: unknown; error?: unknown } | null;
   if (!res.ok || typeof json?.access_token !== "string" || !json.access_token) {

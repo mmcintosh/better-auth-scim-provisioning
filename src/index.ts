@@ -17,11 +17,19 @@ export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SCHEMA_VERSION, W
 export type { DeliveryFailure, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, WebhookTarget } from "./types";
 
 
+/** A secret or header value: no control characters (a line break would break the request, and errors could repeat it). */
+const hasControl = (text: string) => [...text].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
+const secretText = (min = 1) =>
+  z
+    .string()
+    .min(min, min > 1 ? `must be at least ${min} characters` : undefined)
+    .refine((text) => !hasControl(text), "must not contain control characters (a line break or tab, say)");
+
 const targetSchema = z.strictObject({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
   type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
-  secret: z.string().min(32, "must be at least 32 characters").optional(),
-  url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment").optional(),
+  secret: secretText(32).optional(),
+  url: z.string().optional(),
   google: z
     .strictObject({
       clientEmail: z.string().min(1),
@@ -33,17 +41,17 @@ const targetSchema = z.strictObject({
       tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
     })
     .optional(),
-  token: z.string().min(1).optional(),
+  token: secretText().optional(),
   auth: z
     .discriminatedUnion("type", [
-      z.strictObject({ type: z.literal("bearer"), token: z.string().min(1) }),
-      z.strictObject({ type: z.literal("basic"), username: z.string().min(1), password: z.string().min(1) }),
-      z.strictObject({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,64}$/), value: z.string().min(1) }),
+      z.strictObject({ type: z.literal("bearer"), token: secretText() }),
+      z.strictObject({ type: z.literal("basic"), username: secretText(), password: secretText() }),
+      z.strictObject({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,64}$/), value: secretText() }),
       z.strictObject({
         type: z.literal("oauth2"),
         tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment"),
         clientId: z.string().min(1),
-        clientSecret: z.string().min(1),
+        clientSecret: secretText(),
         scope: z.string().optional(),
         clientAuth: z.enum(["body", "basic"]).optional(),
         params: z.record(z.string(), z.string()).optional(),
@@ -52,6 +60,7 @@ const targetSchema = z.strictObject({
     .optional(),
   include: z.function().optional(),
   requireVerifiedEmail: z.boolean().optional(),
+  adopt: z.boolean().optional(),
   organizationId: z.string().min(1).optional(),
   mapUser: z.function().optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
@@ -79,6 +88,8 @@ const optionsSchema = z.strictObject({
     .array(
       targetSchema
         .refine((t) => t.type === "google-workspace" || t.url !== undefined, { message: "url is required", path: ["url"] })
+        .refine((t) => t.url === undefined || t.type === "webhook" || targetUrl(t.url), { message: "must be an https URL (http only for localhost), without credentials, query or fragment", path: ["url"] })
+        .refine((t) => t.url === undefined || t.type !== "webhook" || targetUrl(t.url, { query: true }), { message: "must be an https URL (http only for localhost), without credentials or fragment", path: ["url"] })
         .refine((t) => t.type === "google-workspace" || t.type === "webhook" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
         .refine((t) => t.type !== "webhook" || (t.secret !== undefined && t.token === undefined && t.auth === undefined && t.google === undefined), "a webhook target takes url and secret, not token, auth or google")
         .refine((t) => t.type === "webhook" || t.secret === undefined, "secret is for webhook targets")
@@ -255,6 +266,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           userName: { type: "string", required: true },
           externalId: { type: "string", required: false },
           active: { type: "boolean", required: true },
+          /** Taken over from an account made elsewhere: never deleted, only deactivated. */
+          adopted: { type: "boolean", required: false },
           syncedAt: { type: "date", required: true },
         },
       },

@@ -1,13 +1,13 @@
 // Better Auth checks the plugin's schema at runtime: a changed table breaks every request until the
 // host migrates. So the schema is pinned here, and any change to it is deliberate and announced.
-// 0.1.0 to 0.3.x: unchanged. 1.0: group links gain `kind` and `subjectId` (optional, so rows
-// written before stay valid), instead of the kind being read from the key.
+// 0.1.0 to 0.3.x: unchanged. 1.0: group links gain `kind` and `subjectId`, and links `adopted`
+// (all optional, so rows written before stay valid).
 import { expect, it } from "vitest";
 import { scimProvisioning } from "../../src";
 
 const v1 = {
   scimProvisioningJob: ["key", "targetId", "userId", "version", "attempts", "nextAttemptAt", "lockedUntil", "failed", "lastError", "lastStatus", "kind", "createdAt", "updatedAt"],
-  scimProvisioningLink: ["key", "targetId", "userId", "remoteId", "userName", "externalId", "active", "syncedAt"],
+  scimProvisioningLink: ["key", "targetId", "userId", "remoteId", "userName", "externalId", "active", "adopted", "syncedAt"],
   scimProvisioningGroupLink: ["key", "targetId", "organizationId", "kind", "subjectId", "remoteId", "displayName", "syncedAt"],
 };
 

@@ -3,7 +3,7 @@
 // `group.upsert`, `group.delete`), signed with HMAC-SHA256, so anything that can receive an HTTPS
 // request can be provisioned: your own apps, or automation platforms. Delivery is at least once,
 // and applying an event twice is harmless; `occurredAt` lets a receiver drop an older state.
-import { retryAfterMs, ScimError, type ScimGroup, type ScimUser, type scimClient } from "./scim-client";
+import { fetchFailure, retryAfterMs, ScimError, type ScimGroup, type ScimUser, type scimClient } from "./scim-client";
 import type { WebhookTarget } from "./types";
 
 export const WEBHOOK_SIGNATURE_HEADER = "x-scim-provisioning-signature";
@@ -87,8 +87,8 @@ export async function verifyWebhookSignature(o: { body: string; signature: strin
 
 /**
  * A webhook client. `change` names the change being delivered (its job and version): an
- * event's id is derived from it, so every attempt of one change carries the same id, and the next
- * change (even back to an earlier state) a new one.
+ * event's id is derived from it and the event's content, so every attempt that sends the same
+ * thing carries the same id, and the next change (even back to an earlier state) a new one.
  */
 export function webhookClient(target: WebhookTarget, change?: string): ReturnType<typeof scimClient> {
   const doFetch = target.fetch ?? fetch;
@@ -96,8 +96,9 @@ export function webhookClient(target: WebhookTarget, change?: string): ReturnTyp
 
   const eventId = async (event: EventBody) => {
     if (!change) return crypto.randomUUID();
-    const subject = "user" in event ? event.user.externalId : event.group.externalId;
-    const digest = hex(await crypto.subtle.digest("SHA-256", encoder.encode(`${target.id}|${change}|${event.type}|${subject}`)));
+    // The change and the event's whole content: the same on every attempt that sends the same
+    // thing, and new if what's sent differs (a retry after a write that bypassed the hooks).
+    const digest = hex(await crypto.subtle.digest("SHA-256", encoder.encode(`${target.id}|${change}|${JSON.stringify(event)}`)));
     return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
   };
 
@@ -113,8 +114,7 @@ export function webhookClient(target: WebhookTarget, change?: string): ReturnTyp
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
-      const timedOut = (e as Error).name === "TimeoutError" || (e as Error).name === "AbortError";
-      throw new ScimError(`POST ${event.type}: ${timedOut ? `no response within ${timeoutMs} ms` : (e as Error).message}`, null, true);
+      throw new ScimError(`POST ${event.type}: ${fetchFailure(e, timeoutMs)}`, null, true);
     }
     if (res.ok) return;
     const detail = (await res.text().catch(() => "")).slice(0, 300);

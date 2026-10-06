@@ -29,6 +29,14 @@ export interface TargetOptions {
    * account that already exists at the app is still adopted only for a verified email.
    */
   requireVerifiedEmail?: boolean | undefined;
+  /**
+   * Take over an account that already exists at the app, made by hand or by another tool, when
+   * it's nobody's (no externalId, not linked here), active, and its userName is the user's
+   * verified email. On by default, except for Google Workspace, where it could reach someone's
+   * real mailbox. An account taken over is never deleted by this plugin, only deactivated, even
+   * with `deprovision: "delete"`.
+   */
+  adopt?: boolean | undefined;
   /** Only members of this organization (Better Auth's organization plugin). */
   organizationId?: string | undefined;
   /** The SCIM user sent; default: userName = email, names split from `name`, one primary email. */

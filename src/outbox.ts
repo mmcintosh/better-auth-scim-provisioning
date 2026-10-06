@@ -57,6 +57,8 @@ export interface Link {
   /** The externalId we sent, to recognise the account as ours at the app. */
   externalId?: string | null;
   active: boolean;
+  /** Made elsewhere and taken over (adopt): never deleted by us, only deactivated. */
+  adopted?: boolean | null;
 }
 
 /**
@@ -71,10 +73,15 @@ const RELEASED = new Date("2000-01-01T00:00:00.000Z");
  * could claim a job still being delivered.
  */
 const leaseFor = (target: Target | undefined, kind?: string | null) =>
-  // A group can take many requests (members read a page at a time, changed in batches).
-  (kind && kind !== "user" ? 60 : 12) * (target?.timeoutMs ?? 10_000) + 30_000;
+  kind && kind !== "user"
+    ? // A group can take many requests, but its hold is renewed every few seconds while it runs:
+      // short, so one cut off (a Worker ended) frees the group soon.
+      Math.max(3 * RENEW_EVERY_MS, 2 * (target?.timeoutMs ?? 10_000)) + 30_000
+    : 12 * (target?.timeoutMs ?? 10_000) + 30_000;
 /** How often a long (group) delivery renews its hold on the job. */
 const RENEW_EVERY_MS = 5_000;
+/** How long a delivery waits for the host's onFailure. */
+const ON_FAILURE_TIMEOUT_MS = 5_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
 const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
@@ -89,8 +96,24 @@ export const groupKeyOf = (targetId: string, organizationId: string) => `${targe
 /** "group" is an organization's group (its key and kind kept from 0.1.0); "team" and "role" are the others. */
 export type Kind = "user" | "group" | "team" | "role";
 export type GroupRef = { kind: Exclude<Kind, "user">; id: string };
+/**
+ * A role group's id is "<organization id>:<role>", and roles are named by people: "Admin" and
+ * "admin" can both exist. Keys must stay distinct under a case-insensitive collation (MySQL's), so
+ * a role with anything beyond [a-z0-9_-] is written as "~" and its UTF-8 in hex. Plain roles keep
+ * the form 0.3 wrote, so their links and jobs are found as before.
+ */
+const SAFE_ROLE = /^[a-z0-9_-]*$/;
+const hexOf = (text: string) => [...new TextEncoder().encode(text)].map((b) => b.toString(16).padStart(2, "0")).join("");
+const textOfHex = (hex: string) => new TextDecoder().decode(Uint8Array.from(hex.match(/../g) ?? [], (h) => Number.parseInt(h, 16)));
+const roleKeyPart = (id: string) => {
+  const at = id.indexOf(":");
+  const role = id.slice(at + 1);
+  return SAFE_ROLE.test(role) ? id : `${id.slice(0, at)}:~${hexOf(role)}`;
+};
 const keyFor = (kind: Kind, targetId: string, id: string) =>
-  kind === "user" ? keyOf(targetId, id) : kind === "group" ? groupKeyOf(targetId, id) : `${targetId}:${kind}:${id}`;
+  kind === "user" ? keyOf(targetId, id) : kind === "group" ? groupKeyOf(targetId, id) : `${targetId}:${kind}:${kind === "role" ? roleKeyPart(id) : id}`;
+/** The key 0.3 wrote for a role group, unencoded: found and moved to the new key once. */
+const legacyRoleKey = (targetId: string, id: string) => `${targetId}:role:${id}`;
 
 export interface GroupLink {
   id: string;
@@ -170,7 +193,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return link && link.key === key ? link : null;
   }
 
-  async function saveLink(target: Target, userId: string, fields: { remoteId: string; userName: string; externalId: string | null; active: boolean }) {
+  async function saveLink(target: Target, userId: string, fields: { remoteId: string; userName: string; externalId: string | null; active: boolean; adopted?: boolean }) {
     const key = keyOf(target.id, userId);
     const update = { ...fields, syncedAt: new Date() };
     if ((await adapter.updateMany({ model: LINK_MODEL, where: [{ field: "key", value: key }], update })) > 0) return;
@@ -236,6 +259,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           return null;
         }
       }
+      // A pending link from an earlier attempt: that create may have made the account (its reply
+      // lost), so an account found now may be ours, whatever it looks like.
+      const pendingBefore = link !== null && !link.remoteId;
       // Pending first: if the reply to the create is lost, we still know to look for it. Pending
       // links have no id, so groups never list a user the app hasn't confirmed.
       await saveLink(target, userId, { remoteId: "", userName: scim.userName, externalId, active: true });
@@ -254,6 +280,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         // but only if it's ours, or nobody's and the email is verified.
         const found = await client.findByUserName(scim.userName);
         const refuse = async (why: string) => {
+          // After a lost reply, the account may be the one our own create made: the pending link
+          // is kept, so a later ban or delete still looks for it (and fails loudly if it can't
+          // tell), instead of leaving an account of ours active at the app with nothing to find it.
+          if (pendingBefore && (!found || found.externalId === null))
+            throw new ScimError(`${scim.userName}: a create's reply was lost, and ${why}, so we can't tell whether the app's account is ours; resolve it at the app`, 409, false);
           await dropLink(key);
           throw new ScimError(`${scim.userName}: ${why}; resolve it at the app`, 409, false);
         };
@@ -273,6 +304,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // account's userName is that address: a custom userName (mapUser) proves nothing about
           // who the account was made for.
           if ((user as ProvisionedUser).emailVerified !== true) return refuse("an account with this userName exists at the app, and the user's email is not verified");
+          // Taking over accounts made elsewhere is a choice per target: on by default, except at
+          // Google Workspace, where it could reach someone's real mailbox.
+          if (!(target.adopt ?? target.type !== "google-workspace"))
+            return refuse(`an account with this userName already exists at the app, and this target doesn't take over existing accounts (adopt: ${target.type === "google-workspace" ? "false, the default for Google Workspace" : "false"})`);
           // Taking it over would switch it back on, with whatever it held (at Google, someone's
           // mailbox): an admin decides that.
           if (found.active === false)
@@ -286,6 +321,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         }
         await (target.update === "patch" ? client.patch : client.replace)(found.id, scim);
         remoteId = found.id;
+        // Made elsewhere (not ours by externalId): adopted, so never deleted by us, only deactivated.
+        if (!ours) {
+          await saveLink(target, userId, { remoteId, userName: scim.userName, externalId, active: true, adopted: true });
+          return null;
+        }
       }
       await saveLink(target, userId, { remoteId, userName: scim.userName, externalId, active: true });
       return null;
@@ -296,7 +336,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (link && !link.remoteId) link = await settlePending(target, client, link);
     if (!link) return recheckAt;
     const externalId = link.externalId ?? null;
-    if ((target.deprovision ?? "deactivate") === "delete") {
+    // An adopted account wasn't made by us: it's deactivated, never deleted, whatever the target says.
+    if ((target.deprovision ?? "deactivate") === "delete" && !link.adopted) {
       // Inactive links too: a target switched from deactivate to delete.
       try {
         await client.remove(link.remoteId);
@@ -439,9 +480,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         where: [{ field: "id", value: current.id }, { field: "version", value: current.version }],
         update: { attempts, lastError: err.message.slice(0, 1000), lastStatus: err.status, lockedUntil: RELEASED, failed: giveUp, nextAttemptAt: new Date(Date.now() + wait), updatedAt: new Date() },
       });
-      if (loud && options.onFailure) {
+      // Only a failure that was recorded: a job bumped during delivery goes out again at once,
+      // so it hasn't failed. The host's hook gets a few seconds; this worker still holds the job.
+      if (loud && recorded > 0 && options.onFailure) {
+        const failure: DeliveryFailure = { targetId: target.id, kind: (isGroup ? current.kind : "user") as DeliveryFailure["kind"], subjectId: current.userId, error: err.message, status: err.status, attempts, failed: giveUp };
         try {
-          await options.onFailure({ targetId: target.id, kind: (isGroup ? current.kind : "user") as DeliveryFailure["kind"], subjectId: current.userId, error: err.message, status: err.status, attempts, failed: giveUp });
+          await Promise.race([options.onFailure(failure), new Promise((_, reject) => setTimeout(() => reject(new Error(`no answer within ${ON_FAILURE_TIMEOUT_MS / 1000} s`)), ON_FAILURE_TIMEOUT_MS))]);
         } catch (hookError) {
           log.error(`[scim] onFailure threw: ${(hookError as Error).message}`);
         }
@@ -642,7 +686,15 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const client = clientFor(target, change);
     const key = keyFor(ref.kind, target.id, ref.id);
     const externalId = externalIdOf(ref);
-    const link = await findGroupLink(key);
+    let link = await findGroupLink(key);
+    // A role group linked by 0.3 under its unencoded key: moved to the new key, so it's still ours.
+    if (!link && ref.kind === "role" && key !== legacyRoleKey(target.id, ref.id)) {
+      const legacy = await findGroupLink(legacyRoleKey(target.id, ref.id));
+      if (legacy) {
+        await adapter.updateMany({ model: GROUP_LINK_MODEL, where: [{ field: "id", value: legacy.id }], update: { key, kind: ref.kind, subjectId: ref.id } });
+        link = { ...legacy, key };
+      }
+    }
     const now = await resolveGroup(target, ref);
 
     if (!now?.wanted) {
@@ -835,7 +887,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const rest = l.key.slice(l.targetId.length + 1);
     const at = rest.indexOf(":");
     const kind = rest.slice(0, at);
-    return kind === "team" || kind === "role" ? { kind, id: rest.slice(at + 1) } : { kind: "group", id: l.organizationId };
+    if (kind === "role") {
+      const id = rest.slice(at + 1);
+      const sep = id.indexOf(":");
+      return { kind, id: id.slice(sep + 1).startsWith("~") ? `${id.slice(0, sep)}:${textOfHex(id.slice(sep + 2))}` : id };
+    }
+    return kind === "team" ? { kind, id: rest.slice(at + 1) } : { kind: "group", id: l.organizationId };
   };
   const uniqueRefs = (refs: GroupRef[]) => [...new Map(refs.map((r) => [`${r.kind}:${r.id}`, r])).values()];
 

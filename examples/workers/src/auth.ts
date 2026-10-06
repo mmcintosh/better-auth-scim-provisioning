@@ -22,6 +22,11 @@ export interface Env {
 }
 
 export const admins = (env: Env) => (env.ADMIN_EMAILS ?? "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+/**
+ * Whether this user is one of ADMIN_EMAILS: by a verified address only, so the rule still holds
+ * if sign-in providers that don't verify addresses are added, or verification is turned off.
+ */
+export const isAdmin = (env: Env, user: { email: string; emailVerified?: boolean | null }) => user.emailVerified === true && admins(env).includes(user.email.toLowerCase());
 
 /** The provisioning targets this deployment has settings for: a SCIM app, a webhook, or both. Each
  * organization is a group at each of them (`groups`). */
@@ -59,10 +64,10 @@ export function createAuth(env: Env, o: { database?: unknown; waitUntil?: (promi
       // otherwise create one with any name (say "Administrators"), and an organization's own
       // admins could rename it to one, so only ADMIN_EMAILS may create or rename them here.
       organization({
-        allowUserToCreateOrganization: async (user) => admins(env).includes(user.email.toLowerCase()),
+        allowUserToCreateOrganization: async (user) => isAdmin(env, user),
         organizationHooks: {
           beforeUpdateOrganization: async ({ organization: changes, user }) => {
-            if (changes.name !== undefined && !admins(env).includes(user.email.toLowerCase())) throw new APIError("FORBIDDEN", { message: "only admins may rename organizations (the name is the group's name at the apps)" });
+            if (changes.name !== undefined && !isAdmin(env, user)) throw new APIError("FORBIDDEN", { message: "only admins may rename organizations (the name is the group's name at the apps)" });
           },
         },
       }),

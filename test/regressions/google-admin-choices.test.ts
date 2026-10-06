@@ -20,8 +20,8 @@ it("orgUnitPath places new users and never moves an existing one", async () => {
   expect(g.orgUnitPath).toBe("/Executives");
 });
 
-it("a suspended Workspace account made by hand is not taken over", async () => {
-  const h = await createHost({ targets: [{ id: "workspace", type: "google-workspace" }] });
+it("a suspended Workspace account made by hand is not taken over, even with adopt: true", async () => {
+  const h = await createHost({ targets: [{ id: "workspace", type: "google-workspace", adopt: true }] });
   h.google.users.set("hand", { id: "hand", primaryEmail: "user1@example.com", name: { givenName: "Ex", familyName: "Employee" }, suspended: true });
   const u = await h.user("Ex Employee");
   expect(h.google.users.get("hand")!.suspended).toBe(true);

@@ -5,7 +5,7 @@
 // each with an email address derived from its externalId (so a rename never changes it), marked
 // ours in its description, with members added and removed one at a time.
 import { credentials } from "./credentials";
-import { retryAfterMs, ScimError, type ScimGroup, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
+import { fetchFailure, retryAfterMs, ScimError, type ScimGroup, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
 import type { Target } from "./types";
 
 export const GOOGLE_DIRECTORY_URL = "https://admin.googleapis.com/admin/directory/v1";
@@ -55,8 +55,7 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
-      const timedOut = (e as Error).name === "TimeoutError" || (e as Error).name === "AbortError";
-      throw new ScimError(`${method} ${path}: ${timedOut ? `no response within ${timeoutMs} ms` : (e as Error).message}`, null, true);
+      throw new ScimError(`${method} ${path}: ${fetchFailure(e, timeoutMs)}`, null, true);
     }
     const text = await res.text();
     let json: { error?: { code?: unknown; message?: unknown } } & GoogleUser = {};

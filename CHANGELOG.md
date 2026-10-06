@@ -21,6 +21,12 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Fixed
 
+- **Our own account is never left unfindable after a lost create reply.** At an app that drops `externalId`, when the retry couldn't tell the account was ours (a custom `userName`, an unverified email), the pending link was dropped: the account stayed active at the app, and a later ban or delete "succeeded" without a request. The link is kept now, and a later leave fails loudly ("resolve it at the app") instead.
+- **Role names that differ only by case** (`Admin`, `admin`) **keep apart on MySQL**, whose keys compare case-insensitively: queueing failed with a duplicate-key error, and one role's group link could overwrite the other's. Roles with anything beyond `a-z0-9_-` are encoded in keys; links 0.3 wrote for them move to the new key on their next delivery.
+- **Secrets never appear in errors.** A token with a line break made the request fail with an error repeating the header, secret included, into logs, `lastError`, `scimProvisioningFailures`, `onFailure` and `check`'s output. Secrets with control characters are refused at startup, and such an error never repeats the header.
+- **`onFailure` isn't told about a delivery that's going out again at once** (bumped during it), and gets 5 seconds before the delivery moves on.
+- **A group delivery holds its job for about a minute** (renewed while it runs), not ten or more, so one cut off with its Worker frees the group soon.
+- **A webhook event's `id` also covers its content**: a retry sending something different (after a write that bypassed Better Auth's hooks) gets a new id.
 - **OAuth and Google tokens no longer stall deliveries on Workers.** A token fetch in progress was shared by every request in the isolate; on Workers, a fetch started by a request that has ended is cancelled, so later deliveries waiting on it waited for ever (reproduced in workerd). Only tokens that have arrived are shared now.
 - **An account deactivated at a SCIM app is no longer adopted and switched back on.** A new user with the same verified address (a rehire, a recycled address) reactivated it, with its old data and permissions. It's refused now, as Google's suspended accounts already were: reactivate it at the app first if it should be taken over.
 - **Options that need Better Auth's organization plugin** (`organizationId`, `groups`, `roleGroups`), **or its teams** (`teamGroups`), **stop the plugin at startup** without it. Every reconcile, or every user's delivery, failed instead.
@@ -42,6 +48,9 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Changed
 
+- **Taking over accounts made elsewhere is a choice per target: `adopt`**, on by default, **off by default for Google Workspace**, where it could reach someone's real mailbox. An account taken over is marked on its link (`adopted`) and is **never deleted, only deactivated**, even with `deprovision: "delete"`: it wasn't ours to delete. (Part of the 1.0 migration: links gain the `adopted` column.)
+- **Webhook URLs may have a query string** (Azure Functions' `?code=`, Logic Apps' signatures); SCIM URLs still may not, since paths are appended to them.
+- **`check`** takes `--url=…` as well as `--url …`, refuses unknown flags, and exits 1 only for an app the plugin can't work with: one that can't create, find or deactivate users, or update them with either PUT or PATCH (an app that only takes PATCH works with `update: "patch"`).
 - **Endpoint parameters are checked strictly**, like the options: an unknown one (`targetID` for `targetId`) is refused instead of ignored, and a reconcile cursor it didn't hand out is refused (it used to report `next: null` having done nothing).
 - **A reconcile called the 0.3 way** (no `limit`, no `after`) that stops at its default page logs a warning saying to call again with `after: next`.
 - **The CLI exits 1 for an unknown command** (it exited 0); `help` exits 0.
@@ -63,7 +72,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Examples
 
-- **A Workers example** ([examples/workers](examples/workers)): Better Auth on D1 provisioning to a SCIM app and/or a signed webhook, with `waitUntil`, a Cron Trigger for retries, organizations as groups (only admins create or rename them), email verification, and admin routes to see the queue, run and reconcile. CI runs it inside workerd through Miniflare (sign-up to deletion, a retry delivered by the Cron Trigger, the committed migration checked against Better Auth's), and builds it as installed from npm.
+- **A Workers example** ([examples/workers](examples/workers)): Better Auth on D1 provisioning to a SCIM app and/or a signed webhook, with `waitUntil`, a Cron Trigger for retries, organizations as groups (only admins, by verified email, create or rename them), email verification, and admin routes to see the queue, run and reconcile. CI runs it inside workerd through Miniflare (sign-up to deletion, a retry delivered by the Cron Trigger, the committed migration checked against Better Auth's), and builds it as installed from npm.
 
 ### Tests
 

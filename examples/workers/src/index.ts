@@ -1,7 +1,7 @@
 // A Worker that provisions its Better Auth users to a SCIM app (and/or a signed webhook): D1 for
 // the database, waitUntil for deliveries after the response, and a Cron Trigger for retries.
 import { waitUntil } from "cloudflare:workers";
-import { admins, createAuth, type Env } from "./auth";
+import { createAuth, type Env, isAdmin } from "./auth";
 
 // DEVELOPMENT ONLY (DEV_MAILBOX="true"): verification links by email address. Per isolate, so
 // with several isolates a link may not be found; it's for `wrangler dev` and tests.
@@ -28,7 +28,7 @@ const json = (body: unknown, status = 200) => Response.json(body, { status });
 /** The signed-in user, if their email is in ADMIN_EMAILS. */
 async function admin(request: Request, env: Env) {
   const session = await (await authFor(env)).api.getSession({ headers: request.headers });
-  return session && admins(env).includes(session.user.email.toLowerCase()) ? session.user : null;
+  return session && isAdmin(env, session.user) ? session.user : null;
 }
 
 export default {
