@@ -25,6 +25,7 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 - 🤝 **Careful adoption**: an account that already exists at the app is taken over only where you allow it (`adopt`, off by default for Google Workspace), only if it's nobody's and its userName is the user's verified email, and it's then only ever deactivated, never deleted. Never handed to someone who reused a deleted user's email.
 - 🧩 **Profiles for real apps**: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`, each built from the app's documented quirks (no PUT on groups, batches of 100, groups that can't be renamed…).
 - 🔑 **Every sign-in method apps use**: bearer tokens, Basic, an API-key header, OAuth 2.0 client credentials, and Google service accounts with domain-wide delegation.
+- 🏢 **Organizations' own targets**: with `registry`, each organization connects its own SCIM app, Google Workspace or webhook at runtime, through an API its owners and admins use, with credentials encrypted and never shown again, and only its own members sent there.
 - 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
 - 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports.
 - 📈 **You can see it**: `scimProvisioningStatus` counts what's queued, stuck and failed at each target (or shows one user's state), `onFailure` tells you when a delivery gives up or keeps failing, and failures are logged with the app's own message.
@@ -43,7 +44,7 @@ The live tests run by hand with real credentials, not in CI. Webhooks have no th
 
 ## Contents
 
-[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Google Workspace](#google-workspace) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
+[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Google Workspace](#google-workspace) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Organizations' own targets](#organizations-own-targets) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
 
 ## Install
 
@@ -392,6 +393,51 @@ For other auth methods, `--auth auth.json`, a file holding the `auth` object as 
 
  From code (an admin page's "test connection"), `checkScimTarget({ url, token | auth })` returns the same results.
 
+## Organizations' own targets
+
+With `registry`, each organization can connect its own apps at runtime (its SCIM app, its Google Workspace domain, a webhook), the way better-auth-saml-idp's registry does for service providers. A stored target belongs to one organization and only ever receives that organization's members and groups. Targets in code work as before, alongside.
+
+```ts
+scimProvisioning({
+  targets: [], // or your own, as before
+  registry: {
+    // Your own administrators manage every organization's targets (optional).
+    canManage: ({ user }) => user.role === "admin",
+    // And each organization's owners and admins manage their own (the default; [] turns it off).
+    organizationRoles: ["owner", "admin"],
+  },
+}),
+```
+
+It needs Better Auth's organization plugin, and adds a table, `scimProvisioningTarget`: run your migration (`npx auth migrate`, or generate your ORM's schema) after turning it on. Without `registry` the table and the endpoints don't exist.
+
+```ts
+// Connect an app to an organization (as one of its owners or admins). The id is generated.
+const { target } = await authClient.$fetch("/scim-provisioning/targets/create", {
+  method: "POST",
+  body: {
+    organizationId,
+    settings: { name: "Slack", url: "https://api.slack.com/scim/v2", profile: "slack", groups: true },
+    credentials: { token: "xoxp-…" },
+  },
+});
+// The organization's members and groups are queued at once; later changes follow as for any target.
+
+GET  /scim-provisioning/targets?organizationId=…           // list (a host administrator may omit organizationId)
+POST /scim-provisioning/targets/update  { id, settings?, credentials?, enabled? }
+POST /scim-provisioning/targets/check   { id }               // try the URL and credentials, changing nothing
+POST /scim-provisioning/targets/delete  { id }
+```
+
+On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget` and `…DeleteTarget`, with the user's headers.
+
+- **Settings** are the target options that are data: `type`, `url`, `profile` (by name: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`), `update`, `compat`, `groups`, `teamGroups`, `roleGroups`, `adopt`, `deprovision`, `requireVerifiedEmail`, `timeoutMs`, and for Google Workspace `google: { clientEmail, adminEmail, orgUnitPath?, groupDomain? }`; plus a `name` for people. Functions (`mapUser`, `include`, the group name functions) and `organizationId` can't be stored: the organization is always the owner.
+- **Credentials** are one of `{ token }`, `{ auth: { type: "basic" | "header" | "oauth2", … } }` (as in [Targets](#targets)), `{ secret }` for a webhook and `{ privateKey }` for Google Workspace. They're encrypted with Better Auth's secret (its rotation, `secrets`, included), tied to the target and organization, and never returned: a target shows only their `kind`. A webhook URL's query string (an Azure Function's `?code=`) is hidden too. If Better Auth's secret changes without rotation, stored credentials can't be read: those targets pause (logged), and new credentials resume them.
+- **Who may**: a signed-in user with a fresh session, as the database has them now (not banned, not impersonating): a host administrator (`canManage`) for every organization, or an owner or admin (`organizationRoles`) of the target's organization. Someone else's target is a 404. Changes are logged with the acting user.
+- **URLs** must be `https://` and public, as your server calls them: no `localhost`, names without a dot, `.local` or `.internal`, and no private, loopback, link-local, shared or reserved address, however it's written. Redirects are never followed. `allowHosts: ["scim.internal.example"]` makes exceptions. A public name that resolves to a private address can't be caught by looking at the URL (Workers can't resolve names): if your server can reach internal services, give the registry a `fetch` that refuses them, or one that goes through an egress proxy.
+- **Disabling** (`enabled: false`) pauses a target: its jobs wait and go out when it's enabled again, with the organization queued again. **Deleting** removes the target, its queued jobs and its record of the accounts and groups it made; the accounts at the app stay as they are. Deleting the organization deprovisions its members through its targets as usual; the targets themselves stay until deleted (by a host administrator).
+- **Limits**: `maxTargetsPerOrganization` (default 10). The list of stored targets is cached for `cacheSeconds` (default 60) on each server; a new target's jobs are delivered at once all the same, but a change or removal can take that long to reach every server.
+
 ## Databases and runtimes
 
 Proven in CI. The whole suite runs on SQLite with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24; the database suite runs on Node.js 24 with the Better Auth version in the lockfile:
@@ -412,7 +458,6 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. CI runs [the 
 
 ## Not yet
 
-- **Targets per organization, managed at runtime**: each organization connecting its own app (URL and token, stored encrypted), as better-auth-saml-idp's registry does for service providers. Targets are set in code today.
 - **Microsoft 365 / Entra ID** as a target (through Microsoft Graph), the other big suite after Google Workspace.
 - **Live verification of the Slack, Atlassian and GitHub Enterprise profiles.** They're built from each app's documentation and tested against a model.
 
