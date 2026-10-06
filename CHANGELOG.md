@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-06
+
+The first stable release: the API, the webhook format and the database schema are now covered by the versioning promise (docs/versioning.md).
+
 **Upgrading from 0.3 needs a database migration, and options or calls 0.3 ignored now stop the plugin: follow [docs/upgrading.md](docs/upgrading.md).**
 
 ### Added
