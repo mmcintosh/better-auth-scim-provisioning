@@ -36,5 +36,5 @@ const results = await checkScimTarget({ url: flags.url, token: process.env.SCIM_
   process.exit(1);
 });
 for (const r of results) console.log(`${r.ok === true ? "✓" : r.ok === false ? "✗" : "–"} ${r.name}${r.detail ? `: ${r.detail}` : ""}`);
-const essential = ["create a user", "find by userName", "update with PUT", "deactivate (PATCH active false)"];
-process.exit(results.some((r) => essential.includes(r.name) && r.ok === false) || !results.some((r) => r.name === "create a user" && r.ok) ? 1 : 0);
+const essential = ["create", "find", "update-put", "deactivate"];
+process.exit(results.some((r) => essential.includes(r.id) && r.ok === false) || !results.some((r) => r.id === "create" && r.ok) ? 1 : 0);

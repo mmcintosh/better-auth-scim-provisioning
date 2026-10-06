@@ -10,10 +10,10 @@ import type { ScimProvisioningOptions } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
 export { atlassian, awsIamIdentityCenter, cloudflareAccess, githubEnterprise, profiles, slack, slackUserName } from "./profiles";
-export { SCIM_USER_SCHEMA, ScimError, type ScimUser } from "./scim-client";
+export { SCIM_GROUP_SCHEMA, SCIM_USER_SCHEMA, ScimError, type ScimGroup, type ScimUser } from "./scim-client";
 export type { ScimAuth } from "./credentials";
-export { type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
-export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, webhookSignature } from "./webhook";
+export { type CheckId, type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
+export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SCHEMA_VERSION, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, WebhookSignatureError, webhookSignature } from "./webhook";
 export type { DeliveryFailure, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, WebhookTarget } from "./types";
 
 
