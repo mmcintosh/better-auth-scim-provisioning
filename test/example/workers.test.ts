@@ -15,7 +15,8 @@ import { mockWebhook } from "../support/mock-webhook";
 
 const example = (path: string) => fileURLToPath(new URL(`../../examples/workers/${path}`, import.meta.url));
 const MIGRATION = example("migrations/0001_init.sql");
-const ORIGIN = "https://example.test";
+// Local development, where the dev mailbox may answer (it never does on any other host).
+const ORIGIN = "http://localhost:8787";
 const app = mockScim();
 const hook = mockWebhook();
 const env = {
@@ -98,6 +99,19 @@ afterAll(async () => {
   await mf?.dispose();
 });
 
+describe("the Workers example's dev mailbox", () => {
+  it("is off in the shipped wrangler.jsonc, which deploys use too", () => {
+    const config = JSON.parse(readFileSync(example("wrangler.jsonc"), "utf8").replace(/^\s*\/\/.*$/gm, "")) as { vars?: Record<string, string> };
+    expect(config.vars?.DEV_MAILBOX).not.toBe("true");
+  });
+
+  it("a first request the Worker doesn't serve leaves it working (Better Auth is set up in the request that creates it)", async () => {
+    // Runs before any other request: an unknown path, then the mailbox on a deployed host.
+    expect((await call("/no-such-page")).status).toBe(404);
+    expect((await mf.dispatchFetch("https://scim-example.example.workers.dev/dev/mailbox?email=x%40example.test") as unknown as Response).status).toBe(404);
+  });
+});
+
 describe("the Workers example", () => {
   let admin = "";
   let ada = "";
@@ -109,6 +123,13 @@ describe("the Workers example", () => {
     expect(await until(() => [...app.users.values()].some((u) => u.userName === "ada@example.test"))).toBe(true);
     expect([...app.users.values()].map((u) => u.userName)).not.toContain("early@example.test");
     expect(await until(() => hook.events.some((e) => e.type === "user.upsert"))).toBe(true);
+  });
+
+  it("the dev mailbox answers only on localhost, even when switched on", async () => {
+    // Ada's verification link exists (the test above used it): served locally, never elsewhere.
+    const deployed = (await mf.dispatchFetch("https://scim-example.example.workers.dev/dev/mailbox?email=ada%40example.test")) as unknown as Response;
+    expect(deployed.status).toBe(404);
+    expect((await call("/dev/mailbox?email=ada%40example.test")).status).toBe(200);
   });
 
   it("only admins reach /admin/*, and only they may create organizations", async () => {
