@@ -12,7 +12,7 @@ Keep your users' accounts in step at the apps they use, straight from your [Bett
 
 It's the **outbound** direction. Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim) is the inbound one, where directories push users *into* your app; this package pushes them *out*. It works however your users sign in, and pairs with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) when your app is also their identity provider: see [sign-in and provisioning together](https://github.com/mmcintosh/better-auth-saml-idp/blob/main/docs/guide/provisioning.md).
 
-> **Unofficial community plugin.** This project isn't affiliated with or endorsed by Better Auth. Status: **0.3 on npm**, verified live against Cloudflare Access, Google Workspace and AWS IAM Identity Center (see [what exactly](#-verified-live)), and field-tested in a real app on Workers. While it's 0.x, a minor release may change the API; every change is in the [CHANGELOG](CHANGELOG.md). Upgrades within 0.x needed no database migration; **the next release (1.0) does**: see [upgrading from 0.3](docs/upgrading.md).
+> **Unofficial community plugin.** This project isn't affiliated with or endorsed by Better Auth. Status: **1.0 on npm**, verified live against Cloudflare Access, Google Workspace and AWS IAM Identity Center (see [what exactly](#-verified-live)), and field-tested in a real app on Workers. From 1.0, a change that could break your app comes only in a major release ([versioning](docs/versioning.md)); every change is in the [CHANGELOG](CHANGELOG.md). **Upgrading from 0.3 needs a database migration**: see [upgrading from 0.3](docs/upgrading.md).
 
 If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-auth-scim-provisioning) helps others find it.
 
@@ -412,9 +412,9 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. CI runs [the 
 
 ## Not yet
 
+- **Targets per organization, managed at runtime**: each organization connecting its own app (URL and token, stored encrypted), as better-auth-saml-idp's registry does for service providers. Targets are set in code today.
 - **Microsoft 365 / Entra ID** as a target (through Microsoft Graph), the other big suite after Google Workspace.
 - **Live verification of the Slack, Atlassian and GitHub Enterprise profiles.** They're built from each app's documentation and tested against a model.
-- **A 1.0**: the API and database schema are being reviewed for it first. What 1.0 will promise: [versioning](docs/versioning.md).
 
 ## Development
 
