@@ -61,8 +61,9 @@ export function credentials(auth: ScimAuth, o: { fetch?: typeof fetch | undefine
     case "google": {
       const key =
         auth.type === "oauth2"
-          ? `${auth.tokenUrl}\n${auth.clientId}\n${auth.scope ?? ""}\n${JSON.stringify(auth.params ?? {})}`
-          : `google\n${auth.tokenUrl ?? ""}\n${auth.clientEmail}\n${auth.subject}\n${auth.scopes.join(" ")}`;
+          ? `${auth.tokenUrl}\n${auth.clientId}\n${auth.clientSecret}\n${auth.scope ?? ""}\n${JSON.stringify(auth.params ?? {})}`
+          : `google\n${auth.tokenUrl ?? ""}\n${auth.clientEmail}\n${auth.privateKey}\n${auth.subject}\n${auth.scopes.join(" ")}`;
+      // The secret is part of the key: after it's rotated, a token from the old one isn't reused.
       return {
         async headers() {
           let cached = tokens.get(key);

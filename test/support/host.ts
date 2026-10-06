@@ -6,12 +6,12 @@ import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { admin, organization } from "better-auth/plugins";
 import { scimProvisioning } from "../../src";
-import type { ScimProvisioningOptions, Target, TargetOptions } from "../../src/types";
+import type { ScimProvisioningOptions, ScimTarget, Target, TargetOptions } from "../../src/types";
 import { mockGoogle } from "./mock-google";
 import { mockScim } from "./mock-scim";
 import { mockWebhook } from "./mock-webhook";
 
-type TargetSpec = Omit<TargetOptions, "fetch"> & { type?: "scim" | "google-workspace" | "webhook"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number };
+type TargetSpec = Omit<TargetOptions, "fetch"> & Pick<ScimTarget, "update" | "compat"> & { type?: "scim" | "google-workspace" | "webhook"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean };
 
 /** A database for Better Auth's `database` option, and whether it needs Better Auth's migrations. */
 export interface HostDatabase {
@@ -32,7 +32,7 @@ export function schemaOptions(database?: unknown) {
 
 export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
-  const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}) })]));
+  const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}), ...(s.membersOnRequest ? { membersOnRequest: true } : {}), ...(s.indexPaged ? { indexPaged: true } : {}) })]));
   // A Google Workspace target gets a mock Directory API instead (one per host).
   const google = specs.some((s) => s.type === "google-workspace") ? await mockGoogle({ lag: o.googleLag, renameLag: o.googleRenameLag, groupLag: o.googleGroupLag, groupReadLag: o.googleGroupReadLag, groupScope: o.googleGroupScope, membersPageSize: o.googleMembersPageSize }) : undefined;
   const webhook = specs.some((s) => s.type === "webhook") ? mockWebhook() : undefined;
@@ -58,7 +58,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
       // Teams on, so team groups can be tested; nothing else changes without teamGroups.
       organization({ teams: { enabled: true } }),
       scimProvisioning({
-        targets: specs.map(({ requireNames: _, keepsExternalId: __, patch: ___, like: ____, pageSize: _____, ...s }) =>
+        targets: specs.map(({ requireNames: _, keepsExternalId: __, patch: ___, like: ____, pageSize: _____, membersOnRequest: ______, indexPaged: _______, ...s }) =>
           s.type === "webhook" && webhook
             ? { ...s, type: "webhook", url: webhook.url, secret: webhook.secret, fetch: webhook.fetch }
             : s.type === "google-workspace" && google

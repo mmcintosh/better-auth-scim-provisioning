@@ -6,9 +6,23 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Fixed
 
+- **A group made by hand is no longer taken over after our first create failed.** At an app that drops externalId, a group created by hand after our create failed (a 503, a timeout) was found on the retry and its members rewritten. A group without our externalId is now taken as ours only if it has members and every one is someone we'd put there; our own create whose reply was lost still is.
+- **Members who leave are removed at apps that list a group's members only when asked**, and at apps that page them by `startIndex`. With `groupUpdate: "patch"`, the members are read back to find who to remove: a group GET without them read as "no members", and index paging stopped at the first page, so leavers kept the group. Members are now asked for by name (`attributes=members`), and both cursor and index paging are followed.
+- **Jobs held by a worker that stopped no longer block the scheduled run.** They stayed at the head of the queue and used up its limit, so jobs behind them (bans included) waited until their hold ran out.
+- **A 429's `Retry-After` is kept when the user changed during that delivery**; the new change used to be sent again at once.
+- **A long group delivery renews its hold on the job** while it runs (a large first sync, Google's one request per member), so a second worker can't pick the same group up halfway through.
+- **Deleting an organization queues its members' deprovisioning before the response** (at targets scoped to it with `organizationId`). It was queued only in background work after the response, which Workers ends with `waitUntil`'s budget, so members not queued by then stayed active at the app until a reconcile. The deliveries still run in the background and on the scheduled run.
+- **One `scimProvisioning()` used by several Better Auth instances** (per-tenant databases, for example) gives each its own queue. They all queued and delivered through the last instance's database.
+- **A webhook event keeps its `id` when it's retried**, so a receiver can recognise a retry by it, as the README advises; the next change gets a new id, even one back to an earlier state. Every attempt used to get a new id.
+- After an OAuth client secret (or a Google service account key) is rotated, a token fetched with the old one is no longer reused until it expires.
+- `check` tells you to remove its test user by hand when the app's create answered without an id or failed after it may have made the user.
 - **The Workers example no longer exposes its dev mailbox when deployed.** `wrangler.jsonc` turned it on, and those settings are deployed too, so anyone could fetch the verification link for any address (and verify an admin's address). It's now on only through `.dev.vars`, it only answers on `localhost`, and the README's deploy steps set email up before deploying.
 - **The Workers example no longer stalls after a first request it doesn't serve.** Better Auth finishes setting up its handler on the first call, and workerd cancels what a request leaves unfinished; the request that creates Better Auth now also calls its handler once.
 - The example's `/admin/reconcile` works a page at a time (`limit: 200`).
+
+### Changed
+
+- **Unknown, misspelled or misplaced options are refused at startup** instead of being dropped without a word. A target with `organisationId` (British spelling) used to provision every verified user instead of one organization's members. The error names the option and, where it's clear, what was meant (`did you mean organizationId?`, or that `groups` is an option of each target). `update` and `compat` are refused on webhook and Google Workspace targets, where they did nothing; the types say so too. **Check your options when upgrading:** anything the plugin ignored before now stops it from starting.
 
 ### Examples
 

@@ -34,12 +34,6 @@ export interface TargetOptions {
   /** The SCIM user sent; default: userName = email, names split from `name`, one primary email. */
   mapUser?: ((user: ProvisionedUser) => ScimUser) | undefined;
   /**
-   * How a change is sent: `put` (the default) replaces the whole user at the app, including
-   * attributes set there by hand; `patch` replaces only the attributes we send. Check what the
-   * app accepts with `npx better-auth-scim-provisioning check`.
-   */
-  update?: "put" | "patch" | undefined;
-  /**
    * Organizations (Better Auth's organization plugin) as groups at the app, their provisioned
    * members as the group's members. Every organization (or only `organizationId`'s), or those a
    * filter accepts. Better Auth lets any user create organizations by default: restrict that, or
@@ -62,21 +56,6 @@ export interface TargetOptions {
   roleGroups?: boolean | string[] | undefined;
   /** A role group's displayName; default "<organization> / <role>". */
   roleGroupName?: ((role: string, organization: { id: string; name: string; slug: string | null }) => string) | undefined;
-  /**
-   * How this app differs from the SCIM standard, for apps that need it (the profiles set these):
-   * `groupUpdate: "patch"` updates groups by a diff of members, for apps without PUT on groups;
-   * `groupMembers: "users-filter"` reads a group's members with `Users?filter=groups.value eq`,
-   * for apps whose groups don't list them; `maxGroupMembersPerRequest` batches member changes;
-   * `groupRename: "recreate"` replaces a renamed group with a new one, for apps that can't rename.
-   */
-  compat?:
-    | {
-        groupUpdate?: "put" | "patch" | undefined;
-        groupMembers?: "group" | "users-filter" | undefined;
-        maxGroupMembersPerRequest?: number | undefined;
-        groupRename?: "rename" | "recreate" | undefined;
-      }
-    | undefined;
   /** What leaving means at the app: `deactivate` (active=false, the default) or `delete`. */
   deprovision?: "deactivate" | "delete" | undefined;
   /** Per request; default 10 seconds. */
@@ -97,6 +76,27 @@ export interface ScimTarget extends TargetOptions {
    * own (an API key), or `oauth2` client credentials (tokens fetched, cached and renewed).
    */
   auth?: ScimAuth | undefined;
+  /**
+   * How a change is sent: `put` (the default) replaces the whole user at the app, including
+   * attributes set there by hand; `patch` replaces only the attributes we send. Check what the
+   * app accepts with `npx better-auth-scim-provisioning check`.
+   */
+  update?: "put" | "patch" | undefined;
+  /**
+   * How this app differs from the SCIM standard, for apps that need it (the profiles set these):
+   * `groupUpdate: "patch"` updates groups by a diff of members, for apps without PUT on groups;
+   * `groupMembers: "users-filter"` reads a group's members with `Users?filter=groups.value eq`,
+   * for apps whose groups don't list them; `maxGroupMembersPerRequest` batches member changes;
+   * `groupRename: "recreate"` replaces a renamed group with a new one, for apps that can't rename.
+   */
+  compat?:
+    | {
+        groupUpdate?: "put" | "patch" | undefined;
+        groupMembers?: "group" | "users-filter" | undefined;
+        maxGroupMembersPerRequest?: number | undefined;
+        groupRename?: "rename" | "recreate" | undefined;
+      }
+    | undefined;
   google?: undefined;
   secret?: undefined;
 }
@@ -130,6 +130,8 @@ export interface GoogleWorkspaceTarget extends TargetOptions {
   token?: undefined;
   auth?: undefined;
   secret?: undefined;
+  update?: undefined;
+  compat?: undefined;
 }
 
 /**
@@ -145,6 +147,8 @@ export interface WebhookTarget extends TargetOptions {
   token?: undefined;
   auth?: undefined;
   google?: undefined;
+  update?: undefined;
+  compat?: undefined;
 }
 
 /** A target: an app that speaks SCIM, Google Workspace, or a webhook. */

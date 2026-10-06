@@ -51,12 +51,24 @@ export async function verifyWebhookSignature(o: { body: string; signature: strin
   return JSON.parse(o.body) as WebhookEvent;
 }
 
-export function webhookClient(target: WebhookTarget): ReturnType<typeof scimClient> {
+/**
+ * A webhook client. `change` names the change being delivered (its job and version): an
+ * event's id is derived from it, so every attempt of one change carries the same id, and the next
+ * change (even back to an earlier state) a new one.
+ */
+export function webhookClient(target: WebhookTarget, change?: string): ReturnType<typeof scimClient> {
   const doFetch = target.fetch ?? fetch;
   const timeoutMs = target.timeoutMs ?? 10_000;
 
+  const eventId = async (event: EventBody) => {
+    if (!change) return crypto.randomUUID();
+    const subject = "user" in event ? event.user.externalId : event.group.externalId;
+    const digest = hex(await crypto.subtle.digest("SHA-256", encoder.encode(`${target.id}|${change}|${event.type}|${subject}`)));
+    return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
+  };
+
   async function send(event: EventBody): Promise<void> {
-    const body = JSON.stringify({ id: crypto.randomUUID(), target: target.id, occurredAt: new Date().toISOString(), ...event });
+    const body = JSON.stringify({ id: await eventId(event), target: target.id, occurredAt: new Date().toISOString(), ...event });
     let res: Response;
     try {
       res = await doFetch(target.url, {
@@ -111,6 +123,7 @@ export function webhookClient(target: WebhookTarget): ReturnType<typeof scimClie
     },
     remove: async (id: string) => send({ type: "user.delete", user: { externalId: id } }),
     findGroupByName: async () => null,
+    groupMembers: async () => [],
     createGroup: upsertGroup,
     createGroupInBatches: upsertGroup,
     replaceGroup: async (_id: string, group: ScimGroup) => void (await upsertGroup(group)),

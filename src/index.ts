@@ -17,75 +17,122 @@ export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SIGNATURE_HEADER,
 export type { GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, WebhookTarget } from "./types";
 
 
-const optionsSchema = z.object({
+const targetSchema = z.strictObject({
+  id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
+  type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
+  secret: z.string().min(32, "must be at least 32 characters").optional(),
+  url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment").optional(),
+  google: z
+    .strictObject({
+      clientEmail: z.string().min(1),
+      privateKey: z.string().includes("PRIVATE KEY", { message: "must be the service account's PEM private key" }),
+      adminEmail: z.string().min(1),
+      orgUnitPath: z.string().startsWith("/").optional(),
+      groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/, "a domain, such as example.com").optional(),
+      groupEmail: z.function().optional(),
+      tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
+    })
+    .optional(),
+  token: z.string().min(1).optional(),
+  auth: z
+    .discriminatedUnion("type", [
+      z.strictObject({ type: z.literal("bearer"), token: z.string().min(1) }),
+      z.strictObject({ type: z.literal("basic"), username: z.string().min(1), password: z.string().min(1) }),
+      z.strictObject({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,64}$/), value: z.string().min(1) }),
+      z.strictObject({
+        type: z.literal("oauth2"),
+        tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment"),
+        clientId: z.string().min(1),
+        clientSecret: z.string().min(1),
+        scope: z.string().optional(),
+        clientAuth: z.enum(["body", "basic"]).optional(),
+        params: z.record(z.string(), z.string()).optional(),
+      }),
+    ])
+    .optional(),
+  include: z.function().optional(),
+  requireVerifiedEmail: z.boolean().optional(),
+  organizationId: z.string().min(1).optional(),
+  mapUser: z.function().optional(),
+  deprovision: z.enum(["deactivate", "delete"]).optional(),
+  update: z.enum(["put", "patch"]).optional(),
+  compat: z
+    .strictObject({
+      groupUpdate: z.enum(["put", "patch"]).optional(),
+      groupMembers: z.enum(["group", "users-filter"]).optional(),
+      maxGroupMembersPerRequest: z.number().int().min(1).max(100_000).optional(),
+      groupRename: z.enum(["rename", "recreate"]).optional(),
+    })
+    .optional(),
+  groups: z.union([z.boolean(), z.function()]).optional(),
+  groupName: z.function().optional(),
+  teamGroups: z.union([z.boolean(), z.function()]).optional(),
+  teamGroupName: z.function().optional(),
+  roleGroups: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
+  roleGroupName: z.function().optional(),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  fetch: z.function().optional(),
+});
+
+const optionsSchema = z.strictObject({
   targets: z
     .array(
-      z.object({
-        id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
-        type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
-        secret: z.string().min(32, "must be at least 32 characters").optional(),
-        url: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment").optional(),
-        google: z
-          .object({
-            clientEmail: z.string().min(1),
-            privateKey: z.string().includes("PRIVATE KEY", { message: "must be the service account's PEM private key" }),
-            adminEmail: z.string().min(1),
-            orgUnitPath: z.string().startsWith("/").optional(),
-            groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/, "a domain, such as example.com").optional(),
-            groupEmail: z.function().optional(),
-            tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
-          })
-          .optional(),
-        token: z.string().min(1).optional(),
-        auth: z
-          .discriminatedUnion("type", [
-            z.object({ type: z.literal("bearer"), token: z.string().min(1) }),
-            z.object({ type: z.literal("basic"), username: z.string().min(1), password: z.string().min(1) }),
-            z.object({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,64}$/), value: z.string().min(1) }),
-            z.object({
-              type: z.literal("oauth2"),
-              tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost), without credentials, query or fragment"),
-              clientId: z.string().min(1),
-              clientSecret: z.string().min(1),
-              scope: z.string().optional(),
-              clientAuth: z.enum(["body", "basic"]).optional(),
-              params: z.record(z.string(), z.string()).optional(),
-            }),
-          ])
-          .optional(),
-        include: z.function().optional(),
-        requireVerifiedEmail: z.boolean().optional(),
-        organizationId: z.string().min(1).optional(),
-        mapUser: z.function().optional(),
-        deprovision: z.enum(["deactivate", "delete"]).optional(),
-        update: z.enum(["put", "patch"]).optional(),
-        compat: z
-          .object({
-            groupUpdate: z.enum(["put", "patch"]).optional(),
-            groupMembers: z.enum(["group", "users-filter"]).optional(),
-            maxGroupMembersPerRequest: z.number().int().min(1).max(100_000).optional(),
-            groupRename: z.enum(["rename", "recreate"]).optional(),
-          })
-          .optional(),
-        groups: z.union([z.boolean(), z.function()]).optional(),
-        groupName: z.function().optional(),
-        teamGroups: z.union([z.boolean(), z.function()]).optional(),
-        teamGroupName: z.function().optional(),
-        roleGroups: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
-        roleGroupName: z.function().optional(),
-        timeoutMs: z.number().int().min(100).max(120_000).optional(),
-        fetch: z.function().optional(),
-      })
+      targetSchema
         .refine((t) => t.type === "google-workspace" || t.url !== undefined, { message: "url is required", path: ["url"] })
         .refine((t) => t.type === "google-workspace" || t.type === "webhook" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
         .refine((t) => t.type !== "webhook" || (t.secret !== undefined && t.token === undefined && t.auth === undefined && t.google === undefined), "a webhook target takes url and secret, not token, auth or google")
         .refine((t) => t.type === "webhook" || t.secret === undefined, "secret is for webhook targets")
-        .refine((t) => t.type !== "google-workspace" || (t.google !== undefined && t.token === undefined && t.auth === undefined), "a google-workspace target takes google, not token or auth"),
+        .refine((t) => t.type !== "google-workspace" || (t.google !== undefined && t.token === undefined && t.auth === undefined), "a google-workspace target takes google, not token or auth")
+        .refine((t) => t.type === undefined || t.type === "scim" || t.update === undefined, { message: "update is for scim targets only", path: ["update"] })
+        .refine((t) => t.type === undefined || t.type === "scim" || t.compat === undefined, { message: "compat is for scim targets only", path: ["compat"] }),
     )
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
-  retry: z.object({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
+  retry: z.strictObject({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
   concurrency: z.number().int().min(1).max(32).optional(),
 });
+
+type SchemaDef = { type?: string; element?: unknown; innerType?: unknown; shape?: Record<string, unknown> };
+const defOf = (node: unknown): SchemaDef | undefined => (node as { def?: SchemaDef } | undefined)?.def;
+const unwrap = (node: unknown): unknown => (defOf(node)?.type === "optional" ? unwrap(defOf(node)?.innerType) : node);
+
+/** Every key the options object at `path` accepts, for "did you mean" hints on unknown keys. */
+function knownKeys(schema: unknown, path: PropertyKey[]): string[] {
+  let node = unwrap(schema);
+  for (const step of path) {
+    const def = defOf(node);
+    if (def?.type === "array") node = unwrap(def.element);
+    else if (def?.shape && typeof step === "string") node = unwrap(def.shape[step]);
+    else return [];
+  }
+  return Object.keys(defOf(node)?.shape ?? {});
+}
+
+/** Edit distance, ignoring case, for spelling hints. */
+function distance(a: string, b: string): number {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  let row = Array.from({ length: y.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= x.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= y.length; j++) next[j] = Math.min((row[j] ?? 0) + 1, (next[j - 1] ?? 0) + 1, (row[j - 1] ?? 0) + (x[i - 1] === y[j - 1] ? 0 : 1));
+    row = next;
+  }
+  return row[y.length] ?? 0;
+}
+
+const TARGET_KEYS = new Set(Object.keys(targetSchema.def.shape));
+
+/** One message per problem; an unknown key names its path and, where it's clear, what was meant. */
+function describeIssue(issue: z.core.$ZodIssue): string[] {
+  const at = (key: PropertyKey) => [...issue.path, key].join(".");
+  if (issue.code !== "unrecognized_keys") return [`${issue.path.join(".")}: ${issue.message}`];
+  return issue.keys.map((key) => {
+    if (issue.path.length === 0 && TARGET_KEYS.has(key)) return `${at(key)}: unknown option; ${key} is an option of each target (targets[].${key})`;
+    const close = (k: string) => distance(key, k) <= Math.max(2, Math.floor(k.length / 4)) || (key.length >= 4 && (k.toLowerCase().startsWith(key.toLowerCase()) || key.toLowerCase().startsWith(k.toLowerCase())));
+    const near = knownKeys(optionsSchema, issue.path).filter(close).sort((x, y) => distance(key, x) - distance(key, y))[0];
+    return `${at(key)}: unknown option${near ? `; did you mean ${near}?` : ""}`;
+  });
+}
 
 /**
  * The organization plugin's endpoints that change a membership. Server-side `addMember` has no
@@ -118,18 +165,28 @@ function membersIn(returned: unknown): { userId: string; organizationId: string 
 
 export function scimProvisioning(options: ScimProvisioningOptions) {
   const parsed = optionsSchema.safeParse(options);
-  if (!parsed.success) throw new Error(`[scim] invalid options: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  if (!parsed.success) throw new Error(`[scim] invalid options: ${parsed.error.issues.flatMap(describeIssue).join("; ")}`);
 
-  let box: ReturnType<typeof outbox> | undefined;
-  let background: (p: Promise<unknown>) => void = (p) => void p.catch(() => {});
+  /**
+   * Each Better Auth instance's queue and background work, by its database adapter: one plugin
+   * object can serve several instances (per-tenant databases; Better Auth also builds a second
+   * context from the same options to run migrations), and each must use its own database.
+   */
+  interface State {
+    box: ReturnType<typeof outbox>;
+    background: (p: Promise<unknown>) => void;
+    /** A user's groups at each target, noted just before they're deleted (see delete.before). */
+    deleting: Map<string, Map<string, GroupRef[]>>;
+  }
+  const states = new WeakMap<object, State>();
+  const stateOf = (context: { adapter: unknown }) => states.get(context.adapter as object);
 
   /**
    * Queue (target, user) and try to deliver it right away, in the background; then, for targets
    * with groups, the user's organizations' groups, so a new user shows up in them at once.
    */
-  async function changed(userId: string, targetIds = options.targets.map((t) => t.id), formerGroups?: Map<string, GroupRef[]>) {
-    if (!box) return;
-    const b = box;
+  async function changed(s: State, userId: string, targetIds = options.targets.map((t) => t.id), formerGroups?: Map<string, GroupRef[]>) {
+    const { box: b, background } = s;
     for (const targetId of targetIds) {
       await b.enqueue(targetId, userId);
       // A deleted user's groups, noted before the delete: queued, so they're updated even if this
@@ -146,17 +203,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     }
   }
 
-  /**
-   * A user's groups at each target, noted just before they're deleted: SQL databases delete the
-   * member rows with the user, so after the delete their groups can't be found, and the user would
-   * stay in them at the app.
-   */
-  const deleting = new Map<string, Map<string, GroupRef[]>>();
-
   /** Queue an organization's groups (its own, its teams', its roles') at every target, and deliver them in the background. */
-  async function groupChanged(organizationId: string) {
-    if (!box) return;
-    const b = box;
+  async function groupChanged(s: State, organizationId: string) {
+    const { box: b, background } = s;
     for (const t of options.targets.filter((x) => b.hasGroups(x))) {
       const refs = await b.groupsForOrganization(t, organizationId);
       for (const ref of refs) await b.enqueue(t.id, ref.id, { kind: ref.kind });
@@ -165,9 +214,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
   }
 
   /** Queue a team's group at every target with team groups (a removed team's group is removed). */
-  async function teamChanged(teamId: string) {
-    if (!box) return;
-    const b = box;
+  async function teamChanged(s: State, teamId: string) {
+    const { box: b, background } = s;
     for (const t of options.targets.filter((x) => x.teamGroups)) {
       await b.enqueue(t.id, teamId, { kind: "team" });
       background(b.runFor(t.id, teamId, "team"));
@@ -218,11 +266,16 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       },
     },
     init(ctx) {
-      box = outbox(options, ctx.adapter as unknown as Adapter, ctx.logger);
-      background = (p) => ctx.runInBackground(p.catch((e) => ctx.logger.error("[scim] delivery failed", e)));
+      const s: State = {
+        box: outbox(options, ctx.adapter as unknown as Adapter, ctx.logger),
+        background: (p) => ctx.runInBackground(p.catch((e) => ctx.logger.error("[scim] delivery failed", e))),
+        deleting: new Map(),
+      };
+      states.set(ctx.adapter as object, s);
+      const { box, deleting } = s;
       const onUser = async (user: { id: string }) => {
         try {
-          await changed(user.id);
+          await changed(s, user.id);
         } catch (e) {
           // Never fail the user's own write over provisioning: the next reconcile catches up.
           ctx.logger.error(`[scim] could not queue user ${user.id}`, e);
@@ -235,8 +288,10 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               create: { after: onUser },
               update: { after: onUser },
               delete: {
+                // A user's groups at each target, noted just before the delete: SQL databases delete
+                // the member rows with the user, so after it their groups can't be found, and the
+                // user would stay in them at the app.
                 before: async (user: { id: string }) => {
-                  if (!box) return;
                   try {
                     const byTarget = new Map<string, GroupRef[]>();
                     for (const t of options.targets) if (box.hasGroups(t)) byTarget.set(t.id, await box.groupsOf(t, user.id));
@@ -250,7 +305,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                   const former = deleting.get(user.id);
                   deleting.delete(user.id);
                   try {
-                    await changed(user.id, undefined, former);
+                    await changed(s, user.id, undefined, former);
                   } catch (e) {
                     ctx.logger.error(`[scim] could not queue user ${user.id}`, e);
                   }
@@ -273,11 +328,12 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path) || ORGANIZATION_WRITES.has(ctx.path) || TEAM_WRITES.has(ctx.path)),
           handler: createAuthMiddleware(async (ctx) => {
             const returned = (ctx.context as { returned?: unknown }).returned;
-            if (!returned || returned instanceof Error || !box) return;
-            const b = box;
+            const s = stateOf(ctx.context);
+            if (!returned || returned instanceof Error || !s) return;
+            const { box: b, background } = s;
             const queue = async (userId: string, targetIds: string[]) => {
               try {
-                await changed(userId, targetIds);
+                await changed(s, userId, targetIds);
               } catch (e) {
                 ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
               }
@@ -297,7 +353,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               }
               for (const teamId of teamIds) {
                 try {
-                  await teamChanged(teamId);
+                  await teamChanged(s, teamId);
                 } catch (e) {
                   ctx.context.logger.error(`[scim] could not queue the group of team ${teamId}`, e);
                 }
@@ -311,36 +367,36 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               if (ctx.path === "/organization/delete" && typeof bodyOrg === "string") orgIds.add(bodyOrg);
               for (const orgId of orgIds) {
                 try {
-                  await groupChanged(orgId);
+                  await groupChanged(s, orgId);
                 } catch (e) {
                   ctx.context.logger.error(`[scim] could not queue the group of organization ${orgId}`, e);
                 }
               }
             }
             // A deleted organization takes its members with it: deprovision everyone linked
-            // through its targets. In the background, one user at a time: never in the way of
-            // the request, and never a burst at the app. Whatever doesn't finish
-            // is left queued for the scheduled run, or found by the next reconcile.
+            // through its targets. They're queued before the response, so none can be lost if the
+            // work after it is cut short (Workers ends it with waitUntil's budget); the deliveries
+            // run in the background, one user at a time (never a burst at the app), and whatever
+            // doesn't finish there is delivered by the scheduled run.
             const orgId = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
             const orgTargets = options.targets.filter((t) => ctx.path === "/organization/delete" && typeof orgId === "string" && t.organizationId === orgId);
-            if (orgTargets.length) {
-              background(
-                (async () => {
-                  const queued: [string, string][] = [];
-                  for (const t of orgTargets) {
-                    for await (const userId of b.allLinkedUsers(t.id)) {
-                      try {
-                        await b.enqueue(t.id, userId);
-                        queued.push([t.id, userId]);
-                      } catch (e) {
-                        ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
-                      }
-                    }
+            const queued: [string, string][] = [];
+            for (const t of orgTargets) {
+              try {
+                for await (const userId of b.allLinkedUsers(t.id)) {
+                  try {
+                    await b.enqueue(t.id, userId);
+                    queued.push([t.id, userId]);
+                  } catch (e) {
+                    ctx.context.logger.error(`[scim] could not queue user ${userId}`, e);
                   }
-                  for (const [targetId, userId] of queued) await b.runFor(targetId, userId);
-                })(),
-              );
+                }
+              } catch (e) {
+                // The organization is gone either way: say so loudly rather than fail the delete.
+                ctx.context.logger.error(`[scim] ${t.id}: could not queue the members of deleted organization ${orgId} for deprovisioning; run a reconcile`, e);
+              }
             }
+            if (queued.length) background((async () => { for (const [targetId, userId] of queued) await b.runFor(targetId, userId); })());
           }),
         },
       ],
@@ -348,8 +404,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     endpoints: {
       /** Deliver what's due (retries included). Call it from a scheduled job, e.g. every minute. */
       scimProvisioningRun: createAuthEndpoint.serverOnly({ method: "POST", body: z.object({ limit: z.number().int().min(1).max(500).optional() }).optional() }, async (ctx) => {
-        if (!box) throw new Error("[scim] not initialised");
-        return ctx.json(await box.runDue(ctx.body?.limit ?? 50));
+        const s = stateOf(ctx.context);
+        if (!s) throw new Error("[scim] not initialised");
+        return ctx.json(await s.box.runDue(ctx.body?.limit ?? 50));
       }),
       /**
        * Queue every user for every target (or one), and every user still linked at a target who no
@@ -363,8 +420,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           body: z.object({ targetId: z.string().optional(), after: z.string().optional(), limit: z.number().int().min(1).max(10_000).optional() }).optional(),
         },
         async (ctx) => {
-          if (!box) throw new Error("[scim] not initialised");
-          const b = box;
+          const s = stateOf(ctx.context);
+          if (!s) throw new Error("[scim] not initialised");
+          const b = s.box;
           const all = options.targets.map((t) => t.id);
           const targetId = ctx.body?.targetId;
           if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });

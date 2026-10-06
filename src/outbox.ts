@@ -64,13 +64,16 @@ export interface Link {
  */
 const RELEASED = new Date("2000-01-01T00:00:00.000Z");
 /**
- * How long a claimed job is held: a delivery makes at most four requests (replace, create, find,
- * replace), each up to the target's timeout, plus a margin. Shorter, and a second worker could
- * claim a job still being delivered.
+ * How long a claimed job is held: a user delivery makes a handful of requests (a Google update
+ * reads first; a 404 or 409 adds a find and a retry), each up to the target's timeout, plus a
+ * margin. A group delivery's hold is also renewed while it runs. Shorter, and a second worker
+ * could claim a job still being delivered.
  */
 const leaseFor = (target: Target | undefined, kind?: string | null) =>
   // A group can take many requests (members read a page at a time, changed in batches).
   (kind && kind !== "user" ? 60 : 12) * (target?.timeoutMs ?? 10_000) + 30_000;
+/** How often a long (group) delivery renews its hold on the job. */
+const RENEW_EVERY_MS = 5_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
 const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
@@ -103,11 +106,12 @@ export type Outcome = "done" | "retry" | "failed" | "busy";
 const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
 
 /** The client for a target: SCIM, or Google Workspace's Directory API behind the same operations. */
-const clientFor = (target: Target) =>
+/** `change` names the change being delivered (its job and version), for webhook event ids. */
+const clientFor = (target: Target, change?: string) =>
   target.type === "google-workspace"
     ? googleWorkspaceClient(target)
     : target.type === "webhook"
-      ? webhookClient(target)
+      ? webhookClient(target, change)
       : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
 
 export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }) {
@@ -192,8 +196,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * Make the app match the user: create, update, adopt, reactivate or deprovision. Returns when to
    * look again without a change, if ever: the end of a timed ban.
    */
-  async function deliver(target: Target, userId: string): Promise<Date | null> {
-    const client = clientFor(target);
+  async function deliver(target: Target, userId: string, change?: string): Promise<Date | null> {
+    const client = clientFor(target, change);
     const user = (await adapter.findOne({ model: "user", where: [{ field: "id", value: userId }] })) as ProvisionedUser | null;
     const key = keyOf(target.id, userId);
     let link = await findLink(key);
@@ -394,8 +398,20 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     }
     let recheckAt: Date | null;
     const isGroup = current.kind === "group" || current.kind === "team" || current.kind === "role";
+    // A group delivery has no fixed number of requests (members a page and a batch at a time; at
+    // Google one per member changed): the hold is renewed while it runs, so no second worker
+    // claims the job halfway through.
+    const renewal = isGroup
+      ? setInterval(() => {
+          const until = new Date(Date.now() + leaseFor(target, current.kind));
+          adapter
+            .updateMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }, { field: "lockedUntil", value: new Date(), operator: "gt" }], update: { lockedUntil: until } })
+            .catch(() => {});
+        }, RENEW_EVERY_MS)
+      : undefined;
     try {
-      recheckAt = isGroup ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }) : await deliver(target, current.userId);
+      const change = `${current.id}@${current.version}`;
+      recheckAt = isGroup ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }, change) : await deliver(target, current.userId, change);
     } catch (e) {
       const attempts = current.attempts + 1;
       const err = e instanceof ScimError ? e : new ScimError((e as Error).message, null, true);
@@ -414,13 +430,24 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         where: [{ field: "id", value: current.id }, { field: "version", value: current.version }],
         update: { attempts, lastError: err.message.slice(0, 1000), lastStatus: err.status, lockedUntil: RELEASED, failed: giveUp, nextAttemptAt: new Date(Date.now() + wait), updatedAt: new Date() },
       });
-      // Bumped during delivery (a new change, already due now): free it and try the new state.
-      if (recorded === 0) await release(current.id);
+      // Bumped during delivery (a new change, already due now): free it and try the new state;
+      // but an app that asked us to wait (429) is waited for, whatever changed meanwhile.
+      if (recorded === 0) {
+        if (err.retryAfterMs)
+          await adapter.updateMany({
+            model: JOB_MODEL,
+            where: [{ field: "id", value: current.id }, { field: "nextAttemptAt", value: new Date(Date.now() + err.retryAfterMs), operator: "lt" }],
+            update: { nextAttemptAt: new Date(Date.now() + err.retryAfterMs), lastStatus: err.status, updatedAt: new Date() },
+          });
+        await release(current.id);
+      }
       // Only new work goes round again: the bumped job, or a duplicate; never the one that just
       // failed unchanged, which waits for its backoff.
       const again = await nextFor(current.key, round, recorded === 0 ? undefined : current.id);
       if (again) return again;
       return giveUp ? "failed" : "retry";
+    } finally {
+      if (renewal) clearInterval(renewal);
     }
     const settled = recheckAt
       ? // Look again when the ban runs out.
@@ -458,7 +485,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   async function runDue(limit = 50): Promise<Record<Outcome, number>> {
     const due = (await adapter.findMany({
       model: JOB_MODEL,
-      where: [{ field: "failed", value: false }, { field: "nextAttemptAt", value: new Date(Date.now() + 1), operator: "lt" }],
+      // Not held: jobs another worker holds (or held when it died) mustn't use up the limit.
+      where: [
+        { field: "failed", value: false },
+        { field: "nextAttemptAt", value: new Date(Date.now() + 1), operator: "lt" },
+        { field: "lockedUntil", value: new Date(Date.now()), operator: "lt" },
+      ],
       sortBy: { field: "nextAttemptAt", direction: "asc" },
       limit,
     })) as Job[];
@@ -589,8 +621,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   /** Make the app's group match its organization, team or role: create, update, adopt, or remove. */
-  async function deliverGroup(target: Target, ref: GroupRef): Promise<null> {
-    const client = clientFor(target);
+  async function deliverGroup(target: Target, ref: GroupRef, change?: string): Promise<null> {
+    const client = clientFor(target, change);
     const key = keyFor(ref.kind, target.id, ref.id);
     const externalId = externalIdOf(ref);
     const link = await findGroupLink(key);
@@ -677,11 +709,23 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       }
     }
     const pendingBefore = link !== null && !link.remoteId;
+    /**
+     * A group without our externalId, found after a create of ours that may have made it (its
+     * reply lost, at an app that drops externalId): ours only if it has members and every one is
+     * someone we'd put there. A group made by hand in the meantime, with anyone else in it, is
+     * never taken over; an empty one can't be told apart, so it isn't either.
+     */
+    const onlyOurs = async (found: { id: string; externalId: string | null }) => {
+      if (found.externalId !== null) return false;
+      const members = await client.groupMembers(found.id);
+      const wanted = new Set(group.members.map((m) => m.value));
+      return members.length > 0 && members.every((m) => wanted.has(m));
+    };
     // Pending under another name (a lost create's reply, then a rename): the group it made is
     // found under the old name and renamed (or, at apps that can't rename, removed and made anew).
     if (link && pendingBefore && link.displayName !== displayName && target.type !== "webhook") {
       const found = await client.findGroupByName(link.displayName, externalId);
-      if (found && !(await otherOwner(found.id)) && (found.externalId === externalId || found.externalId === null)) {
+      if (found && !(await otherOwner(found.id)) && (found.externalId === externalId || (await onlyOurs(found)))) {
         if (compat.groupRename === "recreate") await client.removeGroup(found.id);
         else {
           await updateGroup(found.id);
@@ -720,7 +764,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       // Google's reads trail its writes: right after our own create it can say "exists" and still
       // not show the group (found live). Retried, with the pending link kept, as for users.
       if (!found && target.type === "google-workspace") throw new ScimError(`group ${displayName}: Google says it exists but can't find it yet; retrying`, 409, true);
-      const ours = found !== null && !(await otherOwner(found.id)) && (found.externalId === externalId || (found.externalId === null && pendingBefore));
+      const ours = found !== null && !(await otherOwner(found.id)) && (found.externalId === externalId || (pendingBefore && (await onlyOurs(found))));
       if (!found || !ours) return refuse();
       await updateGroup(found.id);
       remoteId = found.id;
