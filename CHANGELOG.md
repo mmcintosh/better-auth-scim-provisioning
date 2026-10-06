@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Project
+
+- The release job stages with npm 12.2.0 (was 11.20.0).
+
 ## [0.3.1] - 2026-10-05
 
 No code changes: the npm page gets the rewritten README (what it does, what's verified live, what's next).

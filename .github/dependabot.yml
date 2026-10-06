@@ -22,6 +22,7 @@ updates:
       - dependency-name: undici
       - dependency-name: brace-expansion
       - dependency-name: ip-address
+      - dependency-name: http-cache-semantics
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
