@@ -353,6 +353,8 @@ For other auth methods, `--auth auth.json`, a file holding the `auth` object as 
 
 Tested on SQLite (`node:sqlite`), PostgreSQL 17, MySQL 8.4 and MongoDB 8.2 (Better Auth's Kysely and MongoDB adapters), with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24.
 
+The built package also runs on **Bun** and **Deno**: CI runs the `check` CLI and a user's life, delivered to a SCIM app and a signed webhook, on both.
+
 It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested there in a real app, with D1, `waitUntil` and a Cron Trigger, against Cloudflare Access: 200 users were reconciled and delivered at about 6 users a second with the default concurrency.
 
 ## Not yet
