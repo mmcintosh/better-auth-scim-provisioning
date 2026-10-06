@@ -64,13 +64,16 @@ export interface Link {
  */
 const RELEASED = new Date("2000-01-01T00:00:00.000Z");
 /**
- * How long a claimed job is held: a delivery makes at most four requests (replace, create, find,
- * replace), each up to the target's timeout, plus a margin. Shorter, and a second worker could
- * claim a job still being delivered.
+ * How long a claimed job is held: a user delivery makes a handful of requests (a Google update
+ * reads first; a 404 or 409 adds a find and a retry), each up to the target's timeout, plus a
+ * margin. A group delivery's hold is also renewed while it runs. Shorter, and a second worker
+ * could claim a job still being delivered.
  */
 const leaseFor = (target: Target | undefined, kind?: string | null) =>
   // A group can take many requests (members read a page at a time, changed in batches).
   (kind && kind !== "user" ? 60 : 12) * (target?.timeoutMs ?? 10_000) + 30_000;
+/** How often a long (group) delivery renews its hold on the job. */
+const RENEW_EVERY_MS = 5_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
 const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
@@ -394,6 +397,17 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     }
     let recheckAt: Date | null;
     const isGroup = current.kind === "group" || current.kind === "team" || current.kind === "role";
+    // A group delivery has no fixed number of requests (members a page and a batch at a time; at
+    // Google one per member changed): the hold is renewed while it runs, so no second worker
+    // claims the job halfway through.
+    const renewal = isGroup
+      ? setInterval(() => {
+          const until = new Date(Date.now() + leaseFor(target, current.kind));
+          adapter
+            .updateMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }, { field: "lockedUntil", value: new Date(), operator: "gt" }], update: { lockedUntil: until } })
+            .catch(() => {});
+        }, RENEW_EVERY_MS)
+      : undefined;
     try {
       recheckAt = isGroup ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }) : await deliver(target, current.userId);
     } catch (e) {
@@ -414,13 +428,24 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         where: [{ field: "id", value: current.id }, { field: "version", value: current.version }],
         update: { attempts, lastError: err.message.slice(0, 1000), lastStatus: err.status, lockedUntil: RELEASED, failed: giveUp, nextAttemptAt: new Date(Date.now() + wait), updatedAt: new Date() },
       });
-      // Bumped during delivery (a new change, already due now): free it and try the new state.
-      if (recorded === 0) await release(current.id);
+      // Bumped during delivery (a new change, already due now): free it and try the new state;
+      // but an app that asked us to wait (429) is waited for, whatever changed meanwhile.
+      if (recorded === 0) {
+        if (err.retryAfterMs)
+          await adapter.updateMany({
+            model: JOB_MODEL,
+            where: [{ field: "id", value: current.id }, { field: "nextAttemptAt", value: new Date(Date.now() + err.retryAfterMs), operator: "lt" }],
+            update: { nextAttemptAt: new Date(Date.now() + err.retryAfterMs), lastStatus: err.status, updatedAt: new Date() },
+          });
+        await release(current.id);
+      }
       // Only new work goes round again: the bumped job, or a duplicate; never the one that just
       // failed unchanged, which waits for its backoff.
       const again = await nextFor(current.key, round, recorded === 0 ? undefined : current.id);
       if (again) return again;
       return giveUp ? "failed" : "retry";
+    } finally {
+      if (renewal) clearInterval(renewal);
     }
     const settled = recheckAt
       ? // Look again when the ban runs out.
@@ -458,7 +483,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   async function runDue(limit = 50): Promise<Record<Outcome, number>> {
     const due = (await adapter.findMany({
       model: JOB_MODEL,
-      where: [{ field: "failed", value: false }, { field: "nextAttemptAt", value: new Date(Date.now() + 1), operator: "lt" }],
+      // Not held: jobs another worker holds (or held when it died) mustn't use up the limit.
+      where: [
+        { field: "failed", value: false },
+        { field: "nextAttemptAt", value: new Date(Date.now() + 1), operator: "lt" },
+        { field: "lockedUntil", value: new Date(Date.now()), operator: "lt" },
+      ],
       sortBy: { field: "nextAttemptAt", direction: "asc" },
       limit,
     })) as Job[];

@@ -8,6 +8,9 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 - **A group made by hand is no longer taken over after our first create failed.** At an app that drops externalId, a group created by hand after our create failed (a 503, a timeout) was found on the retry and its members rewritten. A group without our externalId is now taken as ours only if it has members and every one is someone we'd put there; our own create whose reply was lost still is.
 - **Members who leave are removed at apps that list a group's members only when asked**, and at apps that page them by `startIndex`. With `groupUpdate: "patch"`, the members are read back to find who to remove: a group GET without them read as "no members", and index paging stopped at the first page, so leavers kept the group. Members are now asked for by name (`attributes=members`), and both cursor and index paging are followed.
+- **Jobs held by a worker that stopped no longer block the scheduled run.** They stayed at the head of the queue and used up its limit, so jobs behind them (bans included) waited until their hold ran out.
+- **A 429's `Retry-After` is kept when the user changed during that delivery**; the new change used to be sent again at once.
+- **A long group delivery renews its hold on the job** while it runs (a large first sync, Google's one request per member), so a second worker can't pick the same group up halfway through.
 
 ### Changed
 
