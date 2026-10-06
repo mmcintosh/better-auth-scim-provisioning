@@ -41,8 +41,12 @@ export interface Credentials {
   rejected(): boolean;
 }
 
-/** OAuth access tokens, per token endpoint and client, shared by every request in this isolate. */
-const tokens = new Map<string, { token: Promise<string>; renewAt: number }>();
+/**
+ * OAuth access tokens that have arrived, per token endpoint and client, shared by every request in
+ * this isolate. Only arrived ones: on Workers, a fetch started by a request that has ended is
+ * cancelled, so a later request waiting on that fetch would wait for ever.
+ */
+const tokens = new Map<string, { token: string; renewAt: number }>();
 /**
  * Renew a minute before a token expires (or halfway, for short-lived ones), so a request never
  * goes out with one about to lapse.
@@ -64,25 +68,27 @@ export function credentials(auth: ScimAuth, o: { fetch?: typeof fetch | undefine
           ? `${auth.tokenUrl}\n${auth.clientId}\n${auth.clientSecret}\n${auth.scope ?? ""}\n${JSON.stringify(auth.params ?? {})}`
           : `google\n${auth.tokenUrl ?? ""}\n${auth.clientEmail}\n${auth.privateKey}\n${auth.subject}\n${auth.scopes.join(" ")}`;
       // The secret is part of the key: after it's rotated, a token from the old one isn't reused.
+      // A fetch in progress is shared only by this client's calls: one delivery, one request.
+      let inFlight: Promise<string> | null = null;
       return {
         async headers() {
-          let cached = tokens.get(key);
-          if (!cached || cached.renewAt <= Date.now()) {
-            const fetched = auth.type === "oauth2" ? fetchToken(auth, o) : fetchGoogleToken(auth, o);
-            // Until it arrives, everyone waits for this one request; a failure isn't kept.
-            cached = { token: fetched.then((t) => t.token), renewAt: Number.POSITIVE_INFINITY };
-            tokens.set(key, cached);
-            const entry = cached;
-            fetched.then(
+          const cached = tokens.get(key);
+          if (cached && cached.renewAt > Date.now()) return { authorization: `Bearer ${cached.token}` };
+          if (!inFlight) {
+            inFlight = (auth.type === "oauth2" ? fetchToken(auth, o) : fetchGoogleToken(auth, o)).then(
               (t) => {
-                entry.renewAt = renewAt(t.lifetimeMs);
+                tokens.set(key, { token: t.token, renewAt: renewAt(t.lifetimeMs) });
+                inFlight = null;
+                return t.token;
               },
-              () => {
-                if (tokens.get(key) === entry) tokens.delete(key);
+              (e) => {
+                // A failure isn't kept: the next call asks again.
+                inFlight = null;
+                throw e;
               },
             );
           }
-          return { authorization: `Bearer ${await cached.token}` };
+          return { authorization: `Bearer ${await inFlight}` };
         },
         rejected() {
           tokens.delete(key);
