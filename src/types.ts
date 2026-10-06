@@ -68,7 +68,11 @@ export interface TargetOptions {
   deprovision?: "deactivate" | "delete" | undefined;
   /** Per request; default 10 seconds. */
   timeoutMs?: number | undefined;
-  /** For tests. */
+  /**
+   * The fetch this target's requests go through: a proxy's, or a Workers service binding's
+   * (`env.MY_SERVICE.fetch.bind(env.MY_SERVICE)`). Default the global `fetch`. Redirects are
+   * never followed either way.
+   */
   fetch?: typeof fetch | undefined;
 }
 
@@ -112,7 +116,7 @@ export interface ScimTarget extends TargetOptions {
 /** Google Workspace, through its Directory API: users, and organizations, teams and roles as Google Groups. */
 export interface GoogleWorkspaceTarget extends TargetOptions {
   type: "google-workspace";
-  /** For tests; default the Directory API. */
+  /** The Directory API's base URL; default `https://admin.googleapis.com/admin/directory/v1`. Change it only for a proxy. */
   url?: string | undefined;
   /** Google Workspace: a service account with domain-wide delegation, acting as a Workspace admin. */
   google: {
@@ -132,7 +136,7 @@ export interface GoogleWorkspaceTarget extends TargetOptions {
      * `ba-<externalId as a slug>@<groupDomain>`.
      */
     groupEmail?: ((externalId: string) => string) | undefined;
-    /** For tests: the token endpoint. */
+    /** Google's token endpoint; default `https://oauth2.googleapis.com/token`. Change it only for a proxy. */
     tokenUrl?: string | undefined;
   };
   token?: undefined;

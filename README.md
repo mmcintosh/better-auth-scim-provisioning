@@ -22,13 +22,13 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 - 👥 **Groups**: organizations, teams and roles in your app become groups at the app (SCIM groups or Google Groups), with the provisioned members, kept in sync as people join, leave and change roles.
 - 🚪 **Real offboarding**: a ban or a delete deactivates (or deletes) the account at every app at once, not when a session expires; a timed ban is lifted on time by the scheduled run. In the field test, Cloudflare Access revoked a live session within 35 seconds.
 - 📬 **Delivery that holds up**: a database outbox with leases, retries with backoff (honouring `Retry-After`), concurrency, and a scheduled run. Once queued, a change isn't lost to an outage, a timeout or a reply that never arrived, and a 404 counts as "gone" only when the app's list agrees.
-- 🤝 **Careful adoption**: an account that already exists at the app is taken over only if it's provably this user's (ours by id, or nobody's, with the user's verified email as its userName), never handed to someone who reused a deleted user's email.
+- 🤝 **Careful adoption**: an account that already exists at the app is taken over only where you allow it (`adopt`, off by default for Google Workspace), only if it's nobody's and its userName is the user's verified email, and it's then only ever deactivated, never deleted. Never handed to someone who reused a deleted user's email.
 - 🧩 **Profiles for real apps**: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`, each built from the app's documented quirks (no PUT on groups, batches of 100, groups that can't be renamed…).
 - 🔑 **Every sign-in method apps use**: bearer tokens, Basic, an API-key header, OAuth 2.0 client credentials, and Google service accounts with domain-wide delegation.
 - 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
 - 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports.
 - 📈 **You can see it**: `scimProvisioningStatus` counts what's queued, stuck and failed at each target (or shows one user's state), `onFailure` tells you when a delivery gives up or keeps failing, and failures are logged with the app's own message.
-- ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger, and on Node.js 22 and 24, with SQLite, D1, PostgreSQL, MySQL and MongoDB (Drizzle on PostgreSQL and MySQL, Prisma on PostgreSQL: [which combinations](#databases-and-runtimes)).
+- ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger; the whole suite on Node.js 22 and 24, and the database suite on SQLite, D1, PostgreSQL, MySQL and MongoDB, with Drizzle and Prisma too ([which combinations](#databases-and-runtimes)).
 - 📦 **Supply chain**: SHA-pinned actions, CodeQL, dependency review, OpenSSF Scorecard, and a release workflow that publishes with npm provenance and an SBOM.
 
 ## ✅ Verified live
@@ -39,7 +39,7 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 | Google Workspace | ✓ | ✓ (Google Groups) | live tests in a real Workspace, which found and fixed how Google settles after creates and email changes |
 | AWS IAM Identity Center | ✓ | ✓ (including a group of over 100) | live tests with the `awsIamIdentityCenter` profile |
 
-The live tests run by hand with real credentials, not in CI. Webhooks have no third party to verify against: CI sends them over HTTP to a receiver written as shown below ([Webhooks](#webhooks)). Slack, Atlassian and GitHub Enterprise are built from each app's documentation and tested against a model of it. The code was reviewed before 0.1.0 and before 0.2.0, each time by an outside reviewer as well as a fresh internal one.
+The live tests run by hand with real credentials, not in CI. Webhooks have no third party to verify against: CI sends them over HTTP to a receiver written as shown below ([Webhooks](#webhooks)). Slack, Atlassian and GitHub Enterprise are built from each app's documentation and tested against a model of it. The code was reviewed independently before 0.1.0 and 0.2.0, and three more times before 1.0, each review's findings fixed with a test.
 
 ## Contents
 
@@ -123,6 +123,7 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `organizationId` | | Only members of this organization (Better Auth's organization plugin). |
 | `include` | | `(user) => boolean`: who else to leave out. Only `true` includes; anything else deprovisions a provisioned user at their next delivery. |
 | `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. An account that already exists at the app is still only taken over for a verified email. |
+| `adopt` | `true` (`false` for Google Workspace) | Take over an account made elsewhere when it's nobody's, active, and its userName is the user's verified email. It's then never deleted, only deactivated. |
 | `mapUser` | see below | `(user) => ScimUser`: what's sent. |
 | `groups` | `false` | Organizations as groups at the app: `true`, or `(organization) => boolean` to choose which (see [Groups](#groups)). |
 | `groupName` | the organization's name | `(organization) => string`: the group's name. |
@@ -133,6 +134,7 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `compat` | | SCIM targets: how the app differs from the standard, usually set by a profile (see [Apps](#apps)). |
 | `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
 | `timeoutMs` | `10000` | Per request. |
+| `fetch` | the global `fetch` | The fetch requests go through: a proxy's, or a Workers service binding's. |
 
 Options are checked when the plugin starts: an unknown or misspelled option, or one in the wrong place, stops it with a message naming it. The scheduled run delivers 4 jobs at once by default: `concurrency: 4` (1 to 32), shared by all targets. Retries are shared too: `retry: { maxAttempts: 8, baseDelayMs: 30000 }`. The delay doubles each attempt, or is longer if the app's `Retry-After` asks for it (up to a day). After `maxAttempts`, failures that can fix themselves are retried every 6 hours.
 
@@ -150,6 +152,8 @@ const { user } = await auth.api.scimProvisioningStatus({ body: { userId } });
 // Which jobs failed or are stuck, with the app's last error; then { after: next } for more.
 const { items, next } = await auth.api.scimProvisioningFailures({ body: { limit: 100 } });
 ```
+
+In `scimProvisioningFailures` items and `onFailure`, `kind` is what was being delivered: `user`, or a group: `group` (an organization's own group), `team` or `role`. `subjectId` is the user's, organization's or team's id, and for a role group `"<organization id>:<role>"`.
 
 `onFailure` is called when a delivery gives up (an error that won't fix itself) or reaches `retry.maxAttempts`: alert on it, so a deprovisioning that isn't getting through doesn't go unnoticed.
 
@@ -217,10 +221,11 @@ Most apps grant access by group: assign the group to the app or role there (AWS 
 - **Never in the way.** Provisioning never fails the user's own write. A failure to queue is logged, and the next reconcile catches up: until then that change isn't queued.
 - **Leases.** A job is claimed before delivery, so two workers don't deliver it at once; a group delivery renews its claim while it runs. A change that arrives during a delivery goes out straight after it.
 - **Retries.** 429 (honouring `Retry-After`, at every kind of target), 408, 5xx, timeouts, network errors, 401/403 (an expired token is the host's problem, not the user's), and a wrong target URL (a 404 for everything, or a redirect) are retried with backoff, for as long as it takes. The job's last error says which: "check the target's token", "check the target's url". Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
-- **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off. At apps that don't keep `externalId`, we can't tell that account from one made by hand in the meantime, so the job fails with a message instead of guessing.
-- **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, the user's email verified, and the account's userName that same email. With a custom `mapUser` userName (an employee id, a handle), accounts made by hand at the app are therefore never taken over: give them our `externalId` at the app, or remove them, first. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
+- **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off. At apps that don't keep `externalId`, we can't always tell that account from one made by hand in the meantime: then the job fails with a message instead of guessing, and the pending record is kept, so a later leave fails loudly too rather than passing for done.
+- **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, active, the user's email verified, the account's userName that same email, and the target allowing it (`adopt`, off by default for Google Workspace). An account taken over is marked so, and is only ever deactivated, never deleted, even with `deprovision: "delete"`. With a custom `mapUser` userName (an employee id, a handle), accounts made by hand at the app are therefore never taken over: give them our `externalId` at the app, or remove them, first. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
 - **A 404 is checked, not believed.** A user is taken as gone at the app only when the app's own list agrees. A wrong URL answers 404 for everything, and believing it would mark people deactivated here while they stay active there.
 - **Reconcile** covers every user, and every user still linked at a target, so deleted users whose deprovisioning was lost are cleaned up too.
+- **Deleted users' links are kept** (with `deprovision: "deactivate"`): the account stays at the app, deactivated, and its link (with the userName, usually the email) stays here, so switching to `delete` later can still remove it. Every reconcile looks at them again. If you need that data gone, delete those rows from `scimProvisioningLink`.
 - **No redirects.** The token only goes to the target's URL: a redirect is never followed. It's retried (a maintenance page passes), with the new location in the error, so a target moved for good shows up as "check the target's url".
 
 ## Apps
@@ -326,7 +331,7 @@ Each event holds the full current state, so applying one twice is harmless, and 
 | `group.upsert` | `group`: `displayName`, `externalId`, `members` (the users' `externalId`s); with `groups`, `teamGroups` or `roleGroups` |
 | `group.delete` | `group: { externalId }` |
 
-Every event also carries `id`, `schemaVersion` (1; a change a receiver could trip over is a new version, in a major release), `target` and `occurredAt`. Check the signature on the receiving side with the raw body:
+Every event also carries `id`, `schemaVersion` (1; a change a receiver could trip over is a new version, in a major release), `target` and `occurredAt`: when this attempt was sent (not when the change was made). A user's or group's events are sent one at a time, so a later `occurredAt` is a later state. Check the signature on the receiving side with the raw body:
 
 ```ts
 import { verifyWebhookSignature, WebhookSignatureError } from "better-auth-scim-provisioning";

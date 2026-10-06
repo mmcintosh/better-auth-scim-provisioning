@@ -4,7 +4,7 @@ A Worker whose Better Auth users are provisioned to a SCIM app, a webhook receiv
 
 - **D1** as Better Auth's database, with the package's tables in [`migrations/`](migrations);
 - deliveries right after each response, kept alive with **`waitUntil`**;
-- a **Cron Trigger** that delivers retries (an app that was down, a rate limit);
+- a **Cron Trigger** that delivers retries (an app that was down, a rate limit), every 5 minutes, 50 jobs a run: after a large reconcile, call `/admin/run` a few times, or run the cron more often, to catch up sooner;
 - organizations as **groups** at each target, named after them, so only `ADMIN_EMAILS` may create or rename organizations (see [Who can name a group?](../../README.md#groups));
 - sign-up with email verification, since only verified addresses are provisioned;
 - admin routes to see the queue, deliver now, and reconcile.

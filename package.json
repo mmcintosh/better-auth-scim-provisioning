@@ -48,7 +48,6 @@
     "release": "node scripts/release.mjs"
   },
   "peerDependencies": {
-    "@better-auth/core": ">=1.7.5 <1.8.0",
     "better-auth": ">=1.7.5 <1.8.0"
   },
   "dependencies": {

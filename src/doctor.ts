@@ -22,6 +22,7 @@ export interface CheckOptions {
   /** The test user's userName; some apps only accept addresses at a verified domain. */
   userName?: string | undefined;
   timeoutMs?: number | undefined;
+  /** The fetch requests go through (a proxy's); default the global `fetch`. */
   fetch?: typeof fetch | undefined;
 }
 
