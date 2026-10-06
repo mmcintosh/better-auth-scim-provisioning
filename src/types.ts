@@ -219,11 +219,18 @@ export interface ScimProvisioningOptions {
 
 export interface TargetRegistryOptions {
   /**
-   * How long the list of stored targets is cached, in seconds; default 60. A target looked up by
-   * id (a job's delivery) is read from the database when it isn't in the cache, so a new target
-   * gets its jobs delivered at once; a change or removal can take this long to reach every server.
+   * The host's administrators: may manage every organization's targets. Decided on the user as
+   * the database has it now (never an impersonated or banned one). Without it, only organizations'
+   * own administrators (`organizationRoles`) manage targets, each its own organization's.
    */
-  cacheSeconds?: number | undefined;
+  canManage?: ((ctx: { user: { id: string; email: string; emailVerified: boolean } & Record<string, unknown>; session: Record<string, unknown> }) => boolean | Promise<boolean>) | undefined;
+  /**
+   * The organization roles whose holders manage their organization's targets; default
+   * ["owner", "admin"]. [] leaves it to `canManage`.
+   */
+  organizationRoles?: string[] | undefined;
+  /** At most this many stored targets per organization; default 10. */
+  maxTargetsPerOrganization?: number | undefined;
   /**
    * Hosts a stored target may use although they look internal (a name without a dot, `.internal`,
    * a private address). Stored URLs are otherwise https and public only, since your server is

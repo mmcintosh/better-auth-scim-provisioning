@@ -72,8 +72,8 @@ const RELEASED = new Date("2000-01-01T00:00:00.000Z");
  * margin. A group delivery's hold is also renewed while it runs. Shorter, and a second worker
  * could claim a job still being delivered.
  */
-/** How long a paused target's jobs wait before they're looked at again. */
-const PAUSED_RECHECK_MS = 5 * 60_000;
+/** A paused target's jobs wait until then: never due, until resumed. */
+export const PAUSED_UNTIL = new Date("2999-01-01T00:00:00.000Z");
 
 const leaseFor = (target: Target | undefined, kind?: string | null) =>
   kind && kind !== "user"
@@ -137,29 +137,46 @@ const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
 
 /** The client for a target: SCIM, or Google Workspace's Directory API behind the same operations. */
 /** `change` names the change being delivered (its job and version), for webhook event ids. */
-const clientFor = (target: Target, change?: string) =>
+export const clientFor = (target: Target, change?: string) =>
   target.type === "google-workspace"
     ? googleWorkspaceClient(target)
     : target.type === "webhook"
       ? webhookClient(target, change)
       : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
 
+/** Targets that exist but aren't delivered to now (disabled, or stored credentials that can't be read): their jobs are queued, and wait. */
+const pausedTargets = new WeakSet<object>();
+export const markPaused = <T extends Target>(t: T): T => {
+  pausedTargets.add(t);
+  return t;
+};
+export const isPaused = (t: Target) => pausedTargets.has(t);
+
 /**
  * Where the targets come from, looked up when they're used: the ones in code, and (with a
- * registry) the ones stored by organizations. `get` is authoritative: null means the target
- * doesn't exist (its jobs are then dropped), never "not in a cache yet". "paused" means it exists
- * but isn't delivered to now (disabled, or its stored credentials can't be read): its jobs wait.
- * `all` lists only the targets delivered to.
+ * registry) the ones stored by organizations, read from the database each time. Paused targets
+ * are included everywhere (isPaused), so changes are queued for them; delivery holds their jobs.
  */
 export interface TargetSource {
-  all(): Promise<Target[]>;
-  get(id: string): Promise<Target | "paused" | null>;
+  /** Some targets are limited to an organization: a user's change then concerns only some targets. */
+  scoped: boolean;
+  /** The target with this id, or null: it doesn't exist (its jobs are then dropped). */
+  get(id: string): Promise<Target | null>;
+  /** The targets that concern these organizations: the unscoped ones, and those of these organizations. */
+  forOrganizations(organizationIds: readonly string[]): Promise<Target[]>;
+  /** Every target, for the host's own endpoints (status, reconcile). */
+  every(): Promise<Target[]>;
 }
 
 /** The targets given in code, fixed at startup. */
 export function staticTargets(list: Target[]): TargetSource {
   const byId = new Map(list.map((t) => [t.id, t]));
-  return { all: async () => list, get: async (id) => byId.get(id) ?? null };
+  return {
+    scoped: list.some((t) => t.organizationId),
+    get: async (id) => byId.get(id) ?? null,
+    forOrganizations: async (ids) => list.filter((t) => !t.organizationId || ids.includes(t.organizationId)),
+    every: async () => list,
+  };
 }
 
 export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }, source: TargetSource = staticTargets(options.targets)) {
@@ -428,8 +445,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    */
   async function run(job: Job, round = 0): Promise<Outcome> {
     const now = Date.now();
-    const known = await source.get(job.targetId);
-    const lockedUntil = now + leaseFor(typeof known === "object" ? (known ?? undefined) : undefined, job.kind);
+    const lockedUntil = now + leaseFor((await source.get(job.targetId)) ?? undefined, job.kind);
     const claimed = await adapter.updateMany({
       model: JOB_MODEL,
       // Still due and not failed, not just free: a worker holding an old list of due jobs must not
@@ -451,9 +467,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }] });
       return "done";
     }
-    if (target === "paused") {
-      // Kept, not attempted: looked at again in a while, delivered once the target is back.
-      await adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }], update: { lockedUntil: RELEASED, nextAttemptAt: new Date(now + PAUSED_RECHECK_MS) } });
+    if (isPaused(target)) {
+      // Kept, not attempted, and out of the scheduled run's way until the target is resumed
+      // (resume) or the job is queued again (a change, a reconcile).
+      await adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }], update: { lockedUntil: RELEASED, nextAttemptAt: PAUSED_UNTIL } });
       return "busy";
     }
     // Duplicates (a database without the UNIQUE key): one delivery per user at a time.
@@ -1024,5 +1041,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     );
   }
 
-  return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures };
+  /** A resumed (or fixed) target: its waiting and failed jobs are due now. */
+  async function resume(targetId: string): Promise<number> {
+    return adapter.updateMany({ model: JOB_MODEL, where: [{ field: "targetId", value: targetId }], update: { nextAttemptAt: new Date(), failed: false } });
+  }
+
+  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures };
 }

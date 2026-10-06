@@ -6,6 +6,7 @@
 // databases. Each test gets a fresh, empty database.
 import { afterEach, describe, expect, it } from "vitest";
 import { createHost, type HostDatabase, schemaOptions } from "../support/host";
+import { mockScim } from "../support/mock-scim";
 
 const KIND = process.env.ADAPTER_DB;
 const URL_ = process.env.ADAPTER_URL ?? "";
@@ -350,6 +351,33 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     await h.settle();
     const sizes = () => Object.fromEntries([...h.app.groups.values()].map((g) => [g.displayName, g.members.length]));
     expect(sizes()).toMatchObject({ "Acme / Red": 1, "Acme / admin": 1 });
+  });
+
+  it("the registry: a stored target per organization (long sealed text, booleans, exact matches)", async () => {
+    // A long token: a sealed Google private key is thousands of characters, so the column must hold them.
+    const remote = mockScim({ token: "k".repeat(3000) });
+    const h = await host({ targets: [], registry: { fetch: remote.fetch } });
+    const signUp = await h.auth.api.signUpEmail({ body: { email: "owner@example.com", password: "correct-horse-battery", name: "Olive Owner" } });
+    await h.ctx.internalAdapter.updateUser(signUp.user.id, { emailVerified: true });
+    await h.settle();
+    const res = await h.auth.api.signInEmail({ body: { email: "owner@example.com", password: "correct-horse-battery" }, asResponse: true });
+    const headers = new Headers({ cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") });
+    const acme = (await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers }))!;
+    const { target } = await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, settings: { url: "https://app.example.com/scim/v2", groups: true }, credentials: { token: remote.token } }, headers });
+    await h.settle();
+    expect(appUsers(remote).map((u) => u.displayName)).toEqual(["Olive Owner"]);
+    // Someone outside Acme: nothing for Acme's app.
+    await h.user("Bob Builder");
+    expect(appUsers(remote)).toHaveLength(1);
+    await h.auth.api.scimProvisioningUpdateTarget({ body: { id: target.id, enabled: false }, headers });
+    expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ id: target.id, enabled: false, credentials: { kind: "bearer" } })]);
+    await h.auth.api.scimProvisioningDeleteTarget({ body: { id: target.id }, headers });
+    expect(await h.links()).toEqual([]);
+    // The largest credentials accepted (a 16 KB key, about 33 KB sealed) fit and read back: the
+    // columns are text (64 KB on MySQL), as Better Auth's migrator and generators make them.
+    const key = `-----BEGIN PRIVATE KEY-----${"k".repeat(16_384 - 54)}-----END PRIVATE KEY-----`;
+    const google = await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, enabled: false, settings: { type: "google-workspace", google: { clientEmail: "sa@p.iam.gserviceaccount.com", adminEmail: "admin@example.com" } }, credentials: { privateKey: key } }, headers });
+    expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ id: google.target.id, credentials: { kind: "google-service-account" } })]);
   });
 
   it("a timed ban is lifted when it runs out", async () => {

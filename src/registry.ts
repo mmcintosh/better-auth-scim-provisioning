@@ -2,9 +2,9 @@
 // at runtime, stored in the database with their credentials sealed (encrypted with Better Auth's
 // secret). Only data is stored, never code: a profile is chosen by name, and every stored target
 // is tied to one organization, whose members and groups are the only ones it ever receives.
-import { symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
+import { parseEnvelope, symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
 import * as z from "zod";
-import type { Adapter, TargetSource } from "./outbox";
+import { type Adapter, IN_BATCH, markPaused, type TargetSource } from "./outbox";
 import { profiles } from "./profiles";
 import type { ScimTarget, Target, TargetRegistryOptions } from "./types";
 
@@ -29,16 +29,19 @@ export interface TargetRow {
 
 /** A secret or header value: no control characters (a line break would break the request, and errors could repeat it). */
 const hasControl = (text: string) => [...text].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
-export const secretText = (min = 1) =>
+export const secretText = (min = 1, max = 65536) =>
   z
     .string()
     .min(min, min > 1 ? `must be at least ${min} characters` : undefined)
+    .max(max)
     .refine((text) => !hasControl(text), "must not contain control characters (a line break or tab, say)");
 
 /** What a stored target may say about itself: data only (no functions), and no organization (it's the owner's). */
 export const storedSettingsSchema = z.strictObject({
+  /** A label for people: the target's id is generated. */
+  name: z.string().min(1).max(100).refine((t) => !hasControl(t), "must not contain control characters").optional(),
   type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
-  url: z.string().optional(),
+  url: z.string().max(2048).optional(),
   profile: z.enum(Object.keys(profiles) as [keyof typeof profiles, ...(keyof typeof profiles)[]]).optional(),
   update: z.enum(["put", "patch"]).optional(),
   compat: z
@@ -62,14 +65,14 @@ export type StoredSettings = z.infer<typeof storedSettingsSchema>;
 
 /** A stored target's credentials: one kind, by its type. */
 export const storedCredentialsSchema = z.union([
-  z.strictObject({ token: secretText() }),
-  z.strictObject({ auth: z.strictObject({ type: z.literal("basic"), username: secretText(), password: secretText() }) }),
-  z.strictObject({ auth: z.strictObject({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,64}$/), value: secretText() }) }),
+  z.strictObject({ token: secretText(1, 8192) }),
+  z.strictObject({ auth: z.strictObject({ type: z.literal("basic"), username: secretText(1, 1024), password: secretText(1, 4096) }) }),
+  z.strictObject({ auth: z.strictObject({ type: z.literal("header"), name: z.string().regex(/^[A-Za-z0-9-]{1,64}$/), value: secretText(1, 8192) }) }),
   z.strictObject({
-    auth: z.strictObject({ type: z.literal("oauth2"), tokenUrl: z.string(), clientId: secretText(), clientSecret: secretText(), scope: z.string().optional(), clientAuth: z.enum(["body", "basic"]).optional() }),
+    auth: z.strictObject({ type: z.literal("oauth2"), tokenUrl: z.string().max(2048), clientId: secretText(1, 1024), clientSecret: secretText(1, 4096), scope: z.string().max(1024).optional(), clientAuth: z.enum(["body", "basic"]).optional() }),
   }),
-  z.strictObject({ secret: secretText(32) }),
-  z.strictObject({ privateKey: z.string().includes("PRIVATE KEY") }),
+  z.strictObject({ secret: secretText(32, 1024) }),
+  z.strictObject({ privateKey: z.string().max(16384).includes("PRIVATE KEY") }),
 ]);
 export type StoredCredentials = z.infer<typeof storedCredentialsSchema>;
 
@@ -94,10 +97,11 @@ export async function unseal(key: SealKey, row: Pick<TargetRow, "targetId" | "or
 }
 
 /**
- * A stored target's URL: https only, and never an address inside your network (localhost, private,
- * link-local or shared ranges, .local and .internal names), since your server is the one calling
- * it. `allowHosts` names exceptions. A name that resolves to a private address can't be caught
- * here (Workers can't resolve names): put the server where that can't reach anything it shouldn't.
+ * A stored target's URL: https on port 443, and never an address inside your network
+ * (localhost, names without a dot, .local, .internal, .lan, .home.arpa, and private, loopback,
+ * link-local, shared, benchmark, documentation and reserved addresses, IPv4 inside IPv6
+ * included), since your server is the one calling it. `allowHosts` names exceptions. A public
+ * name that resolves to a private address is refused when the request is made (resolvesPrivate).
  */
 export function publicUrl(value: string, allowHosts: readonly string[] = [], o: { query?: boolean } = {}): string | null {
   let u: URL;
@@ -109,35 +113,115 @@ export function publicUrl(value: string, allowHosts: readonly string[] = [], o: 
   if (u.protocol !== "https:") return "must be https";
   if (u.username || u.password || u.hash || value.includes("#")) return "must have no credentials or fragment";
   if (!o.query && (u.search || value.includes("?"))) return "must have no query";
-  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const host = hostOf(u);
   if (allowHosts.map((h) => h.toLowerCase()).includes(host)) return null;
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || !host.includes(".") && !host.includes(":")) return "must be a public host";
-  if (privateAddress(host)) return "must not be a private, loopback or link-local address";
+  // URL drops the default port: any port left isn't 443.
+  if (u.port) return "must use the standard https port (443)";
+  if (internalName(host)) return "must be a public host";
+  if (privateAddress(host)) return "must not be a private, loopback, link-local or reserved address";
   return null;
 }
 
-function privateAddress(host: string): boolean {
+/** The host as compared: lower case, no brackets, no trailing dot ("localhost." is localhost). URL has already turned other spellings of IPv4 (2130706433, 0x7f.1, 127.1) into dotted form. */
+const hostOf = (u: URL) => u.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+
+const internalName = (host: string) =>
+  host === "localhost" || [".localhost", ".local", ".internal", ".lan", ".home.arpa", ".intranet", ".corp", ".svc", ".cluster.local"].some((s) => host.endsWith(s)) || (!host.includes(".") && !host.includes(":"));
+
+function privateV4(a: number, b: number, c: number): boolean {
+  return (
+    a === 0 || a === 10 || a === 127 || a >= 224 ||
+    (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) || // shared (carrier-grade NAT)
+    (a === 198 && (b === 18 || b === 19)) || // benchmarking
+    (a === 192 && b === 0 && (c === 0 || c === 2)) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113) // special and documentation
+  );
+}
+
+/** An IPv6 address as its eight 16-bit words (a dotted IPv4 tail included), or null. */
+function v6words(host: string): number[] | null {
+  let h = host.split("%")[0] as string;
+  const dotted = /^(.*:)(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h);
+  if (dotted) {
+    const [p, q, r, t] = dotted.slice(2).map(Number) as [number, number, number, number];
+    h = `${dotted[1]}${((p << 8) | q).toString(16)}:${((r << 8) | t).toString(16)}`;
+  }
+  const halves = h.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? (halves[0] as string).split(":") : [];
+  const tail = halves.length === 2 ? (halves[1] ? (halves[1] as string).split(":") : []) : null;
+  const words = tail === null ? head : [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill("0"), ...tail];
+  if (words.length !== 8 || words.some((w) => !/^[0-9a-f]{1,4}$/.test(w))) return null;
+  return words.map((w) => Number.parseInt(w, 16));
+}
+
+/** Is this IP address (v4 dotted, or v6) one inside a network rather than on the internet? */
+export function privateAddress(host: string): boolean {
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (v4) {
-    const [a, b] = [Number(v4[1]), Number(v4[2])];
-    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
-  }
+  if (v4) return privateV4(Number(v4[1]), Number(v4[2]), Number(v4[3]));
   if (!host.includes(":")) return false;
-  const h = host.toLowerCase();
-  // An IPv4 address inside IPv6 (::ffff:a.b.c.d, which URL writes as ::ffff:XXXX:XXXX): judged as IPv4.
-  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
-  if (mapped) {
-    const [hi, lo] = [Number.parseInt(mapped[1] as string, 16), Number.parseInt(mapped[2] as string, 16)];
-    return privateAddress(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+  const w = v6words(host.toLowerCase());
+  if (!w) return true; // not an address we can read: refused
+  const [w0, w1, w2, w3, w4, w5, w6, w7] = w as [number, number, number, number, number, number, number, number];
+  const embedded = () => privateV4(w6 >> 8, w6 & 255, w7 >> 8);
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0) {
+    if (w4 === 0 && (w5 === 0xffff || w5 === 0)) return w5 === 0 && w6 === 0 ? true : embedded(); // ::, ::1, mapped ::ffff:a.b.c.d, compatible ::a.b.c.d
+    if (w4 === 0xffff && w5 === 0) return embedded(); // SIIT ::ffff:0:a.b.c.d
+    return true;
   }
-  return h === "::" || h === "::1" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") || h.startsWith("feb") || h.startsWith("ff");
+  return (
+    (w0 === 0x64 && w1 === 0xff9b) || // NAT64, well-known and local: reaches IPv4 inside
+    w0 === 0x2002 || // 6to4
+    (w0 === 0x2001 && (w1 === 0 || w1 === 0xdb8)) || // Teredo, documentation
+    (w0 === 0x100 && w1 === 0 && w2 === 0 && w3 === 0) || // discard
+    (w0 & 0xfe00) === 0xfc00 || // unique local
+    (w0 & 0xffc0) === 0xfe80 || (w0 & 0xffc0) === 0xfec0 || // link-local, site-local
+    (w0 & 0xff00) === 0xff00 // multicast
+  );
+}
+
+/**
+ * Wraps a fetch so a stored target's host is looked up first, and refused if any address it
+ * resolves to is private (a public name pointing inside: 127.0.0.1.nip.io, split-horizon DNS).
+ * Where the runtime can't resolve names (Workers, whose fetch can't reach private networks
+ * anyway), it's the URL check alone. A name that resolves differently a moment later (DNS
+ * rebinding) can't be ruled out this way: an egress proxy can.
+ */
+export function guardedFetch(allowHosts: readonly string[] = [], base?: typeof fetch): typeof fetch {
+  return async (input, init) => {
+    const u = new URL(input instanceof Request ? input.url : String(input));
+    const host = hostOf(u);
+    if (!allowHosts.map((h) => h.toLowerCase()).includes(host) && !host.includes(":") && !/^[\d.]+$/.test(host)) {
+      const addresses = await resolve(host);
+      if (addresses?.some(privateAddress)) throw new Error(`${host} resolves to a private address`);
+    }
+    return (base ?? fetch)(input, init);
+  };
+}
+
+/** The addresses a name resolves to, where the runtime can tell (Node.js, Bun, Deno); null elsewhere. */
+async function resolve(host: string): Promise<string[] | null> {
+  // Workers: node:dns would ask a DNS-over-HTTPS service, a request before every request, and its
+  // fetch can't reach private networks anyway.
+  if ((globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent === "Cloudflare-Workers") return null;
+  const get = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process?.getBuiltinModule;
+  const dns = typeof get === "function" ? (get("node:dns") as { promises?: { lookup(h: string, o: { all: true; verbatim: true }): Promise<{ address: string }[]> } } | undefined) : undefined;
+  if (!dns?.promises?.lookup) return null;
+  try {
+    return (await dns.promises.lookup(host, { all: true, verbatim: true })).map((a) => a.address.toLowerCase());
+  } catch {
+    return null; // no such name: the request fails on its own
+  }
 }
 
 /** A stored row as a target: its settings, its credentials, its profile, tied to its organization. */
 export async function targetOf(key: SealKey, row: TargetRow, fetch?: typeof globalThis.fetch): Promise<Target> {
-  const settings = storedSettingsSchema.parse(JSON.parse(row.config));
-  const credentials = await unseal(key, row);
-  const { profile, google, ...rest } = settings;
+  return assemble(row, storedSettingsSchema.parse(JSON.parse(row.config)), await unseal(key, row), fetch);
+}
+
+/** A target from its parts: settings and credentials already checked. */
+export function assemble(row: Pick<TargetRow, "targetId" | "organizationId">, settings: StoredSettings, credentials: StoredCredentials, fetch?: typeof globalThis.fetch): Target {
+  const { profile, google, name: _, ...rest } = settings;
   const base = { ...rest, id: row.targetId, organizationId: row.organizationId, ...(fetch ? { fetch } : {}) };
   if (settings.type === "webhook") return { ...base, type: "webhook", url: settings.url as string, secret: (credentials as { secret: string }).secret } as Target;
   if (settings.type === "google-workspace") return { ...base, type: "google-workspace", google: { ...(google as object), privateKey: (credentials as { privateKey: string }).privateKey } } as Target;
@@ -145,46 +229,117 @@ export async function targetOf(key: SealKey, row: TargetRow, fetch?: typeof glob
   return profile ? profiles[profile](scim) : scim;
 }
 
-/** Code targets first, then stored ones: listed from a short cache, but looked up in the database on a miss. */
-export function registrySource(code: Target[], adapter: Adapter, key: SealKey, options: TargetRegistryOptions, log: { error(m: string): void }): TargetSource & { forget(): void } {
-  const cacheMs = (options.cacheSeconds ?? 60) * 1000;
+/**
+ * What's wrong with a stored target's settings and credentials, beyond their shapes: the
+ * credentials its type takes, and URLs that are https and public (`allowHosts` aside).
+ */
+export function storedProblems(settings: StoredSettings, credentials: StoredCredentials, allowHosts: readonly string[] = []): string[] {
+  const issues: string[] = [];
+  const type = settings.type ?? "scim";
+  const kind = credentialsKind(credentials);
+  const takes = { scim: ["bearer", "basic", "header", "oauth2"], webhook: ["webhook-secret"], "google-workspace": ["google-service-account"] }[type];
+  if (!takes.includes(kind)) issues.push(`credentials: a ${type} target takes ${type === "scim" ? "token or auth" : type === "webhook" ? "secret" : "privateKey"}`);
+  if (type === "google-workspace") {
+    if (!settings.google) issues.push("settings.google: required for a google-workspace target");
+    if (settings.url !== undefined) issues.push("settings.url: not for a google-workspace target");
+  } else {
+    if (settings.google) issues.push(`settings.google: not for a ${type} target`);
+    if (settings.url === undefined) issues.push("settings.url: required");
+    else {
+      const problem = publicUrl(settings.url, allowHosts, { query: type === "webhook" });
+      if (problem) issues.push(`settings.url: ${problem}`);
+    }
+  }
+  if (type !== "scim") for (const k of ["profile", "update", "compat"] as const) if (settings[k] !== undefined) issues.push(`settings.${k}: for scim targets only`);
+  if ("auth" in credentials && credentials.auth.type === "oauth2") {
+    const problem = publicUrl(credentials.auth.tokenUrl, allowHosts);
+    if (problem) issues.push(`credentials.auth.tokenUrl: ${problem}`);
+  }
+  return issues;
+}
+
+/** Stand-in credentials for a paused target whose own can't be read: never sent (delivery holds a paused target's jobs). */
+const UNREADABLE: Record<string, StoredCredentials> = {
+  scim: { token: "unreadable" },
+  webhook: { secret: "unreadable-unreadable-unreadable-" },
+  "google-workspace": { privateKey: "-----BEGIN PRIVATE KEY----- unreadable" },
+};
+
+const truthy = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
+
+/** Was this sealed with an older secret (Better Auth's `secrets` rotation)? Then it's sealed again with the current one. */
+const sealedWithOldSecret = (key: SealKey, sealed: string) => typeof key !== "string" && parseEnvelope(sealed)?.version !== key.currentVersion;
+
+/**
+ * Code targets, and stored ones read from the database when they're needed: by id for a delivery,
+ * by organization for a change. Nothing is listed in memory, so the cost of a change doesn't grow
+ * with the number of organizations, and every server sees a target the moment it's stored,
+ * disabled or removed. Decrypted targets are kept while their row is unchanged.
+ */
+export function registrySource(code: Target[], adapter: Adapter, key: SealKey, options: TargetRegistryOptions, log: { error(m: string): void }): TargetSource {
   const byId = new Map(code.map((t) => [t.id, t]));
-  let cache: { at: number; targets: Map<string, Target | "paused"> } | null = null;
-  const build = async (row: TargetRow): Promise<Target | "paused"> => {
+  // Your own fetch replaces the resolving check (a proxy's, say); otherwise names are checked before each request.
+  const fetchFor = options.fetch ?? guardedFetch(options.allowHosts);
+  const built = new Map<string, { stamp: string; target: Target }>();
+  const build = async (row: TargetRow): Promise<Target> => {
+    const stamp = `${truthy(row.enabled)}|${row.config}|${row.sealed}`;
+    const hit = built.get(row.targetId);
+    if (hit?.stamp === stamp) return hit.target;
+    let target: Target;
+    let settings: StoredSettings | undefined;
     try {
-      const target = await targetOf(key, row, options.fetch);
-      return row.enabled ? target : "paused";
+      settings = storedSettingsSchema.parse(JSON.parse(row.config));
+      const credentials = await unseal(key, row);
+      target = assemble(row, settings, credentials, fetchFor);
+      if (!truthy(row.enabled)) markPaused(target);
+      if (sealedWithOldSecret(key, row.sealed)) {
+        try {
+          await adapter.update({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }], update: { sealed: await seal(key, row.targetId, row.organizationId, credentials) } });
+        } catch (e) {
+          log.error(`[scim] stored target ${row.targetId}: could not seal its credentials with the current secret: ${(e as Error).message}`);
+        }
+      }
     } catch (e) {
-      // A row that no longer builds (the secret changed, say) is logged and treated as paused:
-      // its jobs wait, never dropped.
-      log.error(`[scim] stored target ${row.targetId}: ${(e as Error).message}`);
-      return "paused";
+      // Paused, never dropped: its jobs wait until it's given new credentials (or the secret is back).
+      log.error(`[scim] stored target ${row.targetId}: ${(e as Error).message}; paused until it's fixed`);
+      const type = settings?.type ?? "scim";
+      target = markPaused(assemble(row, settings ?? { url: "https://unreadable.invalid" }, UNREADABLE[type] as StoredCredentials));
+    }
+    built.set(row.targetId, { stamp, target });
+    if (built.size > 1000) built.delete(built.keys().next().value as string);
+    return target;
+  };
+  /** Every row matching, a page at a time, exact matches only (a collation mustn't widen it). */
+  const rows = async (where: { field: string; value: unknown; operator?: "in" }[], keep: (r: TargetRow) => boolean) => {
+    const out: TargetRow[] = [];
+    for (let offset = 0; ; offset += 500) {
+      const page = (await adapter.findMany({ model: TARGET_MODEL, where, limit: 500, offset, sortBy: { field: "targetId", direction: "asc" } })) as TargetRow[];
+      out.push(...page.filter((r) => keep(r) && !byId.has(r.targetId)));
+      if (page.length < 500) return out;
     }
   };
-  const load = async () => {
-    if (cache && Date.now() - cache.at < cacheMs) return cache.targets;
-    const rows = (await adapter.findMany({ model: TARGET_MODEL, limit: 10_000 })) as TargetRow[];
-    const targets = new Map<string, Target | "paused">();
-    for (const row of rows) if (!byId.has(row.targetId)) targets.set(row.targetId, await build(row));
-    cache = { at: Date.now(), targets };
-    return targets;
-  };
   return {
-    async all() {
-      const stored = await load();
-      return [...code, ...[...stored.values()].filter((t): t is Target => t !== "paused")];
-    },
+    scoped: true,
     async get(id) {
       const inCode = byId.get(id);
       if (inCode) return inCode;
-      const cached = (await load()).get(id);
-      if (cached !== undefined) return cached;
-      // Not in the cache: maybe created since (by another isolate). The database decides.
-      const row = ((await adapter.findMany({ model: TARGET_MODEL, where: [{ field: "targetId", value: id }], limit: 2 })) as TargetRow[]).find((r) => r.targetId === id);
+      const [row] = await rows([{ field: "targetId", value: id }], (r) => r.targetId === id);
       return row ? build(row) : null;
     },
-    forget() {
-      cache = null;
+    async forOrganizations(organizationIds) {
+      const ids = [...new Set(organizationIds)];
+      const stored: Target[] = [];
+      // D1 allows 100 bound parameters per query.
+      for (let i = 0; i < ids.length; i += IN_BATCH) {
+        const batch = ids.slice(i, i + IN_BATCH);
+        for (const row of await rows([{ field: "organizationId", value: batch, operator: "in" }], (r) => batch.includes(r.organizationId))) stored.push(await build(row));
+      }
+      return [...code.filter((t) => !t.organizationId || ids.includes(t.organizationId)), ...stored];
+    },
+    async every() {
+      const stored: Target[] = [];
+      for (const row of await rows([], () => true)) stored.push(await build(row));
+      return [...code, ...stored];
     },
   };
 }

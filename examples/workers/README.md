@@ -6,10 +6,11 @@ A Worker whose Better Auth users are provisioned to a SCIM app, a webhook receiv
 - deliveries right after each response, kept alive with **`waitUntil`**;
 - a **Cron Trigger** that delivers retries (an app that was down, a rate limit), every 5 minutes, 50 jobs a run: after a large reconcile, call `/admin/run` a few times, or run the cron more often, to catch up sooner;
 - organizations as **groups** at each target, named after them, so only `ADMIN_EMAILS` may create or rename organizations (see [Who can name a group?](../../README.md#groups));
+- each organization's **own apps**, connected at runtime by its owners and admins through the target registry (`/api/auth/scim-provisioning/targets`; `ADMIN_EMAILS` manage every organization's), see [Organizations' own targets](../../README.md#organizations-own-targets);
 - sign-up with email verification, since only verified addresses are provisioned;
 - admin routes to see the queue, deliver now, and reconcile.
 
-It's tested in CI inside workerd: [`test/example/workers.test.ts`](../../test/example/workers.test.ts) bundles it with this repository's source, runs it with D1 and the migration, the SCIM app and webhook mocked, and drives sign-up, verification, an organization, a failed delivery retried by the Cron Trigger, an account deletion and the admin routes. It also checks the dev mailbox stays off outside `localhost`. A second CI job installs this repository's package into it as npm would (packed), typechecks it and builds it with Wrangler.
+It's tested in CI inside workerd: [`test/example/workers.test.ts`](../../test/example/workers.test.ts) bundles it with this repository's source, runs it with D1 and the migration, the SCIM app and webhook mocked, and drives sign-up, verification, an organization, an organization's own app connected through the registry, a failed delivery retried by the Cron Trigger, an account deletion and the admin routes. It also checks the dev mailbox stays off outside `localhost`. A second CI job installs this repository's package into it as npm would (packed), typechecks it and builds it with Wrangler.
 
 > The example on `main` follows the next release: it may use features not yet on npm. For the published version, copy the example from that version's tag.
 
@@ -60,7 +61,7 @@ npm run deploy
 | --- | --- |
 | [`src/auth.ts`](src/auth.ts) | Better Auth and the targets, from the Worker's settings |
 | [`src/index.ts`](src/index.ts) | the routes, `waitUntil` and the Cron Trigger |
-| [`migrations/`](migrations) | the tables (`0001`), and 1.0's group-link columns and index (`0002`); the test fails if they're behind the plugin's schema |
+| [`migrations/`](migrations) | the tables (`0001`), 1.0's group-link columns and index (`0002`), and 1.1's target registry (`0003`); the test fails if they're behind the plugin's schema |
 | [`wrangler.jsonc`](wrangler.jsonc) | D1, the cron schedule and the variables |
 
 For sign-in as well as provisioning, see better-auth-saml-idp's [guide to using both together](https://github.com/mmcintosh/better-auth-saml-idp/blob/main/docs/guide/provisioning.md); its Workers example has an admin page for provisioning too.
