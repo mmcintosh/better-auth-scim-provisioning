@@ -96,6 +96,9 @@ export interface GroupLink {
   key: string;
   targetId: string;
   organizationId: string;
+  /** Which group: "group", "team" or "role", and its id. Null in links written before 1.0. */
+  kind?: string | null;
+  subjectId?: string | null;
   /** The app's id for the group; empty while its create is pending. */
   remoteId: string;
   displayName: string;
@@ -615,7 +618,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   async function saveGroupLink(target: Target, ref: GroupRef, organizationId: string, fields: { remoteId: string; displayName: string }) {
     const key = keyFor(ref.kind, target.id, ref.id);
-    const update = { ...fields, syncedAt: new Date() };
+    // kind and subjectId are written on every save, so links from before 1.0 gain them too.
+    const update = { ...fields, kind: ref.kind, subjectId: ref.id, syncedAt: new Date() };
     if ((await adapter.updateMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }], update })) > 0) return;
     await adapter.create({ model: GROUP_LINK_MODEL, data: { key, targetId: target.id, organizationId, ...update } });
   }
@@ -810,10 +814,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   /**
-   * A link's group, read from its key ("<target>:group|team|role:<id>"), so the schema stays as in
-   * 0.1.0: a new column would make Better Auth refuse every request until the host migrated.
+   * A link's group: from its kind and subjectId, or, for a link written before 1.0, from its key
+   * ("<target>:group|team|role:<id>").
    */
   const refOfLink = (l: GroupLink): GroupRef => {
+    if ((l.kind === "group" || l.kind === "team" || l.kind === "role") && l.subjectId) return { kind: l.kind, id: l.subjectId };
     const rest = l.key.slice(l.targetId.length + 1);
     const at = rest.indexOf(":");
     const kind = rest.slice(0, at);

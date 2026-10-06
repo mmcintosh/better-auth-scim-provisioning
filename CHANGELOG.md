@@ -22,6 +22,8 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Changed
 
+- **Upgrading needs a database migration** (`npx auth migrate`, or `npx auth generate` for Drizzle and Prisma): group links gain two optional columns, `kind` and `subjectId`, saying which group each is (an organization's, a team's or a role's) instead of it being read from the link's key. Better Auth checks the schema at runtime, so migrate before deploying. Links written before keep working and gain the columns as they're next updated. This is the schema 1.0 keeps.
+- **Reconcile goes a page at a time by default** (500): a call without `limit` used to walk every user, link and group at once, past what a Workers invocation can do. Call again with `after: next` until `next` is null.
 - **Unknown, misspelled or misplaced options are refused at startup** instead of being dropped without a word. A target with `organisationId` (British spelling) used to provision every verified user instead of one organization's members. The error names the option and, where it's clear, what was meant (`did you mean organizationId?`, or that `groups` is an option of each target). `update` and `compat` are refused on webhook and Google Workspace targets, where they did nothing; the types say so too. **Check your options when upgrading:** anything the plugin ignored before now stops it from starting.
 
 ### Documentation

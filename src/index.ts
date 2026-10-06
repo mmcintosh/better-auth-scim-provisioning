@@ -258,7 +258,12 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         fields: {
           key: { type: "string", required: true, unique: true },
           targetId: { type: "string", required: true, index: true },
+          /** The organization the group belongs to (its own group's, or its team's or role's). */
           organizationId: { type: "string", required: true },
+          /** "group" (an organization), "team" or "role"; empty in links written before 1.0. */
+          kind: { type: "string", required: false },
+          /** The organization's, team's or role's id; empty in links written before 1.0. */
+          subjectId: { type: "string", required: false },
           remoteId: { type: "string", required: true, index: true },
           displayName: { type: "string", required: true },
           syncedAt: { type: "date", required: true },
@@ -411,8 +416,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       /**
        * Queue every user for every target (or one), and every user still linked at a target who no
        * longer exists (deleted users whose deprovisioning was lost): after adding or fixing a
-       * target, or to repair drift. Delivery then happens through scimProvisioningRun. With
-       * `limit`, one page at a time: call again with `after: next` until `next` is null.
+       * target, or to repair drift. Delivery then happens through scimProvisioningRun. One page at
+       * a time (`limit`, 500 by default): call again with `after: next` until `next` is null.
        */
       scimProvisioningReconcile: createAuthEndpoint.serverOnly(
         {
@@ -427,7 +432,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           const targetId = ctx.body?.targetId;
           if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           const targetIds = targetId ? [targetId] : all;
-          let budget = ctx.body?.limit ?? Number.POSITIVE_INFINITY;
+          // A page at a time, 500 by default: all at once would run past a Workers invocation.
+          let budget = ctx.body?.limit ?? 500;
           let queued = 0;
           // The cursor: "u:<last user id>" while walking users, then "l:<target>:<last user id>"
           // while walking each target's links, then the groups ("g:…", "G:…", below).
