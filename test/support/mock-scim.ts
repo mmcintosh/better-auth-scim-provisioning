@@ -32,12 +32,18 @@ export type Fault = { status: number; retryAfter?: string; detail?: string } | {
  * page at a time); at most 100 members on create and 100 member changes per PATCH; no member
  * "replace" and no empty member lists. "atlassian": groups can't be renamed.
  */
-export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number } = {}) {
+/**
+ * `membersOnRequest`: a group's members are only in a response that asks for them
+ * (`attributes=members`), as apps may do. `indexPaged`: users in a group are listed with
+ * `Users?filter=groups.value eq "…"`, pageSize at a time, by startIndex and totalResults (no cursor).
+ */
+export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
   const groups = new Map<string, StoredGroup>();
   const requests: { method: string; path: string; body?: unknown }[] = [];
   const faults: Fault[] = [];
+  const aimed: { method: string; path: RegExp; fault: Fault }[] = [];
   let next = 1;
   let gate: Promise<void> | null = null;
 
@@ -59,7 +65,8 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     requests.push({ method, path: path + url.search, ...(body ? { body } : {}) });
     if (gate) await gate;
 
-    const fault = faults.shift();
+    const at = aimed.findIndex((a) => a.method === method && a.path.test(path));
+    const fault = at >= 0 ? aimed.splice(at, 1)[0]?.fault : faults.shift();
     if (fault && "lostReply" in fault) {
       await answer(url, method, path, body, init);
       throw new TypeError("network connection lost");
@@ -87,6 +94,14 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     if (!m) return error(404, "no such endpoint");
     const id = m[1] ? decodeURIComponent(m[1]) : undefined;
 
+    if (method === "GET" && !id && o.indexPaged && /^groups\.value eq "/.test(url.searchParams.get("filter") ?? "")) {
+      const gid = JSON.parse((url.searchParams.get("filter") ?? "").replace(/^groups\.value eq /, "")) as string;
+      const ids = groups.get(gid)?.members.map((m) => m.value) ?? [];
+      const size = o.pageSize ?? 100;
+      const start = Math.max(1, Number(url.searchParams.get("startIndex") || 1));
+      const page = ids.slice(start - 1, start - 1 + size).map((uid) => users.get(uid)).filter(Boolean).map((x) => view(x as StoredUser));
+      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults: ids.length, startIndex: start, itemsPerPage: page.length, Resources: page });
+    }
     if (method === "GET" && !id && o.like === "aws" && /^groups\.value eq "/.test(url.searchParams.get("filter") ?? "")) {
       const gid = JSON.parse((url.searchParams.get("filter") ?? "").replace(/^groups\.value eq /, "")) as string;
       const ids = groups.get(gid)?.members.map((m) => m.value) ?? [];
@@ -155,7 +170,12 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
 
   /** /Groups: displayName unique (case-insensitive), members must be known users, PATCH members. */
   function group(url: URL, method: string, id: string | undefined, body: Record<string, unknown> | undefined): Response {
-    const view = (gr: StoredGroup) => ({ schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"], ...gr, ...(o.like === "aws" ? { members: [] } : {}) });
+    const asked = (url.searchParams.get("attributes") ?? "").split(",").includes("members");
+    const view = (gr: StoredGroup) => {
+      const { members, ...rest } = gr;
+      const shown = o.like === "aws" ? [] : o.membersOnRequest && !asked ? undefined : members;
+      return { schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"], ...rest, ...(shown === undefined ? {} : { members: shown }) };
+    };
     const named = (name: string, except?: string) => [...groups.values()].some((x) => x.id !== except && x.displayName.toLowerCase() === name.toLowerCase());
     const membersOf = (v: unknown) => {
       const list = Array.isArray(v) ? (v as { value?: unknown }[]) : [];
@@ -240,6 +260,8 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     requests,
     /** Answer the next requests with these instead (one fault per request, in order). */
     fail: (...f: Fault[]) => void faults.push(...f),
+    /** Answer the next request with this method and path (e.g. POST, /^\/Groups$/) with `fault` instead, once. */
+    failOn: (method: string, path: RegExp, fault: Fault) => void aimed.push({ method, path, fault }),
     /** Hold every request until the returned function is called (to change things mid-delivery). */
     hold: () => {
       let release!: () => void;

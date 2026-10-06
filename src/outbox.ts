@@ -677,11 +677,23 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       }
     }
     const pendingBefore = link !== null && !link.remoteId;
+    /**
+     * A group without our externalId, found after a create of ours that may have made it (its
+     * reply lost, at an app that drops externalId): ours only if it has members and every one is
+     * someone we'd put there. A group made by hand in the meantime, with anyone else in it, is
+     * never taken over; an empty one can't be told apart, so it isn't either.
+     */
+    const onlyOurs = async (found: { id: string; externalId: string | null }) => {
+      if (found.externalId !== null) return false;
+      const members = await client.groupMembers(found.id);
+      const wanted = new Set(group.members.map((m) => m.value));
+      return members.length > 0 && members.every((m) => wanted.has(m));
+    };
     // Pending under another name (a lost create's reply, then a rename): the group it made is
     // found under the old name and renamed (or, at apps that can't rename, removed and made anew).
     if (link && pendingBefore && link.displayName !== displayName && target.type !== "webhook") {
       const found = await client.findGroupByName(link.displayName, externalId);
-      if (found && !(await otherOwner(found.id)) && (found.externalId === externalId || found.externalId === null)) {
+      if (found && !(await otherOwner(found.id)) && (found.externalId === externalId || (await onlyOurs(found)))) {
         if (compat.groupRename === "recreate") await client.removeGroup(found.id);
         else {
           await updateGroup(found.id);
@@ -720,7 +732,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       // Google's reads trail its writes: right after our own create it can say "exists" and still
       // not show the group (found live). Retried, with the pending link kept, as for users.
       if (!found && target.type === "google-workspace") throw new ScimError(`group ${displayName}: Google says it exists but can't find it yet; retrying`, 409, true);
-      const ours = found !== null && !(await otherOwner(found.id)) && (found.externalId === externalId || (found.externalId === null && pendingBefore));
+      const ours = found !== null && !(await otherOwner(found.id)) && (found.externalId === externalId || (pendingBefore && (await onlyOurs(found))));
       if (!found || !ours) return refuse();
       await updateGroup(found.id);
       remoteId = found.id;

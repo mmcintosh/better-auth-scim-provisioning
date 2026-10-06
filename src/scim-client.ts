@@ -160,24 +160,37 @@ export function scimClient(endpoint: ScimEndpoint) {
     );
   }
 
-  /** A group's current member ids: from the group itself, or by listing users in it (a cursor at a time). */
+  /**
+   * A group's current member ids: from the group itself, or by listing users in it. Members are
+   * asked for by name (`attributes=members`): apps may leave them out of a plain GET, and SCIM
+   * leaves out empty attributes, so only once asked for does "no members" mean an empty group.
+   * Listing users follows cursors and startIndex pages alike.
+   */
   async function groupMemberIds(id: string, from: "group" | "users-filter"): Promise<string[]> {
     if (from === "group") {
-      const { json } = await request("GET", `/Groups/${encodeURIComponent(id)}`);
+      const { json } = await request("GET", `/Groups/${encodeURIComponent(id)}?attributes=members`);
       const members = (json as { members?: { value?: unknown }[] } | null)?.members;
       return Array.isArray(members) ? members.map((m) => m.value).filter((v): v is string => typeof v === "string") : [];
     }
-    const ids: string[] = [];
+    const ids = new Set<string>();
     const filter = encodeURIComponent(`groups.value eq ${scimString(id)}`);
-    for (let cursor = "", pages = 0; pages < 10_000; pages++) {
-      const { json } = await request("GET", `/Users?filter=${filter}&cursor=${encodeURIComponent(cursor)}`);
-      const list = json as { Resources?: { id?: unknown }[]; nextCursor?: unknown } | null;
+    let cursor = "";
+    let startIndex = 1;
+    for (let pages = 0; pages < 10_000; pages++) {
+      const { json } = await request("GET", `/Users?filter=${filter}&cursor=${encodeURIComponent(cursor)}&startIndex=${startIndex}`);
+      const list = json as { Resources?: { id?: unknown }[]; nextCursor?: unknown; totalResults?: unknown; itemsPerPage?: unknown } | null;
       if (!list || !Array.isArray(list.Resources)) throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, true);
-      for (const r of list.Resources) if (typeof r.id === "string") ids.push(r.id);
-      if (typeof list.nextCursor !== "string" || !list.nextCursor) break;
-      cursor = list.nextCursor;
+      for (const r of list.Resources) if (typeof r.id === "string") ids.add(r.id);
+      if (typeof list.nextCursor === "string" && list.nextCursor) {
+        cursor = list.nextCursor;
+        continue;
+      }
+      // Index paging: more to read while totalResults says so and this page wasn't empty.
+      const total = typeof list.totalResults === "number" ? list.totalResults : 0;
+      if (!list.Resources.length || startIndex - 1 + list.Resources.length >= total) break;
+      startIndex += list.Resources.length;
     }
-    return ids;
+    return [...ids];
   }
 
   const idOf = (json: unknown, what: string) => {
@@ -230,6 +243,10 @@ export function scimClient(endpoint: ScimEndpoint) {
       const resources = Array.isArray(list.Resources) ? (list.Resources as { id?: unknown; displayName?: unknown; externalId?: unknown }[]) : [];
       const hit = resources.find((r) => typeof r.displayName === "string" && r.displayName.toLowerCase() === displayName.toLowerCase());
       return hit ? { id: idOf(hit, "GET /Groups"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null } : null;
+    },
+    /** The ids of a group's members, as the app lists them (asked for by name). */
+    async groupMembers(id: string): Promise<string[]> {
+      return groupMemberIds(id, "group");
     },
     async createGroup(group: ScimGroup): Promise<string> {
       return idOf((await request("POST", "/Groups", group)).json, "POST /Groups");

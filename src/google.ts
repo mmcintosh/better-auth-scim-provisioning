@@ -282,6 +282,8 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     },
     // By address, from the externalId: Google Groups can't be found by name, and a rename never moves them.
     findGroupByName: async (_displayName: string, externalId?: string | null) => findGroup(externalId),
+    // Groups are found by our marker (externalId), never by name alone, so no members are needed.
+    groupMembers: async () => [],
     createGroup,
     createGroupInBatches: async (group: ScimGroup) => createGroup(group),
     replaceGroup: updateGroup,

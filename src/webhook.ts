@@ -111,6 +111,7 @@ export function webhookClient(target: WebhookTarget): ReturnType<typeof scimClie
     },
     remove: async (id: string) => send({ type: "user.delete", user: { externalId: id } }),
     findGroupByName: async () => null,
+    groupMembers: async () => [],
     createGroup: upsertGroup,
     createGroupInBatches: upsertGroup,
     replaceGroup: async (_id: string, group: ScimGroup) => void (await upsertGroup(group)),
