@@ -363,6 +363,8 @@ Proven in CI, with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24:
 
 The outbox suite is what differs between databases: leases, version checks, dates, booleans, `in` and `gt` queries, groups and reconcile. In the Drizzle and Prisma runs the tables come from Better Auth's migrator and the ORM schema from Better Auth's own table definitions, as `npx auth generate` builds it.
 
+The built package also runs on **Bun** and **Deno**: CI runs the `check` CLI and a user's life, delivered to a SCIM app and a signed webhook, on both.
+
 It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. It was tested there in a real app, with D1, `waitUntil` and a Cron Trigger, against Cloudflare Access: 200 users were reconciled and delivered at about 6 users a second with the default concurrency.
 
 ## Not yet
