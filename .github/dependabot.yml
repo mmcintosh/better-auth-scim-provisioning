@@ -23,6 +23,12 @@ updates:
       - dependency-name: brace-expansion
       - dependency-name: ip-address
       - dependency-name: http-cache-semantics
+  # The Workers example (its own package-lock.json, as a user's app would have).
+  - package-ecosystem: npm
+    directory: /examples/workers
+    schedule: { interval: weekly }
+    groups:
+      example: { patterns: ["*"], update-types: [minor, patch] }
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }

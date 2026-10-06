@@ -1,0 +1,6 @@
+# Copy to .dev.vars for `wrangler dev` (git-ignored). Use `wrangler secret put` when deployed.
+BETTER_AUTH_SECRET=change-me-to-at-least-32-random-characters
+SCIM_URL=https://your-app.example.com/scim/v2
+SCIM_TOKEN=the-apps-scim-token
+# WEBHOOK_URL=https://your-receiver.example.com/scim-events
+# WEBHOOK_SECRET=at-least-32-characters-shared-with-the-receiver

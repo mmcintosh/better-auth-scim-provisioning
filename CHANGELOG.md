@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Examples
+
+- **A Workers example** ([examples/workers](examples/workers)): Better Auth on D1 provisioning to a SCIM app and/or a signed webhook, with `waitUntil`, a Cron Trigger for retries, organizations as groups (only admins create them), email verification, and admin routes to see the queue, run and reconcile. CI runs it inside workerd through Miniflare (sign-up to deletion, a retry delivered by the Cron Trigger, the committed migration checked against Better Auth's), and builds it as installed from npm.
+
 ### Project
 
 - The release job stages with npm 12.2.0 (was 11.20.0).
