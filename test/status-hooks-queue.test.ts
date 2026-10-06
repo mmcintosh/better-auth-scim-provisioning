@@ -14,7 +14,7 @@ describe("scimProvisioningStatus", () => {
     await h.settle();
     const cy = await h.user("Cy Chen"); // 400: failed
     const status = await h.auth.api.scimProvisioningStatus({ body: {} });
-    expect(status.targets).toEqual([{ id: "app", queued: 0, stuck: 1, failed: 1, accounts: 1, groups: 0 }]);
+    expect(status.targets).toEqual([{ id: "app", queued: 0, waiting: 0, stuck: 1, failed: 1, accounts: 1, groups: 0 }]);
     void bea;
     void cy;
   });

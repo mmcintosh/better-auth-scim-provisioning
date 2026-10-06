@@ -82,20 +82,21 @@ Then:
    ```ts
    await auth.api.scimProvisioningRun({ body: {} }); // { done, retry, failed, busy }
    ```
-   On Cloudflare Workers, from a [Cron Trigger](https://developers.cloudflare.com/workers/configuration/cron-triggers/):
+   On Cloudflare Workers, from a [Cron Trigger](https://developers.cloudflare.com/workers/configuration/cron-triggers/). If you keep one Better Auth instance per isolate, set it up within the request (or cron event) that creates it, as [the example's `authFor`](examples/workers/src/index.ts) does: workerd cancels what a request leaves unfinished, and a half-set-up instance would stall the requests after it.
    ```ts
    export default {
-     fetch: (request, env, ctx) => handle(request, env, ctx),
-     scheduled: (event, env, ctx) => ctx.waitUntil(getAuth(env).api.scimProvisioningRun({ body: {} })),
+     fetch: async (request, env) => (await authFor(env)).handler(request),
+     scheduled: (event, env, ctx) => ctx.waitUntil(authFor(env).then((auth) => auth.api.scimProvisioningRun({ body: {} }))),
    };
    ```
-3. **Once, after adding or changing a target** (or to repair drift), queue everyone, a page at a time (500 by default, groups included; on Workers, which limits the work per invocation, keep pages small):
+3. **Once, after adding or changing a target** (or to repair drift), queue everyone, a page at a time (500 by default, groups included):
    ```ts
    let next: string | null = null;
    do {
      ({ next } = await auth.api.scimProvisioningReconcile({ body: { limit: 200, after: next ?? undefined } }));
    } while (next);
    ```
+   On Workers, which limit the work per invocation, call **one page per request** and pass `next` back in the next one, as the example's `/admin/reconcile?after=…` does; a loop like the one above, in one invocation, does all the pages at once again.
 
 **A complete app to copy:** [examples/workers](examples/workers) runs this package on Workers and D1, with `waitUntil`, a Cron Trigger for retries, organizations as groups, and admin routes; CI runs it inside workerd (with this repository's source, the apps mocked). better-auth-saml-idp's [Workers example](https://github.com/mmcintosh/better-auth-saml-idp/tree/main/examples/workers-hono#provisioning-optional) adds sign-in and an admin page showing each user's account at each app, the queue and the groups.
 
@@ -140,11 +141,14 @@ A change to a target (`include`, `organizationId`, `deprovision`) applies to eac
 ## Watching it
 
 ```ts
-// Per target: jobs queued, stuck (an app error still retried past retry.maxAttempts, every 6 hours),
-// failed (until the user changes again or a reconcile), and the accounts and groups at the app.
+// Per target: jobs queued (due now), waiting (a backoff, a Retry-After, or a ban running out), stuck
+// (an app error still retried past retry.maxAttempts, every 6 hours), failed (until the user changes
+// again or a reconcile), and the accounts and groups the app confirmed.
 const { targets } = await auth.api.scimProvisioningStatus({ body: {} });
 // One user's account and pending job at each target.
 const { user } = await auth.api.scimProvisioningStatus({ body: { userId } });
+// Which jobs failed or are stuck, with the app's last error; then { after: next } for more.
+const { items, next } = await auth.api.scimProvisioningFailures({ body: { limit: 100 } });
 ```
 
 `onFailure` is called when a delivery gives up (an error that won't fix itself) or reaches `retry.maxAttempts`: alert on it, so a deprovisioning that isn't getting through doesn't go unnoticed.
@@ -156,11 +160,16 @@ scimProvisioning({
 });
 ```
 
-When something changes a user's memberships outside Better Auth's organization endpoints (an SSO sync, inbound SCIM, your own database writes), queue them, and they're delivered in the background:
+When something changes memberships outside Better Auth's organization endpoints (an SSO sync, inbound SCIM, your own database writes), queue what changed, and it's delivered in the background:
 
 ```ts
-await auth.api.scimProvisioningQueue({ body: { userId } }); // or { userId, targetId }
+// Someone added to, or removed from, an organization (or given another role, or another team):
+await auth.api.scimProvisioningQueue({ body: { userId, organizationId } });
+// Only the user (their account, and the groups they're in now): { userId }
+// Only an organization's groups: { organizationId }; at one target: add targetId.
 ```
+
+For a removal, pass the organization as well: the user isn't in its groups any more, so queueing only the user can't find the group they left.
 
 ## Who is provisioned, and what's sent
 

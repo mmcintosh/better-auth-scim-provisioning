@@ -874,13 +874,15 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   /** Per target: jobs queued, stuck (still retried past maxAttempts) and failed; accounts and groups the app confirmed. */
   async function status(targetIds: string[]) {
-    const count = (model: string, where: { field: string; value: string | number | boolean; operator?: "lt" | "gte" | "ne" }[]) => adapter.count({ model, where });
+    const count = (model: string, where: { field: string; value: string | number | boolean | Date; operator?: "lt" | "gte" | "ne" }[]) => adapter.count({ model, where });
     return Promise.all(
       targetIds.map(async (id) => {
         const t = { field: "targetId", value: id };
         return {
           id,
-          queued: await count(JOB_MODEL, [t, { field: "failed", value: false }, { field: "attempts", value: maxAttempts, operator: "lt" }]),
+          // Due now; waiting: its backoff, a Retry-After, or a ban running out.
+          queued: await count(JOB_MODEL, [t, { field: "failed", value: false }, { field: "attempts", value: maxAttempts, operator: "lt" }, { field: "nextAttemptAt", value: new Date(Date.now() + 1), operator: "lt" }]),
+          waiting: await count(JOB_MODEL, [t, { field: "failed", value: false }, { field: "attempts", value: maxAttempts, operator: "lt" }, { field: "nextAttemptAt", value: new Date(), operator: "gte" }]),
           stuck: await count(JOB_MODEL, [t, { field: "failed", value: false }, { field: "attempts", value: maxAttempts, operator: "gte" }]),
           failed: await count(JOB_MODEL, [t, { field: "failed", value: true }]),
           // Confirmed by the app: a pending create's link has no remoteId yet.
@@ -889,6 +891,29 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         };
       }),
     );
+  }
+
+  /**
+   * Failed and stuck jobs, by id, a page at a time: two queries (failed; not failed but past
+   * maxAttempts) merged in id order, so the cursor (the last id) works for both.
+   */
+  async function failures(o: { targetId?: string | undefined; after?: string | undefined; limit: number }) {
+    const base = [...(o.targetId ? [{ field: "targetId", value: o.targetId }] : []), ...(o.after ? [{ field: "id", value: o.after, operator: "gt" as const }] : [])];
+    const page = (where: Where[]) => adapter.findMany({ model: JOB_MODEL, where: [...base, ...where], sortBy: { field: "id", direction: "asc" }, limit: o.limit + 1 }) as Promise<Job[]>;
+    const rows = [...(await page([{ field: "failed", value: true }])), ...(await page([{ field: "failed", value: false }, { field: "attempts", value: maxAttempts, operator: "gte" }]))].sort((a, b) =>
+      a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+    );
+    const items = rows.slice(0, o.limit).map((j) => ({
+      targetId: j.targetId,
+      kind: (j.kind ?? "user") as "user" | "group" | "team" | "role",
+      subjectId: j.userId,
+      failed: j.failed,
+      attempts: j.attempts,
+      lastStatus: j.lastStatus ?? null,
+      lastError: j.lastError ?? null,
+      nextAttemptAt: new Date(j.nextAttemptAt).toISOString(),
+    }));
+    return { items, next: rows.length > o.limit ? (rows[o.limit - 1]?.id ?? null) : null };
   }
 
   /** One user's account and pending job at each target. */
@@ -908,5 +933,5 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     );
   }
 
-  return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, targets, status, userStatus };
+  return { enqueue, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, targets, status, userStatus, failures };
 }

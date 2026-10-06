@@ -12,9 +12,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 - **`ScimGroup` and `SCIM_GROUP_SCHEMA` are exported**, like `ScimUser` and `SCIM_USER_SCHEMA`.
 - **`check` results have a stable `id`** (`create`, `find`, `update-put`, …; `CheckId`); the human-readable `name` may change.
 - **[docs/versioning.md](docs/versioning.md)**: what 1.0 will promise, what counts as the public API, and how Better Auth's minor releases are followed.
-- **`scimProvisioningStatus`**: per target, the jobs queued, stuck (an app error still retried past `retry.maxAttempts`) and failed, and the accounts and groups the app confirmed; with `userId`, that user's account and pending job at each target. Hosts no longer need to read the plugin's tables.
+- **`scimProvisioningStatus`**: per target, the jobs queued (due now), waiting (a backoff, a Retry-After, a ban running out), stuck (an app error still retried past `retry.maxAttempts`) and failed, and the accounts and groups the app confirmed; with `userId`, that user's account and pending job at each target. With `scimProvisioningFailures`, hosts no longer need to read the plugin's tables.
 - **`onFailure`**: called when a delivery gives up or reaches `retry.maxAttempts`, with the target, what failed, the error and the app's status. Errors it throws are logged.
-- **`scimProvisioningQueue({ userId, targetId? })`**: queue a user (and their groups) whose memberships changed outside Better Auth's organization endpoints.
+- **`scimProvisioningQueue({ userId?, organizationId?, targetId? })`**: queue what changed outside Better Auth's organization endpoints: a user (and the groups they're in), and/or an organization's groups. For a removal, pass both: only the organization finds the group the user left.
+- **`scimProvisioningFailures({ targetId?, after?, limit? })`**: the failed and stuck jobs, with the app's last error and status, a page at a time.
 
 ### Fixed
 
@@ -34,6 +35,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Changed
 
+- **Endpoint parameters are checked strictly**, like the options: an unknown one (`targetID` for `targetId`) is refused instead of ignored, and a reconcile cursor it didn't hand out is refused (it used to report `next: null` having done nothing).
+- **A reconcile called the 0.3 way** (no `limit`, no `after`) that stops at its default page logs a warning saying to call again with `after: next`.
+- **The CLI exits 1 for an unknown command** (it exited 0); `help` exits 0.
+- Group links are indexed by `organizationId`. New installs get the index from the migration; `npx auth migrate` doesn't add it to an existing table, so add it by hand if you like: `CREATE INDEX "scimProvisioningGroupLink_organizationId_idx" ON "scimProvisioningGroupLink" ("organizationId");` (the Workers example's `0002` migration does).
 - **Upgrading needs a database migration** (`npx auth migrate`, or `npx auth generate` for Drizzle and Prisma): group links gain two optional columns, `kind` and `subjectId`, saying which group each is (an organization's, a team's or a role's) instead of it being read from the link's key. Better Auth checks the schema at runtime, so migrate before deploying. Links written before keep working and gain the columns as they're next updated. This is the schema 1.0 keeps.
 - **Reconcile goes a page at a time by default** (500): a call without `limit` used to walk every user, link and group at once, past what a Workers invocation can do. Call again with `after: next` until `next` is null.
 - **Unknown, misspelled or misplaced options are refused at startup** instead of being dropped without a word. A target with `organisationId` (British spelling) used to provision every verified user instead of one organization's members. The error names the option and, where it's clear, what was meant (`did you mean organizationId?`, or that `groups` is an option of each target). `update` and `compat` are refused on webhook and Google Workspace targets, where they did nothing; the types say so too. **Check your options when upgrading:** anything the plugin ignored before now stops it from starting.
