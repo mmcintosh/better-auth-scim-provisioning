@@ -6,6 +6,8 @@ import { verifyWebhookSignature, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent } f
 export function mockWebhook(secret = "webhook-secret-that-is-at-least-32-characters-long") {
   const events: WebhookEvent[] = [];
   const rejected: string[] = [];
+  /** Every event id received, including requests answered with a fault. */
+  const attempts: string[] = [];
   const users = new Map<string, { userName: string; active: boolean; displayName?: string | undefined; deleted?: boolean }>();
   const groups = new Map<string, { displayName: string; members: string[] }>();
   const faults: number[] = [];
@@ -13,6 +15,7 @@ export function mockWebhook(secret = "webhook-secret-that-is-at-least-32-charact
 
   const fetch: typeof globalThis.fetch = async (input, init) => {
     if (String(input) !== url) return new Response("not here", { status: 404 });
+    attempts.push((JSON.parse(String(init?.body ?? "{}")) as { id?: string }).id ?? "");
     const fault = faults.shift();
     if (fault) return new Response("injected", { status: fault });
     const body = String(init?.body ?? "");
@@ -31,5 +34,5 @@ export function mockWebhook(secret = "webhook-secret-that-is-at-least-32-charact
     if (event.type === "group.delete") groups.delete(event.group.externalId);
     return new Response(null, { status: 204 });
   };
-  return { fetch, url, secret, events, rejected, users, groups, fail: (...statuses: number[]) => void faults.push(...statuses) };
+  return { fetch, url, secret, events, rejected, attempts, users, groups, fail: (...statuses: number[]) => void faults.push(...statuses) };
 }

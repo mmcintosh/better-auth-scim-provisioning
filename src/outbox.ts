@@ -106,11 +106,12 @@ export type Outcome = "done" | "retry" | "failed" | "busy";
 const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
 
 /** The client for a target: SCIM, or Google Workspace's Directory API behind the same operations. */
-const clientFor = (target: Target) =>
+/** `change` names the change being delivered (its job and version), for webhook event ids. */
+const clientFor = (target: Target, change?: string) =>
   target.type === "google-workspace"
     ? googleWorkspaceClient(target)
     : target.type === "webhook"
-      ? webhookClient(target)
+      ? webhookClient(target, change)
       : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
 
 export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }) {
@@ -195,8 +196,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * Make the app match the user: create, update, adopt, reactivate or deprovision. Returns when to
    * look again without a change, if ever: the end of a timed ban.
    */
-  async function deliver(target: Target, userId: string): Promise<Date | null> {
-    const client = clientFor(target);
+  async function deliver(target: Target, userId: string, change?: string): Promise<Date | null> {
+    const client = clientFor(target, change);
     const user = (await adapter.findOne({ model: "user", where: [{ field: "id", value: userId }] })) as ProvisionedUser | null;
     const key = keyOf(target.id, userId);
     let link = await findLink(key);
@@ -409,7 +410,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         }, RENEW_EVERY_MS)
       : undefined;
     try {
-      recheckAt = isGroup ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }) : await deliver(target, current.userId);
+      const change = `${current.id}@${current.version}`;
+      recheckAt = isGroup ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }, change) : await deliver(target, current.userId, change);
     } catch (e) {
       const attempts = current.attempts + 1;
       const err = e instanceof ScimError ? e : new ScimError((e as Error).message, null, true);
@@ -619,8 +621,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   /** Make the app's group match its organization, team or role: create, update, adopt, or remove. */
-  async function deliverGroup(target: Target, ref: GroupRef): Promise<null> {
-    const client = clientFor(target);
+  async function deliverGroup(target: Target, ref: GroupRef, change?: string): Promise<null> {
+    const client = clientFor(target, change);
     const key = keyFor(ref.kind, target.id, ref.id);
     const externalId = externalIdOf(ref);
     const link = await findGroupLink(key);
