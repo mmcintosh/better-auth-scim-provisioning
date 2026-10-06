@@ -31,7 +31,11 @@ jobs:
           # Licences a MIT package can depend on at runtime.
           allow-licenses: MIT, ISC, Apache-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD, BlueOak-1.0.0, CC0-1.0, Unlicense, Python-2.0
           # npm itself (Artistic-2.0) is the release job's CLI (.github/npm-cli), run in CI, never shipped.
-          allow-dependencies-licenses: pkg:npm/npm
+          # elkjs (EPL-2.0) and robust-predicates (public domain and Unlicense) come with Prisma Studio,
+          # inside the Prisma 7 CLI the adapter tests use; development only.
+          # sharp's prebuilt libvips (LGPL-3.0) comes with Miniflare (its image binding), which runs D1
+          # and the Workers example in the tests; development only.
+          allow-dependencies-licenses: pkg:npm/npm, pkg:npm/elkjs, pkg:npm/robust-predicates, pkg:npm/%40img/sharp-libvips-darwin-arm64, pkg:npm/%40img/sharp-libvips-darwin-x64, pkg:npm/%40img/sharp-libvips-linux-arm64, pkg:npm/%40img/sharp-libvips-linux-arm, pkg:npm/%40img/sharp-libvips-linuxmusl-arm64, pkg:npm/%40img/sharp-libvips-linuxmusl-x64, pkg:npm/%40img/sharp-libvips-linux-ppc64, pkg:npm/%40img/sharp-libvips-linux-riscv64, pkg:npm/%40img/sharp-libvips-linux-s390x, pkg:npm/%40img/sharp-libvips-linux-x64, pkg:npm/%40img/sharp-wasm32, pkg:npm/%40img/sharp-win32-arm64, pkg:npm/%40img/sharp-win32-ia32, pkg:npm/%40img/sharp-win32-x64
           comment-summary-in-pr: never
 
   osv:

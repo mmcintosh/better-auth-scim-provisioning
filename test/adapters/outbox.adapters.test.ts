@@ -1,17 +1,68 @@
 // The outbox on real databases (CI's `adapters` job): its leases, version checks, date
 // comparisons and booleans are exactly what differs between databases, so SQLite passing isn't
-// enough. ADAPTER_DB is postgres, mysql or mongodb; ADAPTER_URL points at a server where the test
-// may create databases. Each test gets a fresh, empty database.
+// enough. ADAPTER_DB is postgres, mysql or mongodb (Kysely and MongoDB adapters), drizzle-postgres,
+// drizzle-mysql or prisma-postgres (the same servers through an ORM), or d1 (Cloudflare D1, local,
+// through Miniflare; no ADAPTER_URL). ADAPTER_URL points at a server where the test may create
+// databases. Each test gets a fresh, empty database.
 import { afterEach, describe, expect, it } from "vitest";
-import { createHost, type HostDatabase } from "../support/host";
+import { createHost, type HostDatabase, schemaOptions } from "../support/host";
 
 const KIND = process.env.ADAPTER_DB;
 const URL_ = process.env.ADAPTER_URL ?? "";
-if (process.env.ADAPTER_REQUIRED && (!KIND || !URL_)) throw new Error("ADAPTER_REQUIRED is set, but ADAPTER_DB or ADAPTER_URL is empty");
+if (process.env.ADAPTER_REQUIRED && (!KIND || (!URL_ && KIND !== "d1"))) throw new Error("ADAPTER_REQUIRED is set, but ADAPTER_DB or ADAPTER_URL is empty");
 
 const fresh = () => `scim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 
-const databases: Record<string, () => Promise<HostDatabase & { close(): Promise<void> }>> = {
+type Db = HostDatabase & { close(): Promise<void> };
+
+/** Better Auth's own migrator creates the tables on the raw connection, as `npx auth migrate` would. */
+async function migrated(raw: Db): Promise<Db> {
+  const { getMigrations } = await import("better-auth/db/migration");
+  await (await getMigrations(schemaOptions(raw.database) as never)).runMigrations();
+  return raw;
+}
+
+/** Drizzle over the same server, with a schema built from Better Auth's table definitions. */
+async function withDrizzle(raw: Db, provider: "pg" | "mysql"): Promise<Db> {
+  await migrated(raw);
+  const { drizzleAdapter } = await import("better-auth/adapters/drizzle");
+  const schemas = await import("./orm-schemas");
+  const db = provider === "pg" ? (await import("drizzle-orm/node-postgres")).drizzle(raw.database as never) : (await import("drizzle-orm/mysql2")).drizzle(raw.database as never);
+  const schema = provider === "pg" ? await schemas.drizzlePgSchema(schemaOptions() as never) : await schemas.drizzleMysqlSchema(schemaOptions() as never);
+  return { database: drizzleAdapter(db as never, { provider, schema: schema as never }), migrate: false, close: raw.close };
+}
+
+/** Prisma 7 over Postgres: a client generated from a schema built from the same definitions. */
+async function withPrisma(raw: Db & { url: string }): Promise<Db> {
+  await migrated(raw);
+  const { mkdirSync, mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const { pathToFileURL } = await import("node:url");
+  // Inside the project, so the generated client resolves the installed @prisma/client.
+  const cache = join(process.cwd(), "node_modules/.cache");
+  mkdirSync(cache, { recursive: true });
+  const dir = mkdtempSync(join(cache, "scim-prisma-"));
+  const { prismaSchema } = await import("./orm-schemas");
+  writeFileSync(join(dir, "schema.prisma"), prismaSchema(schemaOptions() as never, join(dir, "client")));
+  execFileSync(join(process.cwd(), "node_modules/.bin/prisma"), ["generate", "--schema", join(dir, "schema.prisma")], { stdio: "pipe" });
+  // The prisma-client generator writes TypeScript (client.ts), which Vitest loads directly.
+  const { PrismaClient } = (await import(pathToFileURL(join(dir, "client/client.ts")).href)) as { PrismaClient: new (o: unknown) => { $disconnect(): Promise<void> } };
+  const { PrismaPg } = await import("@prisma/adapter-pg");
+  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: raw.url }) });
+  const { prismaAdapter } = await import("better-auth/adapters/prisma");
+  return {
+    database: prismaAdapter(prisma as never, { provider: "postgresql" }),
+    migrate: false,
+    async close() {
+      await prisma.$disconnect();
+      await raw.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+const databases: Record<string, () => Promise<Db>> = {
   async postgres() {
     const { Pool } = await import("pg");
     const name = fresh();
@@ -24,6 +75,7 @@ const databases: Record<string, () => Promise<HostDatabase & { close(): Promise<
     return {
       database: pool,
       migrate: true,
+      url: url.toString(),
       async close() {
         await pool.end();
         await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
@@ -65,6 +117,16 @@ const databases: Record<string, () => Promise<HostDatabase & { close(): Promise<
       },
     };
   },
+  "drizzle-postgres": async () => withDrizzle(await databases.postgres!(), "pg"),
+  "drizzle-mysql": async () => withDrizzle(await databases.mysql!(), "mysql"),
+  "prisma-postgres": async () => withPrisma((await databases.postgres!()) as Db & { url: string }),
+  // Cloudflare D1, run locally by Miniflare: the SQLite that Workers apps actually use, with D1's
+  // limits (at most 100 bound parameters per query, which reconcile's `in` queries once exceeded).
+  async d1() {
+    const { Miniflare, convertV4MiniflareOptions } = await import("miniflare");
+    const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: "export default { fetch: () => new Response(null) }", d1Databases: ["DB"] }));
+    return { database: await mf.getD1Database("DB"), migrate: true, close: () => mf.dispose() };
+  },
 };
 
 const open: { close(): Promise<void> }[] = [];
@@ -82,7 +144,7 @@ async function host(o: Parameters<typeof createHost>[0] = {}) {
 
 const appUsers = (app: { users: Map<string, unknown> }) => [...app.users.values()] as Record<string, any>[];
 
-describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
+describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () => {
   it("a user's life: create, change, ban, unban, delete", async () => {
     const h = await host();
     const u = await h.user("Ada King Lovelace");
@@ -159,6 +221,15 @@ describe.skipIf(!KIND || !URL_)(`the outbox on ${KIND}`, () => {
     expect(appUsers(h.app)).toEqual(
       expect.arrayContaining([expect.objectContaining({ externalId: kept.id, active: true }), expect.objectContaining({ externalId: gone.id, active: false })]),
     );
+  });
+
+  it("reconcile with more linked users than one query may bind (D1 allows 100 parameters)", async () => {
+    const h = await host();
+    // 150 accounts at the app whose users are gone: reconcile looks their links up by user id.
+    for (let i = 0; i < 150; i++) {
+      await h.ctx.adapter.create({ model: "scimProvisioningLink", data: { key: `app:gone-${i}`, targetId: "app", userId: `gone-${i}`, remoteId: `r${i}`, userName: `gone-${i}@example.com`, active: false, syncedAt: new Date() } });
+    }
+    expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({ queued: 150, next: null });
   });
 
   it("reconcile in pages (id order, gt and in queries)", async () => {
