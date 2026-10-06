@@ -412,6 +412,7 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. CI runs [the 
 
 ## Not yet
 
+- **Targets per organization, managed at runtime**: each organization connecting its own app (URL and token, stored encrypted), as better-auth-saml-idp's registry does for service providers. Targets are set in code today.
 - **Microsoft 365 / Entra ID** as a target (through Microsoft Graph), the other big suite after Google Workspace.
 - **Live verification of the Slack, Atlassian and GitHub Enterprise profiles.** They're built from each app's documentation and tested against a model.
 
