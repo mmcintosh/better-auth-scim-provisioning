@@ -42,6 +42,17 @@ jobs:
             url: mysql://root:test@127.0.0.1:3306/mysql
           - db: mongodb
             url: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+          # The same servers through Drizzle and Prisma 7, with schemas built from Better Auth's
+          # table definitions (test/adapters/orm-schemas.ts).
+          - db: drizzle-postgres
+            url: postgres://postgres:test@localhost:5432/postgres
+          - db: drizzle-mysql
+            url: mysql://root:test@127.0.0.1:3306/mysql
+          - db: prisma-postgres
+            url: postgres://postgres:test@localhost:5432/postgres
+          # Cloudflare D1, local through Miniflare (its 100-parameter limit included); no server.
+          - db: d1
+            url: ""
     services:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24

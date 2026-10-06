@@ -6,6 +6,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Tests
 
+- **More databases in CI:** Cloudflare D1 (local, through Miniflare), Drizzle on PostgreSQL and MySQL, and Prisma 7 on PostgreSQL join SQLite, PostgreSQL, MySQL and MongoDB. A new test reconciles 150 linked users, more than D1 binds in one query; on D1 it fails without the batching that fixed this.
 - **Bun and Deno in CI:** the built package runs the `check` CLI against a small SCIM app, then a user's life (create, rename, delete) delivered to it and to a signed webhook, on Node, Bun and Deno.
 
 ### Project

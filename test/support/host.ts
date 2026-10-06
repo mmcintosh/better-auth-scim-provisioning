@@ -19,6 +19,17 @@ export interface HostDatabase {
   migrate: boolean;
 }
 
+/**
+ * The host's plugins with a placeholder target: the same tables as createHost's, for building an
+ * ORM schema (test/adapters/orm-schemas.ts) or running Better Auth's migrations on a raw database.
+ */
+export function schemaOptions(database?: unknown) {
+  return {
+    ...(database === undefined ? {} : { database: database as never }),
+    plugins: [admin(), organization({ teams: { enabled: true } }), scimProvisioning({ targets: [{ id: "schema", type: "scim", url: "https://schema.invalid/scim/v2", token: "t" }] as Target[] })],
+  };
+}
+
 export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
   const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}) })]));
