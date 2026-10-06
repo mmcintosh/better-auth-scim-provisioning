@@ -150,7 +150,7 @@ describe("the Workers example", () => {
     admin = await verifiedUser("admin@example.test", "Grace Hopper");
     const status = await call("/admin/status", { headers: { cookie: admin } });
     expect(status.status).toBe(200);
-    expect(await status.json()).toMatchObject({ failed: 0 });
+    expect(await status.json()).toMatchObject({ targets: [expect.objectContaining({ id: "app", failed: 0 }), expect.objectContaining({ id: "hook", failed: 0 })] });
   });
 
   it("an organization is a group at the app, with its provisioned members", async () => {
@@ -191,6 +191,7 @@ describe("the Workers example", () => {
     expect(((await reconciled.json()) as { queued: number }).queued).toBeGreaterThan(0);
     const ran = await call("/admin/run", { method: "POST", headers: { cookie: admin } });
     expect(ran.status).toBe(200);
-    expect(await (await call("/admin/status", { headers: { cookie: admin } })).json()).toMatchObject({ queued: 0, failed: 0 });
+    const { targets } = (await (await call("/admin/status", { headers: { cookie: admin } })).json()) as { targets: { queued: number; stuck: number; failed: number }[] };
+    expect(targets.every((t) => t.queued === 0 && t.stuck === 0 && t.failed === 0)).toBe(true);
   });
 });

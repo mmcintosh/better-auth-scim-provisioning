@@ -14,7 +14,7 @@ export { SCIM_USER_SCHEMA, ScimError, type ScimUser } from "./scim-client";
 export type { ScimAuth } from "./credentials";
 export { type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, webhookSignature } from "./webhook";
-export type { GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, WebhookTarget } from "./types";
+export type { DeliveryFailure, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, WebhookTarget } from "./types";
 
 
 const targetSchema = z.strictObject({
@@ -89,6 +89,7 @@ const optionsSchema = z.strictObject({
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
   retry: z.strictObject({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
   concurrency: z.number().int().min(1).max(32).optional(),
+  onFailure: z.function().optional(),
 });
 
 type SchemaDef = { type?: string; element?: unknown; innerType?: unknown; shape?: Record<string, unknown> };
@@ -407,6 +408,34 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       ],
     },
     endpoints: {
+      /**
+       * How provisioning stands, per target: jobs queued, stuck (an app error still retried past
+       * `retry.maxAttempts`, every 6 hours) and failed (until the user changes or a reconcile),
+       * and the accounts and groups at the app. With `userId`, that user's account and pending
+       * job at each target.
+       */
+      scimProvisioningStatus: createAuthEndpoint.serverOnly({ method: "POST", body: z.object({ userId: z.string().min(1).optional() }).optional() }, async (ctx) => {
+        const s = stateOf(ctx.context);
+        if (!s) throw new Error("[scim] not initialised");
+        const ids = options.targets.map((t) => t.id);
+        const userId = ctx.body?.userId;
+        return ctx.json(userId ? { user: await s.box.userStatus(userId, ids) } : { targets: await s.box.status(ids) });
+      }),
+      /**
+       * Queue a user (and their groups) at every target, or one, and deliver in the background:
+       * for changes Better Auth's endpoints don't show this plugin, such as memberships written by
+       * an SSO sync, inbound SCIM or your own code.
+       */
+      scimProvisioningQueue: createAuthEndpoint.serverOnly({ method: "POST", body: z.object({ userId: z.string().min(1), targetId: z.string().optional() }) }, async (ctx) => {
+        const s = stateOf(ctx.context);
+        if (!s) throw new Error("[scim] not initialised");
+        const all = options.targets.map((t) => t.id);
+        const { userId, targetId } = ctx.body;
+        if (targetId !== undefined && !all.includes(targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+        const targetIds = targetId ? [targetId] : all;
+        await changed(s, userId, targetIds);
+        return ctx.json({ queued: targetIds.length });
+      }),
       /** Deliver what's due (retries included). Call it from a scheduled job, e.g. every minute. */
       scimProvisioningRun: createAuthEndpoint.serverOnly({ method: "POST", body: z.object({ limit: z.number().int().min(1).max(500).optional() }).optional() }, async (ctx) => {
         const s = stateOf(ctx.context);
