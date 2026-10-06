@@ -275,6 +275,13 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       },
     },
     init(ctx) {
+      // Options that need the organization plugin (or its teams) fail here, not on every delivery.
+      const org = (ctx.options.plugins ?? []).find((p) => p.id === "organization") as { options?: { teams?: { enabled?: boolean } } } | undefined;
+      for (const t of options.targets) {
+        const needs = [t.organizationId && "organizationId", t.groups && "groups", t.roleGroups && "roleGroups", t.teamGroups && "teamGroups"].filter(Boolean);
+        if (needs.length && !org) throw new Error(`[scim] target ${t.id}: ${needs.join(", ")} need Better Auth's organization plugin`);
+        if (t.teamGroups && !org?.options?.teams?.enabled) throw new Error(`[scim] target ${t.id}: teamGroups needs the organization plugin's teams (organization({ teams: { enabled: true } }))`);
+      }
       const s: State = {
         box: outbox(options, ctx.adapter as unknown as Adapter, ctx.logger),
         background: (p) => ctx.runInBackground(p.catch((e) => ctx.logger.error("[scim] delivery failed", e))),
