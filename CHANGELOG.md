@@ -9,6 +9,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 - `CONTRIBUTING.md`: setup, the checks CI runs, the adapter and live tests, and what a contribution needs.
 - `SECURITY.md`: a 7-day acknowledgement target, how fixed vulnerabilities are announced, and how releases are protected.
 - `.bestpractices.json`: answers for the OpenSSF Best Practices badge, which bestpractices.dev reads to pre-fill them.
+- The README shows the OpenSSF Best Practices badge (passing, project 15270).
 
 ### Added
 
