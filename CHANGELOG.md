@@ -4,6 +4,12 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Documentation
+
+- `CONTRIBUTING.md`: setup, the checks CI runs, the adapter and live tests, and what a contribution needs.
+- `SECURITY.md`: a 7-day acknowledgement target, how fixed vulnerabilities are announced, and how releases are protected.
+- `.bestpractices.json`: answers for the OpenSSF Best Practices badge, which bestpractices.dev reads to pre-fill them.
+
 ### Added
 
 - **Organizations' own targets (`registry`)**: each organization connects its own SCIM app, Google Workspace domain or webhook at runtime, through `/scim-provisioning/targets` (list, create, update, check, status, delete), managed by its owners and admins (`organizationRoles`) and the host's administrators (`canManage`). Credentials are encrypted with Better Auth's secret, bound to the target and organization, never shown, never sent anywhere new without being given again, and sealed again when the secret is rotated. URLs must be https, on the standard port and public, and names are looked up before each request (`allowHosts` for exceptions; `registry.fetch` for a proxy). A stored target only receives its organization's members and groups; a disabled one keeps its changes queued and waiting. Stored targets are read from the database when used, so every server sees a change at once. The `scimProvisioningTarget` table exists only with `registry`: **turning it on needs a migration**, before deploying; without it, nothing changes.
