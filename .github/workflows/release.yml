@@ -25,7 +25,10 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: 24, cache: pnpm }
-      - run: pnpm install --frozen-lockfile
+      # Socket Firewall: blocks packages Socket has confirmed as malware before they download.
+      - uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with: { mode: firewall-free }
+      - run: sfw pnpm install --frozen-lockfile
       - run: pnpm typecheck && pnpm lint && pnpm test && pnpm pack:check
       # What `npm install better-auth-scim-provisioning` brings in.
       - run: pnpm audit --prod --audit-level low
@@ -41,7 +44,10 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: 24, cache: pnpm, registry-url: "https://registry.npmjs.org" }
-      - run: pnpm install --frozen-lockfile
+      # Socket Firewall: blocks packages Socket has confirmed as malware before they download.
+      - uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with: { mode: firewall-free }
+      - run: sfw pnpm install --frozen-lockfile
       - id: meta
         env: { REF_NAME: "${{ github.ref_name }}", REF: "${{ github.ref }}" }
         run: |
@@ -97,7 +103,10 @@ jobs:
       # goes live after a maintainer approves it on npmjs.com (or `npm stage approve`) with 2FA,
       # so a compromised GitHub account alone can't publish. `npm stage` needs npm >= 11.15.
       # npm >= 11.15 for `npm stage`, pinned by integrity in .github/npm-cli/package-lock.json.
-      - run: npm ci --prefix .github/npm-cli --no-audit --no-fund && .github/npm-cli/node_modules/.bin/npm --version
+      # Socket Firewall: blocks packages Socket has confirmed as malware before they download.
+      - uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with: { mode: firewall-free }
+      - run: sfw npm ci --prefix .github/npm-cli --no-audit --no-fund && .github/npm-cli/node_modules/.bin/npm --version
       # Pre-releases (X.Y.Z-rc.N) go to the `next` dist-tag, so a plain install never gets one;
       # npm refuses a pre-release without an explicit tag anyway.
       - id: tag

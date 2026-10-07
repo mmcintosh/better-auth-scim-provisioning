@@ -1,0 +1,9 @@
+# pnpm settings (this is a single package, not a workspace).
+# Don't install a version published less than a day ago: most npm malware is found and pulled
+# within hours. Dependabot waits 3 days (cooldown), so it never proposes a version this rejects.
+# Better Auth is exempt, because the canary and CI's latest-1.7 row exist to try its newest
+# releases at once; Socket Firewall still checks them in CI.
+minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - better-auth
+  - "@better-auth/*"
