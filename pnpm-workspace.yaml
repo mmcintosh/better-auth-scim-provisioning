@@ -1,0 +1,8 @@
+# pnpm settings (this is a single package, not a workspace).
+# Don't install a version published less than 3 days ago: most npm malware is found and pulled
+# within hours to days. Better Auth is exempt, because the canary and CI's latest-1.7 row exist to
+# try its newest releases at once; Socket Firewall still checks them in CI.
+minimumReleaseAge: 4320
+minimumReleaseAgeExclude:
+  - better-auth
+  - "@better-auth/*"

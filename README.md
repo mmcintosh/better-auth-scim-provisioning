@@ -8,6 +8,7 @@ Keep your users' accounts in step at the apps they use, straight from your [Bett
 [![Runs on](https://img.shields.io/badge/runs%20on-Workers%20%7C%20Node%2022%2B-f38020)](#databases-and-runtimes)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mmcintosh/better-auth-scim-provisioning/badge)](https://scorecard.dev/viewer/?uri=github.com/mmcintosh/better-auth-scim-provisioning)
+[![Socket](https://socket.dev/api/badge/npm/package/better-auth-scim-provisioning)](https://socket.dev/npm/package/better-auth-scim-provisioning)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15270/badge)](https://www.bestpractices.dev/projects/15270)
 [![CodeQL](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/codeql.yml/badge.svg)](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/codeql.yml)
 
