@@ -8,6 +8,7 @@ Keep your users' accounts in step at the apps they use, straight from your [Bett
 [![Runs on](https://img.shields.io/badge/runs%20on-Workers%20%7C%20Node%2022%2B-f38020)](#databases-and-runtimes)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mmcintosh/better-auth-scim-provisioning/badge)](https://scorecard.dev/viewer/?uri=github.com/mmcintosh/better-auth-scim-provisioning)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15270/badge)](https://www.bestpractices.dev/projects/15270)
 [![CodeQL](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/codeql.yml/badge.svg)](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/codeql.yml)
 
 It's the **outbound** direction. Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim) is the inbound one, where directories push users *into* your app; this package pushes them *out*. It works however your users sign in, and pairs with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) when your app is also their identity provider: see [sign-in and provisioning together](https://github.com/mmcintosh/better-auth-saml-idp/blob/main/docs/guide/provisioning.md).
