@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-08
+
+Organizations connect their own apps at runtime (the target registry), and Better Auth apps using @better-auth/scim are tested as receivers, ID-JAG's SCIM link included.
+
 ### Project
 
 - Every dependency install in CI goes through Socket Firewall, which blocks confirmed malware before it downloads, the release job included. pnpm 10.34.6 won't resolve a version less than a day old (`minimumReleaseAge` in the new pnpm-workspace.yaml; Better Auth exempt for the canary and the latest-1.7 row), and Dependabot waits 3 days (`cooldown`). The README shows Socket's package badge.
