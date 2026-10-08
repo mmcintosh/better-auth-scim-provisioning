@@ -50,11 +50,34 @@ export const enterpriseOption = z.union([
     .refine((o) => Object.values(o).some((v) => v !== undefined), "name at least one field, or use true"),
 ]);
 
-/** The fields a target's `enterprise` option reads, or null without it. `true` is every attribute, under its own name (the manager: `managerId`). */
-export function enterpriseFields(option: boolean | EnterpriseFields | undefined): EnterpriseFields | null {
+/** The user fields organizations' stored targets may read for `enterprise`, unless the host lists others (`registry.enterpriseFields`). */
+export const DEFAULT_STORED_ENTERPRISE_FIELDS: readonly string[] = [...ENTERPRISE_VALUES, "managerId"];
+
+/** Fields an `enterprise` option reads that aren't allowed: a stored target may read only the host's allowlist, never a hidden or sensitive column. */
+export function enterpriseFieldProblems(option: boolean | EnterpriseFields | undefined, allowed: readonly string[]): string[] {
+  const fields = enterpriseFields(option);
+  if (!fields) return [];
+  const bad = [...new Set(Object.values(fields).filter((f): f is string => !!f && !allowed.includes(f)))];
+  return bad.length ? [`settings.enterprise: reads ${bad.join(", ")}, which the host doesn't allow organizations' targets to read (registry.enterpriseFields: ${allowed.join(", ") || "none"})`] : [];
+}
+
+/**
+ * The fields a target's `enterprise` option reads, or null without it. `true` is each attribute
+ * under its own name (the manager: `managerId`), for the fields the user model has (`known`): an
+ * attribute without a field isn't the target's to manage, so it's neither sent nor cleared.
+ */
+export function enterpriseFields(option: boolean | EnterpriseFields | undefined, known?: ReadonlySet<string>): EnterpriseFields | null {
   if (!option) return null;
-  if (option === true) return { ...Object.fromEntries(ENTERPRISE_VALUES.map((a) => [a, a])), manager: "managerId" };
-  return option;
+  if (option !== true) return option;
+  const all: Record<string, string> = { ...Object.fromEntries(ENTERPRISE_VALUES.map((a) => [a, a])), manager: "managerId" };
+  const fields = Object.fromEntries(Object.entries(all).filter(([, f]) => !known || known.has(f))) as EnterpriseFields;
+  return Object.keys(fields).length ? fields : null;
+}
+
+/** Fields an explicit `enterprise` map names that the user model doesn't have. */
+export function missingEnterpriseFields(option: boolean | EnterpriseFields | undefined, known: ReadonlySet<string>): string[] {
+  if (!option || option === true) return [];
+  return Object.values(option).filter((f): f is string => !!f && !known.has(f));
 }
 
 /** A field's value as an attribute: text, or a number written out; anything else (empty, null, an object) is no value. */

@@ -260,6 +260,13 @@ export interface TargetRegistryOptions {
    */
   allowHosts?: string[] | undefined;
   /**
+   * The user fields organizations' stored targets may read for `enterprise` (their administrators
+   * choose the fields, and the values go to their app). Default: the attribute names
+   * (`employeeNumber`, `costCenter`, `organization`, `division`, `department`) and `managerId`.
+   * Never list a field you wouldn't show the organization's administrators. [] turns it off.
+   */
+  enterpriseFields?: string[] | undefined;
+  /**
    * The fetch stored targets use, to send them through an egress proxy, say. By default, the
    * global fetch behind a guard that checks every request's URL as it's made and refuses names
    * resolving to private addresses: your own fetch replaces that guard, so it must do the same.

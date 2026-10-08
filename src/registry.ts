@@ -5,7 +5,7 @@
 import { parseEnvelope, symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
 import * as z from "zod";
 import { type Adapter, IN_BATCH, markPaused, type TargetSource } from "./outbox";
-import { enterpriseOption } from "./mapping";
+import { DEFAULT_STORED_ENTERPRISE_FIELDS, enterpriseFieldProblems, enterpriseOption, missingEnterpriseFields } from "./mapping";
 import { profiles } from "./profiles";
 import type { ScimTarget, Target, TargetRegistryOptions } from "./types";
 
@@ -269,8 +269,8 @@ export function assemble(row: Pick<TargetRow, "targetId" | "organizationId">, se
  * What's wrong with a stored target's settings and credentials, beyond their shapes: the
  * credentials its type takes, and URLs that are https and public (`allowHosts` aside).
  */
-export function storedProblems(settings: StoredSettings, credentials: StoredCredentials, allowHosts: readonly string[] = []): string[] {
-  const issues: string[] = [];
+export function storedProblems(settings: StoredSettings, credentials: StoredCredentials, allowHosts: readonly string[] = [], enterpriseAllowed: readonly string[] = DEFAULT_STORED_ENTERPRISE_FIELDS): string[] {
+  const issues: string[] = [...enterpriseFieldProblems(settings.enterprise, enterpriseAllowed)];
   const type = settings.type ?? "scim";
   const kind = credentialsKind(credentials);
   const takes = { scim: ["bearer", "basic", "header", "oauth2"], webhook: ["webhook-secret"], "google-workspace": ["google-service-account"] }[type];
@@ -312,7 +312,7 @@ const sealedWithOldSecret = (key: SealKey, sealed: string) => typeof key !== "st
  * with the number of organizations, and every server sees a target the moment it's stored,
  * disabled or removed. Decrypted targets are kept while their row is unchanged.
  */
-export function registrySource(code: Target[], adapter: Adapter, key: SealKey, options: TargetRegistryOptions, log: { error(m: string): void }): TargetSource {
+export function registrySource(code: Target[], adapter: Adapter, key: SealKey, options: TargetRegistryOptions, log: { error(m: string): void }, userFields?: ReadonlySet<string>): TargetSource {
   const byId = new Map(code.map((t) => [t.id, t]));
   // Your own fetch replaces the resolving check (a proxy's, say); otherwise names are checked before each request.
   const fetchFor = options.fetch ?? guardedFetch(options.allowHosts);
@@ -325,6 +325,12 @@ export function registrySource(code: Target[], adapter: Adapter, key: SealKey, o
     let settings: StoredSettings | undefined;
     try {
       settings = storedSettingsSchema.parse(JSON.parse(row.config));
+      // Checked again when used: a row written outside the API, or a host that narrowed the list since.
+      const fieldProblems = [
+        ...enterpriseFieldProblems(settings.enterprise, options.enterpriseFields ?? DEFAULT_STORED_ENTERPRISE_FIELDS),
+        ...(userFields ? missingEnterpriseFields(settings.enterprise, userFields).map((f) => `settings.enterprise: the users have no field ${f}`) : []),
+      ];
+      if (fieldProblems.length) throw new Error(fieldProblems.join("; "));
       const credentials = await unseal(key, row);
       target = assemble(row, settings, credentials, fetchFor);
       if (!truthy(row.enabled)) markPaused(target);

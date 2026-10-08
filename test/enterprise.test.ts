@@ -60,7 +60,7 @@ describe("Enterprise User extension", () => {
     const di = await h.user("Di Boss", false); // not provisioned yet: an unverified email
     await set(cy.id, { managerId: di.id });
     expect(ext(cy.email)?.manager).toBeUndefined();
-    // The manager arrives: the report is queued and updated with the manager's id there.
+    // The manager arrives: the report is queued (by the scheduled run) and updated with the manager's id there.
     await h.ctx.internalAdapter.updateUser(di.id, { emailVerified: true });
     await h.settle();
     await h.auth.api.scimProvisioningRun({ body: {} });
@@ -145,5 +145,58 @@ describe("Enterprise User extension", () => {
     expect(storedSettingsSchema.safeParse({ url: "https://app.example.com/scim/v2", enterprise: { department: "dept; drop" } }).success).toBe(false);
     const settings = storedSettingsSchema.parse({ url: "https://app.example.com/scim/v2", enterprise: true });
     expect(assemble({ targetId: "t-1", organizationId: "o" }, settings, { token: "t" })).toMatchObject({ enterprise: true });
+  });
+
+  it("true reads only the fields the users have: the others aren't sent, cleared, or queried", async () => {
+    const h = await createHost({ targets: [{ id: "gw", type: "google-workspace", enterprise: true }], userFields: { department: { type: "string" } } });
+    const jo = await h.user("Jo Staff");
+    const g = [...h.google.users.values()].find((u) => u.primaryEmail === jo.email) as any;
+    // An admin's organization name and Employee ID at Google: not ours to clear (no such fields here).
+    Object.assign(g, { organizations: [{ primary: true, name: "Admin Co", costCenter: "ADM" }], externalIds: [...(g.externalIds ?? []), { type: "organization", value: "EMP-1" }] });
+    await h.ctx.internalAdapter.updateUser(jo.id, { department: "Ops" });
+    await h.settle();
+    expect(g.organizations).toEqual([{ name: "Admin Co", costCenter: "ADM", department: "Ops", primary: true }]);
+    expect(g.externalIds).toEqual(expect.arrayContaining([{ type: "organization", value: "EMP-1" }]));
+    expect(await h.jobs()).toEqual([]);
+  });
+
+  it("a map naming a field the users don't have stops the plugin at startup", async () => {
+    await expect(createHost({ targets: [{ id: "app", enterprise: { department: "dept" } }] })).rejects.toThrow(/enterprise reads dept, which the user model doesn't have/);
+  });
+
+  it("an organization's target re-queues only that organization's members as reports", async () => {
+    const h = await createHost({ targets: [{ id: "app" }], userFields: FIELDS });
+    const org = await h.ctx.adapter.create<Record<string, unknown>, { id: string }>({ model: "organization", data: { name: "Acme", slug: "acme", createdAt: new Date() } });
+    const { outbox, staticTargets } = await import("../src/outbox");
+    const remote = h.app;
+    const target = { id: "acme", type: "scim" as const, url: remote.url, token: remote.token, fetch: remote.fetch, organizationId: org.id, enterprise: true as const };
+    const known = new Set(Object.keys((h.ctx as any).tables.user.fields));
+    const box = outbox({ targets: [target] }, h.ctx.adapter as never, { warn: () => {}, error: () => {} }, staticTargets([target]), known);
+    const boss = await h.user("Boss");
+    const inside = await h.user("Inside");
+    const outside = await h.user("Outside");
+    for (const u of [boss, inside]) await h.ctx.adapter.create({ model: "member", data: { userId: u.id, organizationId: org.id, role: "member", createdAt: new Date() } });
+    for (const u of [inside, outside]) await h.ctx.internalAdapter.updateUser(u.id, { managerId: boss.id });
+    await h.settle();
+    await box.enqueue("acme", boss.id);
+    await box.runFor("acme", boss.id);
+    const queued = (await h.jobs()).filter((j) => j.targetId === "acme").map((j) => j.userId);
+    expect(queued).toContain(inside.id);
+    expect(queued).not.toContain(outside.id);
+  });
+
+  it("a manager field holding a number is read as text (hosts with numeric ids)", async () => {
+    const { enterpriseValues } = await import("../src/mapping");
+    expect(enterpriseValues({ id: "7", email: "a@b", emailVerified: true, name: "A", bossNo: 12 }, { manager: "bossNo" }).managerId).toBe("12");
+  });
+
+  it("a user with no Enterprise User values isn't sent the extension or its schema", async () => {
+    const { h } = await setup();
+    const ann = await h.user("Ann None");
+    await h.ctx.internalAdapter.updateUser(ann.id, { name: "Ann Still None" });
+    await h.settle();
+    const put = [...h.app.requests].reverse().find((r) => r.method === "PUT")?.body as Record<string, any>;
+    expect(put.schemas).toEqual(["urn:ietf:params:scim:schemas:core:2.0:User"]);
+    expect(put[ENT]).toBeUndefined();
   });
 });

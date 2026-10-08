@@ -6,7 +6,7 @@ import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
 import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
-import { enterpriseOption } from "./mapping";
+import { enterpriseOption, missingEnterpriseFields } from "./mapping";
 import { registrySource, secretText, TARGET_MODEL } from "./registry";
 import { registryEndpoints } from "./registry-endpoints";
 import type { ScimProvisioningOptions, Target } from "./types";
@@ -104,6 +104,7 @@ const optionsSchema = z.strictObject({
       organizationRoles: z.array(z.string().min(1)).optional(),
       maxTargetsPerOrganization: z.number().int().min(1).max(1000).optional(),
       allowHosts: z.array(z.string().min(1)).optional(),
+      enterpriseFields: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field")).optional(),
       fetch: z.function().optional(),
     })
     .optional(),
@@ -311,12 +312,16 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
 
   /** Set at init: whether the organization plugin has teams (a stored target's teamGroups needs them). */
   let teamsEnabled = false;
+  /** Set at init: the user model's fields. */
+  let userFields: ReadonlySet<string> = new Set();
 
   /** A stored target, checked as the options check a target in code. */
   function targetProblems(target: Target): string[] {
     const parsed = optionsSchema.safeParse({ targets: [target] });
     const issues = parsed.success ? [] : parsed.error.issues.flatMap(describeIssue).map((i) => i.replace(/^targets\.0\.?/, "settings."));
     if (target.teamGroups && !teamsEnabled) issues.push("settings.teamGroups: needs the organization plugin's teams");
+    const missing = missingEnterpriseFields(target.enterprise, userFields);
+    if (missing.length) issues.push(`settings.enterprise: reads ${missing.join(", ")}, which the host's users don't have`);
     return issues;
   }
 
@@ -426,12 +431,18 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         if (t.teamGroups && !org?.options?.teams?.enabled) throw new Error(`[scim] target ${t.id}: teamGroups needs the organization plugin's teams (organization({ teams: { enabled: true } }))`);
       }
       teamsEnabled = !!org?.options?.teams?.enabled;
+      // The user model's fields (Better Auth's, plugins', and user.additionalFields): what `enterprise` can read.
+      userFields = new Set(Object.keys((ctx as { tables?: { user?: { fields?: Record<string, unknown> } } }).tables?.user?.fields ?? {}));
+      for (const t of options.targets) {
+        const missing = missingEnterpriseFields(t.enterprise, userFields);
+        if (missing.length) throw new Error(`[scim] target ${t.id}: enterprise reads ${missing.join(", ")}, which the user model doesn't have; add them to user.additionalFields`);
+      }
       if (options.registry && !org) throw new Error("[scim] registry needs Better Auth's organization plugin: every stored target belongs to an organization");
       const source = options.registry
-        ? registrySource(options.targets, ctx.adapter as unknown as Adapter, ctx.secretConfig, options.registry, ctx.logger)
+        ? registrySource(options.targets, ctx.adapter as unknown as Adapter, ctx.secretConfig, options.registry, ctx.logger, userFields)
         : staticTargets(options.targets);
       const s: State = {
-        box: outbox(options, ctx.adapter as unknown as Adapter, ctx.logger, source),
+        box: outbox(options, ctx.adapter as unknown as Adapter, ctx.logger, source, userFields),
         source,
         adapter: ctx.adapter as unknown as Adapter,
         background: (p) => ctx.runInBackground(p.catch((e) => ctx.logger.error("[scim] delivery failed", e))),

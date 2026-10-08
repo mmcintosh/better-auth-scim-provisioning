@@ -6,7 +6,17 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Added
 
-- **Enterprise User attributes (`enterprise`)**: employee number, cost center, organization, division, department and manager, read from user fields (`true` for fields of the same names and `managerId`, or a map of your own field names), sent as SCIM's Enterprise User extension (RFC 7643 §4.3). An empty field clears the attribute at the app (PATCH removes it by path). The manager is their id at that app once they're provisioned there, and the reports are updated when that changes. Google Workspace gets the primary organization, the `organization` external id and the `manager` relation, keeping an admin's other values; webhooks get the same object as SCIM. Organizations' stored targets can set it too. Exports `SCIM_ENTERPRISE_USER_SCHEMA` and the `ScimEnterpriseUser` and `EnterpriseFields` types.
+- **Enterprise User attributes (`enterprise`)**: employee number, cost center, organization, division, department and manager, read from user fields, sent as SCIM's Enterprise User extension (RFC 7643 §4.3).
+  - `true` reads the fields of those names (and `managerId`) that your users have; a map names your own fields, and one your users don't have stops the plugin at startup.
+  - An empty field clears the attribute at the app: PUT leaves it out, PATCH removes it by path, and an app that refuses such a remove gets the change without it. A user with no values isn't sent the extension.
+  - The manager is their id at that app once they're provisioned there. When that changes (appears, goes, a new id, a new address at Google), the reports are queued again by a job of its own, retried if it fails; at an organization's target, only its members.
+  - Google Workspace gets the primary organization, the `organization` external id and the `manager` relation, touching only the attributes the target reads and keeping an admin's other values. Webhooks get the same object as SCIM.
+  - Organizations' stored targets can set it, reading only the fields the host allows (`registry.enterpriseFields`; by default the attribute names and `managerId`).
+  - Exports `SCIM_ENTERPRISE_USER_SCHEMA` and the `ScimEnterpriseUser` and `EnterpriseFields` types.
+
+### Changed
+
+- **Google Workspace: only the plugin's own suspension is lifted.** A change to a user (a rename, or now a manager's change) no longer sends `suspended: false`, which undid an admin's suspension made in the Admin console. The plugin lifts a suspension only when it made it and the user is back (unbanned, or included again).
 
 ### Fixed
 

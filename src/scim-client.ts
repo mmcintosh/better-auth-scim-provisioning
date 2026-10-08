@@ -58,7 +58,18 @@ export interface ScimEnterpriseUser {
   organization?: string | undefined;
   division?: string | undefined;
   department?: string | undefined;
-  manager?: { value: string } | undefined;
+  manager?: { value: string; $ref?: string | undefined; displayName?: string | undefined } | undefined;
+}
+
+/**
+ * A user as sent: without the Enterprise User extension (and its schema) when it has no values,
+ * so an app that doesn't know the extension isn't sent it for users with nothing in it.
+ */
+function onTheWire(user: ScimUser): ScimUser {
+  const ext = user[SCIM_ENTERPRISE_USER_SCHEMA];
+  if (!ext || Object.values(ext).some((v) => v !== undefined)) return user;
+  const { [SCIM_ENTERPRISE_USER_SCHEMA]: _, ...rest } = user;
+  return { ...rest, schemas: user.schemas.filter((x) => x !== SCIM_ENTERPRISE_USER_SCHEMA) };
 }
 
 export interface ScimGroup {
@@ -240,18 +251,34 @@ export function scimClient(endpoint: ScimEndpoint) {
       return hit ? { id: idOf(hit, "GET /Users"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null, ...(typeof hit.active === "boolean" ? { active: hit.active } : {}) } : null;
     },
     async create(user: ScimUser): Promise<string> {
-      return idOf((await request("POST", "/Users", user)).json, "POST /Users");
+      return idOf((await request("POST", "/Users", onTheWire(user))).json, "POST /Users");
     },
     async replace(id: string, user: ScimUser): Promise<void> {
-      await request("PUT", `/Users/${encodeURIComponent(id)}`, { ...user, id });
+      await request("PUT", `/Users/${encodeURIComponent(id)}`, { ...onTheWire(user), id });
     },
     /**
      * Like replace, but only the attributes we send change: anything set at the app is kept.
      * `remove` names attributes (paths) of ours that now have no value, so they're cleared too.
      */
     async patch(id: string, user: ScimUser, remove: readonly string[] = []): Promise<void> {
-      const { schemas: _, ...value } = user;
-      await request("PATCH", `/Users/${encodeURIComponent(id)}`, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "replace", value }, ...remove.map((path) => ({ op: "remove", path }))] });
+      const { schemas: _, ...value } = onTheWire(user);
+      const at = `/Users/${encodeURIComponent(id)}`;
+      try {
+        await request("PATCH", at, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "replace", value }, ...remove.map((path) => ({ op: "remove", path }))] });
+      } catch (e) {
+        // Some apps refuse to remove an attribute that has no value (400 noTarget), and the
+        // removes go with every change. So: the change without them, then each remove on its own,
+        // a refusal of one being taken as "nothing to remove".
+        if (!(e instanceof ScimError && e.status === 400 && remove.length)) throw e;
+        await request("PATCH", at, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "replace", value }] });
+        for (const path of remove) {
+          try {
+            await request("PATCH", at, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "remove", path }] });
+          } catch (r) {
+            if (!(r instanceof ScimError && r.status === 400)) throw r;
+          }
+        }
+      }
     },
     async setActive(id: string, active: boolean): Promise<void> {
       await request("PATCH", `/Users/${encodeURIComponent(id)}`, {

@@ -110,7 +110,7 @@ export type GroupRef = { kind: Exclude<Kind, "user">; id: string };
  * accounts and groups a page at a time ("m:<member id>", "l:<user id>", "g:", "G:<group link key>"),
  * each step queueing the next, so a large organization isn't queued inside one request.
  */
-type JobKind = Kind | "resync";
+type JobKind = Kind | "resync" | "reports";
 /**
  * A role group's id is "<organization id>:<role>", and roles are named by people: "Admin" and
  * "admin" can both exist. Keys must stay distinct under a case-insensitive collation (MySQL's), so
@@ -195,7 +195,9 @@ export function staticTargets(list: Target[]): TargetSource {
   };
 }
 
-export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }, source: TargetSource = staticTargets(options.targets)) {
+export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }, source: TargetSource = staticTargets(options.targets), userFields?: ReadonlySet<string>) {
+  /** A target's Enterprise User fields, `true` resolved against the user model's fields. */
+  const fieldsOf = (target: Target) => enterpriseFields(target.enterprise, userFields);
   const maxAttempts = options.retry?.maxAttempts ?? 8;
   const baseDelayMs = options.retry?.baseDelayMs ?? 30_000;
   const backoff = (attempts: number) => Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** Math.max(0, attempts - 1));
@@ -282,44 +284,69 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * or their address at Google Workspace, and only once they're provisioned and active there.
    */
   async function withEnterprise(target: Target, user: ProvisionedUser, scim: ScimUser): Promise<{ scim: ScimUser; clears: string[] }> {
-    const fields = enterpriseFields(target.enterprise);
+    const fields = fieldsOf(target);
     if (!fields || scim[SCIM_ENTERPRISE_USER_SCHEMA] !== undefined) return { scim, clears: [] };
     const { values, managerId } = enterpriseValues(user, fields);
-    const extension: ScimEnterpriseUser = { ...values };
-    if (managerId) {
-      const link = await findLink(keyOf(target.id, managerId));
-      if (link?.remoteId && link.active) extension.manager = { value: target.type === "google-workspace" ? link.userName : link.remoteId };
-    }
     const named = [...ENTERPRISE_VALUES.filter((a) => fields[a]), ...(fields.manager ? (["manager"] as const) : [])];
+    // Every attribute the target names is a key, undefined when it has no value: so Google, which
+    // merges into what an admin set, knows which ones are ours to clear (JSON leaves them out).
+    const extension: ScimEnterpriseUser = Object.fromEntries(named.map((a) => [a, undefined]));
+    Object.assign(extension, values);
+    if (managerId) {
+      const value = managerValue(target, await findLink(keyOf(target.id, managerId)));
+      if (value) extension.manager = { value };
+    }
     return {
       scim: { ...scim, schemas: [...new Set([...scim.schemas, SCIM_ENTERPRISE_USER_SCHEMA])], [SCIM_ENTERPRISE_USER_SCHEMA]: extension },
       clears: named.filter((a) => extension[a] === undefined).map((a) => `${SCIM_ENTERPRISE_USER_SCHEMA}:${a}`),
     };
   }
 
+  /** What the reports of a user name as their manager at this target: the user's id there (their address at Google), while active; otherwise nothing. */
+  const managerValue = (target: Target, link: Link | null) => (link?.remoteId && link.active ? (target.type === "google-workspace" ? link.userName : link.remoteId) : null);
+
   /**
-   * A user's delivery. With the Enterprise User manager, the users who report to them are queued
-   * again when their account at the app appears or goes, so the reports' manager follows.
+   * A user's delivery. With the Enterprise User manager, when what their reports would name as
+   * their manager changes (their account at the app appears, goes, is made again under a new id,
+   * or at Google gets a new address), a "reports" job is queued to update those reports: a job, so
+   * a failure is retried rather than lost.
    */
   async function deliver(target: Target, userId: string, change?: string): Promise<Date | null> {
-    const managerField = enterpriseFields(target.enterprise)?.manager;
-    if (!managerField) return deliverUser(target, userId, change);
-    const linked = (l: Link | null) => !!(l?.remoteId && l.active);
-    const before = linked(await findLink(keyOf(target.id, userId)));
+    if (!fieldsOf(target)?.manager) return deliverUser(target, userId, change);
+    const key = keyOf(target.id, userId);
+    const before = managerValue(target, await findLink(key));
     const result = await deliverUser(target, userId, change);
-    if (linked(await findLink(keyOf(target.id, userId))) !== before) await queueReports(target, managerField, userId);
+    if (managerValue(target, await findLink(key)) !== before) {
+      await enqueue(target.id, userId, { kind: "reports" });
+      // At once, as part of this delivery; if it fails, the job is retried by the scheduled run.
+      await runFor(target.id, userId, "reports").catch(() => {});
+    }
     return result;
   }
 
-  /** Queue the users whose manager field names this user (at most a page; a reconcile covers more). Never fails the manager's job. */
-  async function queueReports(target: Target, field: string, managerId: string): Promise<void> {
-    try {
-      const reports = (await adapter.findMany({ model: "user", where: [{ field, value: managerId }], limit: PAGE })) as ProvisionedUser[];
-      for (const r of reports) if (r[field] === managerId && r.id !== managerId) await enqueue(target.id, r.id);
-      if (reports.length >= PAGE) log.warn(`[scim] ${target.id}: user ${managerId} has more than ${PAGE} reports; run a reconcile to update the rest`);
-    } catch (e) {
-      log.error(`[scim] ${target.id}: could not queue the users reporting to ${managerId} (is enterprise.manager a user field?): ${(e as Error).message}`);
+  /**
+   * A "reports" job: queue the users whose manager field names this user (at most a page; a
+   * reconcile covers more), at an organization's target only its members. Throws on a database
+   * error, so the job is retried.
+   */
+  async function reportsStep(target: Target, managerId: string): Promise<null> {
+    const field = fieldsOf(target)?.manager;
+    if (!field) return null;
+    const found = (await adapter.findMany({ model: "user", where: [{ field, value: managerId }], limit: PAGE })) as ProvisionedUser[];
+    // Exact matches (a case-insensitive collation mustn't widen it), a number field compared as text.
+    let reports = found.filter((r) => r[field] != null && String(r[field]) === managerId && r.id !== managerId).map((r) => r.id);
+    if (target.organizationId && reports.length) {
+      const members = new Set<string>();
+      for (let i = 0; i < reports.length; i += IN_BATCH) {
+        const ids = reports.slice(i, i + IN_BATCH);
+        const rows = (await adapter.findMany({ model: "member", where: [{ field: "organizationId", value: target.organizationId }, { field: "userId", value: ids, operator: "in" }], limit: ids.length })) as { userId: string; organizationId: string }[];
+        for (const m of rows) if (m.organizationId === target.organizationId && ids.includes(m.userId)) members.add(m.userId);
+      }
+      reports = reports.filter((id) => members.has(id));
     }
+    for (const id of reports) await enqueue(target.id, id);
+    if (found.length >= PAGE) log.warn(`[scim] ${target.id}: user ${managerId} has more than ${PAGE} reports; run a reconcile to update the rest`);
+    return null;
   }
 
   async function deliverUser(target: Target, userId: string, change?: string): Promise<Date | null> {
@@ -331,8 +358,16 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (await wanted(target, user)) {
       const { scim, clears } = await withEnterprise(target, user as ProvisionedUser, (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
       const externalId = scim.externalId ?? null;
+      // Back after the plugin deactivated them (a ban, a removal): only then is a Google suspension
+      // lifted, never an admin's own or one of Google's.
+      const reactivate = !!link?.remoteId && !link.active;
       /** Update the account: PUT, or PATCH (with the enterprise attributes cleared since). */
-      const update = (id: string) => (target.update === "patch" ? (client as ReturnType<typeof scimClient>).patch(id, scim, clears) : client.replace(id, scim));
+      const update = (id: string) =>
+        target.update === "patch"
+          ? (client as ReturnType<typeof scimClient>).patch(id, scim, clears)
+          : target.type === "google-workspace"
+            ? (client as ReturnType<typeof googleWorkspaceClient>).replace(id, scim, { reactivate })
+            : client.replace(id, scim);
       if (link?.remoteId) {
         try {
           await update(link.remoteId);
@@ -564,6 +599,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     let recheckAt: Date | null;
     const isGroup = current.kind === "group" || current.kind === "team" || current.kind === "role";
     const isResync = current.kind === "resync";
+    const isReports = current.kind === "reports";
     // A group delivery has no fixed number of requests (members a page and a batch at a time; at
     // Google one per member changed): the hold is renewed while it runs, so no second worker
     // claims the job halfway through.
@@ -579,7 +615,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const change = `${current.id}@${current.version}`;
       recheckAt = isResync
         ? await resyncStep(target, current.userId)
-        : isGroup
+        : isReports
+          ? await reportsStep(target, current.userId)
+          : isGroup
           ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }, change)
           : await deliver(target, current.userId, change);
     } catch (e) {
@@ -593,7 +631,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const wait = Math.max(err.retryAfterMs ?? 0, attempts >= maxAttempts ? MAX_DELAY_MS : backoff(attempts));
       const loud = giveUp || attempts === maxAttempts;
       (loud ? log.error : log.warn)(
-        `[scim] ${target.id}: ${isResync ? "queueing its organization at" : isGroup ? `${current.kind === "group" ? "" : `${current.kind} `}group` : "user"} ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
+        `[scim] ${target.id}: ${isResync ? "queueing its organization at" : isReports ? "queueing the users reporting to" : isGroup ? `${current.kind === "group" ? "" : `${current.kind} `}group` : "user"} ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
       );
       const recorded = await adapter.updateMany({
         model: JOB_MODEL,
@@ -602,7 +640,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       });
       // Only a failure that was recorded: a job bumped during delivery goes out again at once,
       // so it hasn't failed. The host's hook gets a few seconds; this worker still holds the job.
-      if (loud && recorded > 0 && options.onFailure && !isResync) {
+      if (loud && recorded > 0 && options.onFailure && !isResync && !isReports) {
         const failure: DeliveryFailure = { targetId: target.id, kind: (isGroup ? current.kind : "user") as DeliveryFailure["kind"], subjectId: current.userId, error: err.message, status: err.status, attempts, failed: giveUp };
         try {
           await Promise.race([options.onFailure(failure), new Promise((_, reject) => setTimeout(() => reject(new Error(`no answer within ${ON_FAILURE_TIMEOUT_MS / 1000} s`)), ON_FAILURE_TIMEOUT_MS))]);
@@ -642,7 +680,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (settled === 0) await release(current.id);
     const outcome = (await nextFor(current.key, round)) ?? "done";
     // The user's groups follow: added once they exist at the app, left once they don't.
-    if (!isGroup && !isResync && hasGroups(target)) await syncGroupsOf(target, current.userId);
+    if (!isGroup && !isResync && !isReports && hasGroups(target)) await syncGroupsOf(target, current.userId);
     return outcome;
   }
 
@@ -704,7 +742,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   /** Deliver (target, user) now if due, e.g. right after enqueue. */
-  async function runFor(targetId: string, userId: string, kind: Kind = "user"): Promise<Outcome | null> {
+  async function runFor(targetId: string, userId: string, kind: JobKind = "user"): Promise<Outcome | null> {
     const jobs = await jobsFor(keyFor(kind, targetId, userId));
     const job = jobs.find((j) => free(j));
     if (!job) return jobs.length ? "busy" : null;
@@ -1152,7 +1190,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const rows = (await adapter.findMany({ model: JOB_MODEL, where, sortBy: { field: "id", direction: "asc" }, limit: o.limit + 1 })) as Job[];
     const items = rows.slice(0, o.limit).map((j) => ({
       targetId: j.targetId,
-      kind: (j.kind ?? "user") as "user" | "group" | "team" | "role" | "resync",
+      kind: (j.kind ?? "user") as "user" | "group" | "team" | "role" | "resync" | "reports",
       subjectId: j.userId,
       failed: j.failed,
       attempts: j.attempts,

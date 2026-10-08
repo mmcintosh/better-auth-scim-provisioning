@@ -202,7 +202,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
       ...(credentials.success ? [] : ["credentials: give token, auth, secret or privateKey (see the docs for each type), within their size limits"]),
     ];
     if (settings.success && credentials.success) {
-      issues.push(...storedProblems(settings.data, credentials.data, host.options?.allowHosts));
+      issues.push(...storedProblems(settings.data, credentials.data, host.options?.allowHosts, host.options?.enterpriseFields));
       if (!issues.length) {
         // A profile refuses what its app can't do (githubEnterprise: deprovision "delete") by throwing.
         let whole: Target | null = null;
