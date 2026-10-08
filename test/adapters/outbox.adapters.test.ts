@@ -378,7 +378,34 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     const key = `-----BEGIN PRIVATE KEY-----${"k".repeat(16_384 - 54)}-----END PRIVATE KEY-----`;
     const google = await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, enabled: false, settings: { type: "google-workspace", google: { clientEmail: "sa@p.iam.gserviceaccount.com", adminEmail: "admin@example.com" } }, credentials: { privateKey: key } }, headers });
     expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ id: google.target.id, credentials: { kind: "google-service-account" } })]);
+    // A change is written only over the row as read: an equality match on the long sealed text.
+    await h.auth.api.scimProvisioningUpdateTarget({ body: { id: google.target.id, settings: { type: "google-workspace", name: "Workspace", google: { clientEmail: "sa@p.iam.gserviceaccount.com", adminEmail: "admin@example.com" } } }, headers });
+    expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ settings: expect.objectContaining({ name: "Workspace" }) })]);
   });
+
+  it("the registry: an organization queued a page at a time (member id order, gt)", async () => {
+    const remote = mockScim();
+    const h = await host({ targets: [], registry: { fetch: remote.fetch } });
+    const signUp = await h.auth.api.signUpEmail({ body: { email: "owner@example.com", password: "correct-horse-battery", name: "Olive Owner" } });
+    await h.ctx.internalAdapter.updateUser(signUp.user.id, { emailVerified: true });
+    await h.settle();
+    const res = await h.auth.api.signInEmail({ body: { email: "owner@example.com", password: "correct-horse-battery" }, asResponse: true });
+    const headers = new Headers({ cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") });
+    const acme = (await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers }))!;
+    // More members than one page (100), written directly (no hooks).
+    for (let i = 0; i < 105; i++) {
+      const u = await h.ctx.adapter.create<Record<string, unknown>, { id: string }>({ model: "user", data: { email: `m${i}@example.com`, name: `Member ${i}`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() } });
+      await h.ctx.adapter.create({ model: "member", data: { userId: u.id, organizationId: acme.id, role: "member", createdAt: new Date() } });
+    }
+    await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, settings: { url: "https://app.example.com/scim/v2" }, credentials: { token: remote.token } }, headers });
+    await h.settle();
+    for (let i = 0; i < 20 && (await h.jobs()).length; i++) {
+      await h.auth.api.scimProvisioningRun({ body: { limit: 100 } });
+      await h.settle();
+    }
+    expect(await h.jobs()).toEqual([]);
+    expect(appUsers(remote)).toHaveLength(106);
+  }, 120_000);
 
   it("a timed ban is lifted when it runs out", async () => {
     const h = await host();

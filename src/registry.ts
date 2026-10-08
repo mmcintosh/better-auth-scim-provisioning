@@ -58,7 +58,8 @@ export const storedSettingsSchema = z.strictObject({
   adopt: z.boolean().optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
   requireVerifiedEmail: z.boolean().optional(),
-  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  // At most 30 s: the deliveries share the scheduled run with every other organization's.
+  timeoutMs: z.number().int().min(100).max(30_000).optional(),
   google: z.strictObject({ clientEmail: z.string().min(1), adminEmail: z.string().min(1), orgUnitPath: z.string().startsWith("/").optional(), groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/).optional() }).optional(),
 });
 export type StoredSettings = z.infer<typeof storedSettingsSchema>;
@@ -72,20 +73,37 @@ export const storedCredentialsSchema = z.union([
     auth: z.strictObject({ type: z.literal("oauth2"), tokenUrl: z.string().max(2048), clientId: secretText(1, 1024), clientSecret: secretText(1, 4096), scope: z.string().max(1024).optional(), clientAuth: z.enum(["body", "basic"]).optional() }),
   }),
   z.strictObject({ secret: secretText(32, 1024) }),
-  z.strictObject({ privateKey: z.string().max(16384).includes("PRIVATE KEY") }),
+  // A PEM is printable ASCII: also keeps the sealed form inside MySQL's TEXT (characters aren't bytes).
+  z.strictObject({ privateKey: z.string().max(16384).regex(/^[\x20-\x7e\r\n]+$/).includes("PRIVATE KEY") }),
 ]);
 export type StoredCredentials = z.infer<typeof storedCredentialsSchema>;
 
 /** Which kind of credentials a stored target has, for display: never the values. */
 export const credentialsKind = (c: StoredCredentials) => ("token" in c ? "bearer" : "auth" in c ? c.auth.type : "secret" in c ? "webhook-secret" : "google-service-account");
 
-export async function seal(key: SealKey, targetId: string, organizationId: string, credentials: StoredCredentials): Promise<string> {
-  return symmetricEncrypt({ key, data: JSON.stringify({ purpose: PURPOSE, v: 1, targetId, organizationId, credentials }) });
+const parseJson = (text: string): unknown => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+/** Where a target sends, and as whom: its type, URL, and Google's service account and admin. Credentials are sealed for one destination. */
+export const destination = (s: StoredSettings) => JSON.stringify([s.type ?? "scim", s.url ?? null, s.google?.clientEmail ?? null, s.google?.adminEmail ?? null]);
+
+/** Credentials sealed for one target, of one organization, sending to one destination. */
+export async function seal(key: SealKey, targetId: string, organizationId: string, credentials: StoredCredentials, settings: StoredSettings): Promise<string> {
+  return symmetricEncrypt({ key, data: JSON.stringify({ purpose: PURPOSE, v: 1, targetId, organizationId, to: destination(settings), credentials }) });
 }
 
-/** A row's credentials, refused unless the ciphertext says they're this row's (no swapping rows). */
-export async function unseal(key: SealKey, row: Pick<TargetRow, "targetId" | "organizationId" | "sealed">): Promise<StoredCredentials> {
-  let plain: { purpose?: unknown; v?: unknown; targetId?: unknown; organizationId?: unknown; credentials?: unknown };
+/**
+ * A row's credentials, refused unless the ciphertext says they're this row's (no swapping rows)
+ * and for where its settings send: a URL changed in the database, not through the API (which
+ * asks for the credentials again), doesn't get them.
+ */
+export async function unseal(key: SealKey, row: Pick<TargetRow, "targetId" | "organizationId" | "sealed" | "config">): Promise<StoredCredentials> {
+  let plain: { purpose?: unknown; v?: unknown; targetId?: unknown; organizationId?: unknown; to?: unknown; credentials?: unknown };
   try {
     plain = JSON.parse(await symmetricDecrypt({ key, data: row.sealed }));
   } catch {
@@ -93,6 +111,9 @@ export async function unseal(key: SealKey, row: Pick<TargetRow, "targetId" | "or
   }
   if (plain.purpose !== PURPOSE || plain.v !== 1 || plain.targetId !== row.targetId || plain.organizationId !== row.organizationId)
     throw new Error(`[scim] target ${row.targetId}: the stored credentials belong to another target`);
+  const settings = storedSettingsSchema.safeParse(parseJson(row.config));
+  if (!settings.success || plain.to !== destination(settings.data))
+    throw new Error(`[scim] target ${row.targetId}: its settings send somewhere its credentials weren't given for (changed outside the API?): give the credentials again`);
   return storedCredentialsSchema.parse(plain.credentials);
 }
 
@@ -181,16 +202,20 @@ export function privateAddress(host: string): boolean {
 }
 
 /**
- * Wraps a fetch so a stored target's host is looked up first, and refused if any address it
- * resolves to is private (a public name pointing inside: 127.0.0.1.nip.io, split-horizon DNS).
- * Where the runtime can't resolve names (Workers, whose fetch can't reach private networks
- * anyway), it's the URL check alone. A name that resolves differently a moment later (DNS
- * rebinding) can't be ruled out this way: an egress proxy can.
+ * Wraps a fetch so every request of a stored target is checked as it's made: the URL by the same
+ * rules as when it was stored (so a row allowed once, or written outside the API, can't reach an
+ * address inside your network), then its host looked up, and refused if any address it resolves
+ * to is private (a public name pointing inside: 127.0.0.1.nip.io, split-horizon DNS) or if it
+ * can't be resolved. Where the runtime can't resolve names (Workers, whose fetch can't reach
+ * private networks anyway), it's the URL check alone. A name that resolves differently a moment
+ * later (DNS rebinding) can't be ruled out this way: an egress proxy can.
  */
 export function guardedFetch(allowHosts: readonly string[] = [], base?: typeof fetch): typeof fetch {
   return async (input, init) => {
-    const u = new URL(input instanceof Request ? input.url : String(input));
-    const host = hostOf(u);
+    const url = input instanceof Request ? input.url : String(input);
+    const problem = publicUrl(url, allowHosts, { query: true });
+    if (problem) throw new Error(`refused to send to ${new URL(url).host}: the URL ${problem}`);
+    const host = hostOf(new URL(url));
     if (!allowHosts.map((h) => h.toLowerCase()).includes(host) && !host.includes(":") && !/^[\d.]+$/.test(host)) {
       const addresses = await resolve(host);
       if (addresses?.some(privateAddress)) throw new Error(`${host} resolves to a private address`);
@@ -199,18 +224,27 @@ export function guardedFetch(allowHosts: readonly string[] = [], base?: typeof f
   };
 }
 
-/** The addresses a name resolves to, where the runtime can tell (Node.js, Bun, Deno); null elsewhere. */
+let warnedNoResolver = false;
+
+/** The addresses a name resolves to, where the runtime can tell (Node.js, Bun, Deno); null where it can't. Throws if the name doesn't resolve: refused, not let through. */
 async function resolve(host: string): Promise<string[] | null> {
   // Workers: node:dns would ask a DNS-over-HTTPS service, a request before every request, and its
   // fetch can't reach private networks anyway.
   if ((globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent === "Cloudflare-Workers") return null;
   const get = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process?.getBuiltinModule;
   const dns = typeof get === "function" ? (get("node:dns") as { promises?: { lookup(h: string, o: { all: true; verbatim: true }): Promise<{ address: string }[]> } } | undefined) : undefined;
-  if (!dns?.promises?.lookup) return null;
+  if (!dns?.promises?.lookup) {
+    if (!warnedNoResolver) {
+      warnedNoResolver = true;
+      console.warn("[scim] stored targets: this runtime can't look names up (Node.js before 22.3?), so names resolving to private addresses aren't refused: use registry.fetch with an egress proxy, or a newer runtime");
+    }
+    return null;
+  }
   try {
     return (await dns.promises.lookup(host, { all: true, verbatim: true })).map((a) => a.address.toLowerCase());
-  } catch {
-    return null; // no such name: the request fails on its own
+  } catch (e) {
+    // A lookup that fails here and succeeds for the request a moment later could point anywhere.
+    throw new Error(`${host} could not be resolved (${(e as { code?: string }).code ?? "lookup failed"})`);
   }
 }
 
@@ -294,16 +328,18 @@ export function registrySource(code: Target[], adapter: Adapter, key: SealKey, o
       if (!truthy(row.enabled)) markPaused(target);
       if (sealedWithOldSecret(key, row.sealed)) {
         try {
-          await adapter.update({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }], update: { sealed: await seal(key, row.targetId, row.organizationId, credentials) } });
+          // Only over the credentials read: ones saved meanwhile (an administrator replacing a leaked token) stay.
+          await adapter.updateMany({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }, { field: "sealed", value: row.sealed }], update: { sealed: await seal(key, row.targetId, row.organizationId, credentials, settings) } });
         } catch (e) {
           log.error(`[scim] stored target ${row.targetId}: could not seal its credentials with the current secret: ${(e as Error).message}`);
         }
       }
     } catch (e) {
-      // Paused, never dropped: its jobs wait until it's given new credentials (or the secret is back).
+      // Paused, never dropped: its jobs are tried again every few minutes (no attempt counted), so
+      // they go once it's given new credentials or the right secret is back.
       log.error(`[scim] stored target ${row.targetId}: ${(e as Error).message}; paused until it's fixed`);
       const type = settings?.type ?? "scim";
-      target = markPaused(assemble(row, settings ?? { url: "https://unreadable.invalid" }, UNREADABLE[type] as StoredCredentials));
+      target = markPaused(assemble(row, settings ?? { url: "https://unreadable.invalid" }, UNREADABLE[type] as StoredCredentials), "unreadable");
     }
     built.set(row.targetId, { stamp, target });
     if (built.size > 1000) built.delete(built.keys().next().value as string);

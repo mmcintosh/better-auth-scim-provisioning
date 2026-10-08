@@ -18,11 +18,13 @@ async function setup() {
   const remote = mockScim();
   const h = await createHost({ targets: [], registry: { fetch: remote.fetch } });
   const org = (n: string) => h.ctx.adapter.create<Record<string, unknown>, { id: string }>({ model: "organization", data: { name: n, slug: n.toLowerCase(), createdAt: new Date() } });
-  const store = async (targetId: string, organizationId: string, settings: StoredSettings = {}, credentials: StoredCredentials = { token: remote.token }, enabled = true) =>
-    h.ctx.adapter.create({
+  const store = async (targetId: string, organizationId: string, settings: StoredSettings = {}, credentials: StoredCredentials = { token: remote.token }, enabled = true) => {
+    const full = { url: "https://app.example.com/scim/v2", ...settings };
+    return h.ctx.adapter.create({
       model: TARGET_MODEL,
-      data: { targetId, organizationId, type: settings.type ?? "scim", config: JSON.stringify({ url: "https://app.example.com/scim/v2", ...settings }), sealed: await seal(KEY, targetId, organizationId, credentials), enabled, createdAt: new Date(), updatedAt: new Date() },
+      data: { targetId, organizationId, type: settings.type ?? "scim", config: JSON.stringify(full), sealed: await seal(KEY, targetId, organizationId, credentials, full), enabled, createdAt: new Date(), updatedAt: new Date() },
     });
+  };
   const setEnabled = (targetId: string, enabled: boolean) => h.ctx.adapter.update({ model: TARGET_MODEL, where: [{ field: "targetId", value: targetId }], update: { enabled } });
   const join = async (userId: string, organizationId: string) => {
     await h.auth.api.addMember({ body: { userId, organizationId, role: "member" } });
@@ -33,13 +35,19 @@ async function setup() {
 }
 
 describe("sealed credentials", () => {
-  it("open only for the target and organization they were sealed for, and only with the key", async () => {
-    const sealed = await seal(KEY, "t1", "org1", { token: "secret-token" });
+  it("open only for the target, organization and destination they were sealed for, and only with the key", async () => {
+    const sealed = await seal(KEY, "t1", "org1", { token: "secret-token" }, { url: "https://app.example.com/scim/v2" });
     expect(sealed).not.toContain("secret-token");
-    expect(await unseal(KEY, { targetId: "t1", organizationId: "org1", sealed })).toEqual({ token: "secret-token" });
-    await expect(unseal(KEY, { targetId: "t2", organizationId: "org1", sealed })).rejects.toThrow(/belong to another target/);
-    await expect(unseal(KEY, { targetId: "t1", organizationId: "org2", sealed })).rejects.toThrow(/belong to another target/);
-    await expect(unseal("another-secret-that-is-at-least-32-characters", { targetId: "t1", organizationId: "org1", sealed })).rejects.toThrow(/can't be decrypted/);
+    const config = JSON.stringify({ url: "https://app.example.com/scim/v2" });
+    expect(await unseal(KEY, { targetId: "t1", organizationId: "org1", sealed, config })).toEqual({ token: "secret-token" });
+    await expect(unseal(KEY, { targetId: "t2", organizationId: "org1", sealed, config })).rejects.toThrow(/belong to another target/);
+    await expect(unseal(KEY, { targetId: "t1", organizationId: "org2", sealed, config })).rejects.toThrow(/belong to another target/);
+    await expect(unseal("another-secret-that-is-at-least-32-characters", { targetId: "t1", organizationId: "org1", sealed, config })).rejects.toThrow(/can't be decrypted/);
+    // Another destination (a URL changed in the database), or another type: not opened.
+    await expect(unseal(KEY, { targetId: "t1", organizationId: "org1", sealed, config: JSON.stringify({ url: "https://collector.example.net/scim/v2" }) })).rejects.toThrow(/weren't given for/);
+    await expect(unseal(KEY, { targetId: "t1", organizationId: "org1", sealed, config: JSON.stringify({ type: "webhook", url: "https://app.example.com/scim/v2" }) })).rejects.toThrow(/weren't given for/);
+    // Other settings (not where it sends) may change.
+    expect(await unseal(KEY, { targetId: "t1", organizationId: "org1", sealed, config: JSON.stringify({ url: "https://app.example.com/scim/v2", groups: true }) })).toEqual({ token: "secret-token" });
   });
 
   it("sealed with a rotated-out secret: sealed again with the current one when read, so the old secret can be retired", async () => {
@@ -47,13 +55,13 @@ describe("sealed credentials", () => {
     const acme = await org("Acme");
     const old = { keys: new Map([[1, "old-secret-that-is-at-least-32-characters-long"]]), currentVersion: 1 };
     const rotated = { keys: new Map([[2, "new-secret-that-is-at-least-32-characters-long"], [1, "old-secret-that-is-at-least-32-characters-long"]]), currentVersion: 2 };
-    await h.ctx.adapter.create({ model: TARGET_MODEL, data: { targetId: "t1", organizationId: acme.id, type: "scim", config: JSON.stringify({ url: "https://app.example.com/scim/v2" }), sealed: await seal(old, "t1", acme.id, { token: "tok" }), enabled: true, createdAt: new Date(), updatedAt: new Date() } });
+    await h.ctx.adapter.create({ model: TARGET_MODEL, data: { targetId: "t1", organizationId: acme.id, type: "scim", config: JSON.stringify({ url: "https://app.example.com/scim/v2" }), sealed: await seal(old, "t1", acme.id, { token: "tok" }, { url: "https://app.example.com/scim/v2" }), enabled: true, createdAt: new Date(), updatedAt: new Date() } });
     const source = registrySource([], h.ctx.adapter as unknown as Adapter, rotated, {}, { error: () => {} });
     expect(await source.get("t1")).toMatchObject({ token: "tok" });
     const [row] = await h.ctx.adapter.findMany<{ sealed: string }>({ model: TARGET_MODEL });
     expect(row!.sealed.startsWith("$ba$2$")).toBe(true);
     const retired = { keys: new Map([[2, "new-secret-that-is-at-least-32-characters-long"]]), currentVersion: 2 };
-    expect(await unseal(retired, { targetId: "t1", organizationId: acme.id, sealed: row!.sealed })).toEqual({ token: "tok" });
+    expect(await unseal(retired, { targetId: "t1", organizationId: acme.id, sealed: row!.sealed, config: JSON.stringify({ url: "https://app.example.com/scim/v2" }) })).toEqual({ token: "tok" });
   });
 });
 
@@ -161,7 +169,7 @@ describe("stored targets", () => {
     const acme = await org("Acme");
     await h.ctx.adapter.create({
       model: TARGET_MODEL,
-      data: { targetId: "acme-app", organizationId: acme.id, type: "scim", config: JSON.stringify({ url: "https://app.example.com/scim/v2" }), sealed: await seal("another-secret-that-is-at-least-32-characters", "acme-app", acme.id, { token: remote.token }), enabled: true, createdAt: new Date(), updatedAt: new Date() },
+      data: { targetId: "acme-app", organizationId: acme.id, type: "scim", config: JSON.stringify({ url: "https://app.example.com/scim/v2" }), sealed: await seal("another-secret-that-is-at-least-32-characters", "acme-app", acme.id, { token: remote.token }, { url: "https://app.example.com/scim/v2" }), enabled: true, createdAt: new Date(), updatedAt: new Date() },
     });
     const ada = await h.user("Ada Lovelace");
     await join(ada.id, acme.id);
@@ -243,11 +251,34 @@ describe("publicUrl", () => {
     expect(publicUrl("https://scim.internal:8443/v2", ["scim.internal"])).toBeNull();
   });
 
-  it("a name that resolves to a private address is refused when the request is made", async () => {
+  it("a name that resolves to a private address, or doesn't resolve, is refused when the request is made", async () => {
+    const answers: Record<string, string[]> = { "inside.example.com": ["93.184.216.34", "10.0.0.7"], "public.example.com": ["93.184.216.34"] };
+    const real = process.getBuiltinModule;
+    const lookup = vi.fn(async (host: string) => {
+      const a = answers[host];
+      if (!a) throw Object.assign(new Error("not found"), { code: "ENOTFOUND" });
+      return a.map((address) => ({ address }));
+    });
+    const spy = vi.spyOn(process, "getBuiltinModule").mockImplementation(((id: string) => (id === "node:dns" ? { promises: { lookup } } : real(id))) as typeof real);
+    try {
+      const inner = vi.fn(async () => new Response(null));
+      await expect(guardedFetch([], inner)("https://inside.example.com/scim/v2/Users")).rejects.toThrow(/resolves to a private address/);
+      await expect(guardedFetch([], inner)("https://nowhere.example.com/scim/v2/Users")).rejects.toThrow(/could not be resolved \(ENOTFOUND\)/);
+      expect(inner).not.toHaveBeenCalled();
+      await guardedFetch([], inner)("https://public.example.com/scim/v2/Users");
+      await guardedFetch(["inside.example.com"], inner)("https://inside.example.com/scim/v2/Users");
+      expect(inner).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("the URL rules are applied again when the request is made: a row allowed once, or written outside the API, reaches nothing inside", async () => {
     const inner = vi.fn(async () => new Response(null));
-    await expect(guardedFetch([], inner)("https://localhost/scim/v2/Users")).rejects.toThrow(/resolves to a private address/);
+    for (const url of ["https://10.0.0.5/scim/v2/Users", "https://169.254.169.254/latest", "https://[fd00::1]/scim", "https://127.0.0.1:8443/scim", "http://app.example.com/scim", "https://localhost/scim"])
+      await expect(guardedFetch([], inner)(url)).rejects.toThrow(/refused to send/);
     expect(inner).not.toHaveBeenCalled();
-    await guardedFetch(["localhost"], inner)("https://localhost/scim/v2/Users");
+    await guardedFetch(["10.0.0.5"], inner)("https://10.0.0.5/scim/v2/Users");
     expect(inner).toHaveBeenCalledOnce();
   });
 });
