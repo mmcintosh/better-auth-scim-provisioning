@@ -5,7 +5,7 @@
 // each with an email address derived from its externalId (so a rename never changes it), marked
 // ours in its description, with members added and removed one at a time.
 import { credentials } from "./credentials";
-import { fetchFailure, retryAfterMs, ScimError, type ScimGroup, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
+import { fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimGroup, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
 import type { Target } from "./types";
 
 export const GOOGLE_DIRECTORY_URL = "https://admin.googleapis.com/admin/directory/v1";
@@ -17,11 +17,18 @@ const MANAGED = "Managed by Better Auth (better-auth-scim-provisioning). externa
 /** The `externalIds` entry that marks a Workspace user as ours. */
 const OURS = { type: "custom", customType: "better-auth" } as const;
 
+/** One of a Google user's organizations; `primary` is the one the Enterprise User attributes go in. */
+type GoogleOrganization = { primary?: boolean; name?: string; department?: string; costCenter?: string; description?: string } & Record<string, unknown>;
+
 interface GoogleUser {
   suspended?: boolean;
+  /** Why it's suspended: "ADMIN" (an admin, or us through the API), or Google's own holds ("WEB_LOGIN_REQUIRED", "ABUSE"…). */
+  suspensionReason?: string;
   id?: string;
   primaryEmail?: string;
   externalIds?: { value?: string; type?: string; customType?: string }[];
+  organizations?: GoogleOrganization[];
+  relations?: { value?: string; type?: string; customType?: string }[];
   /** Groups. */
   email?: string;
   name?: string | { givenName?: string; familyName?: string };
@@ -70,12 +77,15 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     // Not Google's own "not found" (a wrong URL answers 404 for everything): the host's to fix.
     const misplaced = res.status === 404 && !google404;
     const auth = res.status === 401 || res.status === 403;
-    // 412 "User creation is not complete": Google is still making a user created seconds ago.
-    const creating = res.status === 412;
-    const retryable = res.status === 408 || res.status === 412 || res.status === 429 || res.status >= 500 || auth || misplaced;
+    // 412 "User creation is not complete": Google is still making a user created seconds ago. But
+    // a 412 "Cannot restore a user suspended for abuse" is Google's own hold on the account, which
+    // only a person lifts (found live): not retried.
+    const held = res.status === 412 && /suspended for abuse/i.test(String(json.error?.message ?? ""));
+    const creating = res.status === 412 && !held;
+    const retryable = res.status === 408 || creating || res.status === 429 || res.status >= 500 || auth || misplaced;
     const message = typeof json.error?.message === "string" ? ` ${json.error.message.slice(0, 300)}` : "";
     throw new ScimError(
-      `${method} ${path}: ${res.status}${auth ? " (check the service account, its domain-wide delegation and the admin)" : misplaced ? " (check the target's url)" : creating ? " (Google is still creating the user; retrying)" : ""}${message}`,
+      `${method} ${path}: ${res.status}${auth ? " (check the service account, its domain-wide delegation and the admin)" : misplaced ? " (check the target's url)" : creating ? " (Google is still creating the user; retrying)" : held ? " (Google suspended the account itself; the user signing in, or an admin in the Admin console, lifts it)" : ""}${message}`,
       res.status,
       retryable,
       retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
@@ -112,10 +122,34 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     }
   }
 
-  /** Our entry in externalIds, keeping any others (an admin's employee id, say). */
-  async function externalIds(id: string, userName: string, externalId: string | undefined) {
-    const others = ((await current(id, userName))?.externalIds ?? []).filter((x) => !(x.type === OURS.type && x.customType === OURS.customType));
-    return externalId ? [...others, { ...OURS, value: externalId }] : others;
+  /**
+   * The Enterprise User attributes, where Google keeps them, merged into what the user has now
+   * (nothing, for a new user), only when the target sends them:
+   * - organization, department, cost center and division (as `description`) in the primary
+   *   organization, keeping its other fields (an admin's job title, say);
+   * - the employee number as the `organization` external id;
+   * - the manager as the `manager` relation, by their address; other relations are kept.
+   * An attribute without a value is removed.
+   */
+  function enterprise(user: ScimUser, now: GoogleUser | null): Partial<Pick<GoogleUser, "organizations" | "relations">> & { employeeNumber?: string | null } {
+    const e = user[SCIM_ENTERPRISE_USER_SCHEMA];
+    if (!e) return {};
+    const orgs = now?.organizations ?? [];
+    const primary: GoogleOrganization = { ...(orgs.find((o) => o.primary) ?? {}) };
+    for (const [ours, theirs] of [["organization", "name"], ["department", "department"], ["costCenter", "costCenter"], ["division", "description"]] as const) {
+      if (e[ours]) primary[theirs] = e[ours];
+      else delete primary[theirs];
+    }
+    const { primary: _, ...rest } = primary;
+    const organizations = [...orgs.filter((o) => !o.primary), ...(Object.keys(rest).length ? [{ ...rest, primary: true }] : [])];
+    const relations = [...(now?.relations ?? []).filter((r) => r.type !== "manager"), ...(e.manager ? [{ type: "manager", value: e.manager.value }] : [])];
+    return { organizations, relations, employeeNumber: e.employeeNumber ?? null };
+  }
+
+  /** Our entry in externalIds, and the employee number if the target sends it, keeping any others (an admin's own ids, say). */
+  function externalIdsOf(now: GoogleUser | null, externalId: string | undefined, employeeNumber?: string | null) {
+    const others = (now?.externalIds ?? []).filter((x) => !(x.type === OURS.type && x.customType === OURS.customType) && (employeeNumber === undefined || x.type !== "organization"));
+    return [...others, ...(employeeNumber ? [{ type: "organization", value: employeeNumber }] : []), ...(externalId ? [{ ...OURS, value: externalId }] : [])];
   }
 
   /**
@@ -138,7 +172,14 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
   }
 
   async function update(id: string, user: ScimUser) {
-    await change(id, { ...toGoogle(user), externalIds: await externalIds(id, user.userName, user.externalId) }, user.userName);
+    const now = await current(id, user.userName);
+    const { employeeNumber, ...extra } = enterprise(user, now);
+    const body: Record<string, unknown> = { ...toGoogle(user), ...extra, externalIds: externalIdsOf(now, user.externalId, employeeNumber) };
+    // Suspended by Google itself (WEB_LOGIN_REQUIRED for new accounts, abuse holds), not by an
+    // admin or us: asking to lift it fails (412), and only the user signing in or an admin can.
+    // So it's left as Google has it, and the rest of the change still goes (found live).
+    if (user.active && now?.suspended && now.suspensionReason && now.suspensionReason !== "ADMIN") delete body.suspended;
+    await change(id, body, user.userName);
   }
 
   // ---- Groups ----
@@ -252,7 +293,9 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
       // orgUnitPath only here: where new users go, never moving a user an admin placed elsewhere.
       let created: GoogleUser | null;
       try {
-        created = await request("POST", "/users", { ...toGoogle(user), password, ...(google?.orgUnitPath ? { orgUnitPath: google.orgUnitPath } : {}), ...(user.externalId ? { externalIds: [{ ...OURS, value: user.externalId }] } : {}) });
+        const { employeeNumber, ...extra } = enterprise(user, null);
+        const ids = externalIdsOf(null, user.externalId, employeeNumber);
+        created = await request("POST", "/users", { ...toGoogle(user), ...extra, password, ...(google?.orgUnitPath ? { orgUnitPath: google.orgUnitPath } : {}), ...(ids.length ? { externalIds: ids } : {}) });
       } catch (e) {
         // Taken as another account's alias: that account is someone else's, and no retry changes it.
         // Not reported as a 409, which would send the outbox looking for an account to adopt.

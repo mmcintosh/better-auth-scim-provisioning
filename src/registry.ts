@@ -5,6 +5,7 @@
 import { parseEnvelope, symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
 import * as z from "zod";
 import { type Adapter, IN_BATCH, markPaused, type TargetSource } from "./outbox";
+import { enterpriseOption } from "./mapping";
 import { profiles } from "./profiles";
 import type { ScimTarget, Target, TargetRegistryOptions } from "./types";
 
@@ -58,6 +59,7 @@ export const storedSettingsSchema = z.strictObject({
   adopt: z.boolean().optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
   requireVerifiedEmail: z.boolean().optional(),
+  enterprise: enterpriseOption.optional(),
   // At most 30 s: the deliveries share the scheduled run with every other organization's.
   timeoutMs: z.number().int().min(100).max(30_000).optional(),
   google: z.strictObject({ clientEmail: z.string().min(1), adminEmail: z.string().min(1), orgUnitPath: z.string().startsWith("/").optional(), groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/).optional() }).optional(),

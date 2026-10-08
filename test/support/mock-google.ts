@@ -27,7 +27,7 @@ export interface GoogleStoredUser {
   password?: string;
 }
 
-export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: number | undefined; renameLag?: number | undefined; groupScope?: boolean | undefined; groupLag?: number | undefined; groupReadLag?: number | undefined; membersPageSize?: number | undefined } = {}) {
+export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: number | undefined; renameLag?: number | undefined; groupScope?: boolean | undefined; groupLag?: number | undefined; groupReadLag?: number | undefined; membersPageSize?: number | undefined; holdNew?: string | undefined } = {}) {
   const domains = o.domains ?? ["example.com"];
   const admin = o.admin ?? "admin@example.com";
   const keys = (await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
@@ -168,9 +168,11 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
       if (!email || !name.givenName || !name.familyName || !body?.password) return gerror(400, "Invalid Input: missing required field");
       if (!domains.includes(email.split("@")[1] ?? "")) return gerror(400, "Domain not found.");
       if (taken(email) || findGroup(email)) return gerror(409, "Entity already exists.");
-      const stored: GoogleStoredUser = { id: `g${next++}`, primaryEmail: email, name, suspended: body.suspended === true, password: String(body.password), ...(body.externalIds ? { externalIds: body.externalIds as GoogleStoredUser["externalIds"] } : {}), ...(body.orgUnitPath ? { orgUnitPath: String(body.orgUnitPath) } : {}) };
+      const stored: GoogleStoredUser = { id: `g${next++}`, primaryEmail: email, name, suspended: body.suspended === true, password: String(body.password), ...(body.externalIds ? { externalIds: body.externalIds as GoogleStoredUser["externalIds"] } : {}), ...(body.orgUnitPath ? { orgUnitPath: String(body.orgUnitPath) } : {}), ...(body.organizations ? { organizations: body.organizations } : {}), ...(body.relations ? { relations: body.relations } : {}) };
       users.set(stored.id, stored);
       if (o.lag) settling.set(stored.id, o.lag);
+      // Google's own hold on new accounts (WEB_LOGIN_REQUIRED, found live).
+      if (o.holdNew) Object.assign(stored, { suspended: true, suspensionReason: o.holdNew });
       const { password: _, ...view } = stored;
       return json(200, view);
     }
@@ -198,7 +200,10 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
       }
       if (body?.name) existing.name = { ...existing.name, ...(body.name as object) };
       if (o.renameLag && typeof body?.primaryEmail === "string" && body.primaryEmail.toLowerCase() !== existing.primaryEmail.toLowerCase()) renaming.set(existing.id, o.renameLag);
-      for (const k of ["primaryEmail", "suspended", "externalIds", "orgUnitPath"] as const) if (body && k in body) (existing as unknown as Record<string, unknown>)[k] = body[k];
+      const held = (existing as { suspensionReason?: string }).suspensionReason;
+      if (body?.suspended === false && existing.suspended && held && held !== "ADMIN") return gerror(412, "Cannot restore a user suspended for abuse.");
+      for (const k of ["primaryEmail", "suspended", "externalIds", "orgUnitPath", "organizations", "relations"] as const) if (body && k in body) (existing as unknown as Record<string, unknown>)[k] = body[k];
+      if (body?.suspended === true) (existing as { suspensionReason?: string }).suspensionReason = "ADMIN";
       const { password: _, ...view } = existing;
       return json(200, view);
     }

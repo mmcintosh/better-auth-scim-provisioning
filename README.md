@@ -21,6 +21,7 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 ## ✨ Features
 
 - 🎯 **Three kinds of target**: any **SCIM 2.0** app (Cloudflare Access, AWS IAM Identity Center, Slack, Atlassian, GitHub Enterprise, Zoom…), **Google Workspace** through its Directory API, and **signed webhooks** for your own apps or automation tools (Zapier, Make, n8n).
+- 🪪 **Enterprise User attributes**: employee number, cost center, organization, division, department and manager, from your users' fields, as SCIM's Enterprise User extension (and Google Workspace's own fields), the manager kept in step as people join and leave.
 - 👥 **Groups**: organizations, teams and roles in your app become groups at the app (SCIM groups or Google Groups), with the provisioned members, kept in sync as people join, leave and change roles.
 - 🚪 **Real offboarding**: a ban or a delete deactivates (or deletes) the account at every app at once, not when a session expires; a timed ban is lifted on time by the scheduled run. In the field test, Cloudflare Access revoked a live session within 35 seconds.
 - 📬 **Delivery that holds up**: a database outbox with leases, retries with backoff (honouring `Retry-After`), concurrency, and a scheduled run. Once queued, a change isn't lost to an outage, a timeout or a reply that never arrived, and a 404 counts as "gone" only when the app's list agrees.
@@ -195,6 +196,38 @@ By default the app gets:
 
 Override it per target with `mapUser`, for example to take `userName` from an employee id. `defaultScimUser(user)` is exported to build on.
 
+### Enterprise User attributes
+
+With `enterprise`, a target also gets the SCIM Enterprise User extension ([RFC 7643 §4.3](https://www.rfc-editor.org/rfc/rfc7643#section-4.3)): employee number, cost center, organization, division, department and manager. They're read from fields of your users, so add them as Better Auth `user.additionalFields`:
+
+```ts
+betterAuth({
+  user: {
+    additionalFields: {
+      employeeNumber: { type: "string", required: false },
+      department: { type: "string", required: false },
+      managerId: { type: "string", required: false }, // the manager's user id
+    },
+  },
+  plugins: [
+    scimProvisioning({
+      targets: [
+        { id: "aws", url, token, enterprise: true }, // fields named as the attributes, the manager from managerId
+        { id: "slack", url, token, enterprise: { employeeNumber: "employeeId", department: "dept", manager: "reportsTo" } }, // your own field names
+      ],
+    }),
+  ],
+});
+```
+
+- **`true`** reads `employeeNumber`, `costCenter`, `organization`, `division` and `department`, and the manager's user id from `managerId`. **A map** names your fields, and only those attributes are sent. A number is written out as text.
+- **An empty field clears the attribute at the app**: a PUT leaves it out, and a PATCH (`update: "patch"`) removes it by path.
+- **The manager** is sent as their id at that app (SCIM's `manager.value`), and only once they're provisioned and active there. When a manager's account at the app appears or goes, the users reporting to them are queued again, so their manager follows. A user named as their own manager has none.
+- **Google Workspace** keeps these differently: the organization, department, cost center and division (as `description`) go in the user's primary organization, keeping its other fields such as an admin's job title. The employee number becomes the `organization` external id, and the manager the `manager` relation, by their address; other relations are kept.
+- **Webhooks** get the same object as SCIM, with the manager's id at the receiver (their `externalId`).
+- A `mapUser` that sets the extension itself is sent as it is.
+- **Verified live at AWS IAM Identity Center** (every attribute, the manager as AWS's id for them, and clearing), and tested against Better Auth's own `@better-auth/scim` with PUT and PATCH. Slack documents the extension too. Send it only to apps that accept it.
+
 ## Groups
 
 With `groups: true`, each organization (Better Auth's organization plugin) is a group at the app, or only `organizationId`'s when that's set. With a function, only the organizations it returns true for: `groups: (org) => org.slug.startsWith("team-")`.
@@ -345,6 +378,8 @@ Google takes a while to settle, and the plugin waits it out rather than failing:
 - reads of a new user can trail its changes by a minute or more, so the Admin console may briefly show older details;
 - a group made seconds ago can answer 404 to its first members, and say "already exists" while a read of it still finds nothing.
 
+Google sometimes suspends new accounts itself (`suspensionReason` `WEB_LOGIN_REQUIRED`, for example after many accounts are created in a short time), until the user signs in once or an admin lifts it in the Admin console. The API can't lift that, so the plugin leaves it as Google has it and still applies every other change; only a suspension by an admin, or by the plugin, is lifted when a user is unbanned.
+
 ### Webhooks
 
 For anything that doesn't speak SCIM (your own apps, or automation platforms such as Zapier, Make and n8n), a webhook target POSTs every change as a JSON event, signed with HMAC-SHA256:
@@ -465,7 +500,7 @@ POST /scim-provisioning/targets/delete  { id }
 
 On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget`, `…TargetStatus` and `…DeleteTarget`, with the user's headers.
 
-- **Settings** are the target options that are data: `type`, `url`, `profile` (by name: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`), `update`, `compat`, `groups`, `teamGroups`, `roleGroups`, `adopt`, `deprovision`, `requireVerifiedEmail`, `timeoutMs` (at most 30 s), and for Google Workspace `google: { clientEmail, adminEmail, orgUnitPath?, groupDomain? }`; plus a `name` for people. Functions (`mapUser`, `include`, the group name functions) and `organizationId` can't be stored: the organization is always the owner.
+- **Settings** are the target options that are data: `type`, `url`, `profile` (by name: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`), `update`, `compat`, `groups`, `teamGroups`, `roleGroups`, `adopt`, `deprovision`, `requireVerifiedEmail`, `enterprise`, `timeoutMs` (at most 30 s), and for Google Workspace `google: { clientEmail, adminEmail, orgUnitPath?, groupDomain? }`; plus a `name` for people. Functions (`mapUser`, `include`, the group name functions) and `organizationId` can't be stored: the organization is always the owner.
 - **Credentials** are one of `{ token }`, `{ auth: { type: "basic" | "header" | "oauth2", … } }` (as in [Targets](#targets)), `{ secret }` for a webhook and `{ privateKey }` for Google Workspace. They're encrypted with Better Auth's secret, tied to the target, its organization and where it sends, and never shown: a target shows only their `kind`, and a webhook URL only its origin (Slack's and Azure's carry secrets in the path or query). They never go anywhere new either: changing a target's URL (or Google's `clientEmail` or `adminEmail`) needs the credentials given again, and a URL changed in the database rather than through the API doesn't get them (the target pauses). Two changes to one target at once can't mix: the second is refused (409) and is made again on what the first left. When you rotate Better Auth's secret (`secrets`), stored credentials are sealed again with the new one as they're used; keep the old secret until every target has been used once. If the secret changes without rotation, they can't be read: those targets pause (logged), and their deliveries are tried again every 15 minutes, so they go once the right secret is back or new credentials are given.
 - **Who may**: a signed-in user, their session re-read from the database (a stateless deployment's signed cookie is its own record), as the database has them now (not banned, not impersonating): a host administrator (`canManage`) for every organization, or an owner or admin (`organizationRoles`) of the target's organization. Creating, changing and deleting also need a fresh session (signed in within Better Auth's `session.freshAge`, a day by default), as a password change does. Someone else's target is a 404. Changes are logged at `warn`, Better Auth's default level, with the acting user.
 - **URLs** must be `https://` on the standard port and public, as your server calls them: no `localhost`, names without a dot, `.local`, `.internal`, `.lan`, `.home.arpa` and the like, and no private, loopback, link-local, shared, benchmarking, documentation or reserved address (IPv4 written as a number, or inside IPv6, included). Redirects are never followed. Each request is checked again by these rules as it's made (so a row allowed once, by an `allowHosts` entry since removed, say, reaches nothing inside), and the name is looked up (Node.js 22.3 and later, Bun, Deno) and refused if it resolves to a private address or doesn't resolve; on Workers, whose `fetch` can't reach private networks, the URL check is what applies. A name that changes what it resolves to between the check and the request can't be ruled out this way: if your server can reach internal services, route stored targets through an egress proxy with `registry.fetch` (which replaces the lookup). `allowHosts: ["scim.internal.example"]` makes exceptions, ports included. The check endpoint answers in broad terms ("the credentials were refused", "not found: check the URL"), never with the app's own words.

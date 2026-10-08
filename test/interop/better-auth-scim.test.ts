@@ -51,9 +51,9 @@ async function receiver() {
 }
 
 /** Our side: an IdP with scimProvisioning whose one target is the receiver's SCIM endpoint. */
-async function idp(app: Awaited<ReturnType<typeof receiver>>, o: Partial<ScimProvisioningOptions> & { target?: Partial<ScimTarget> } = {}) {
+async function idp(app: Awaited<ReturnType<typeof receiver>>, o: Partial<ScimProvisioningOptions> & { target?: Partial<ScimTarget>; userFields?: string[] } = {}) {
   const pending = new Set<Promise<unknown>>();
-  const { target: extra, ...options } = o;
+  const { target: extra, userFields, ...options } = o;
   const target: ScimTarget = { id: "receiver", type: "scim", url: `${RECEIVER}/api/auth/scim/v2`, token: TOKEN, fetch: (input, init) => app.auth.handler(new Request(input, init)), ...extra };
   const auth = betterAuth({
     baseURL: "https://idp.example",
@@ -61,6 +61,7 @@ async function idp(app: Awaited<ReturnType<typeof receiver>>, o: Partial<ScimPro
     telemetry: { enabled: false },
     database: new DatabaseSync(":memory:"),
     emailAndPassword: { enabled: true },
+    ...(userFields ? { user: { additionalFields: Object.fromEntries(userFields.map((f) => [f, { type: "string" as const, required: false }])) } } : {}),
     advanced: {
       backgroundTasks: {
         handler: (p: Promise<unknown>) => {
@@ -172,5 +173,34 @@ describe("@better-auth/scim as the receiver", () => {
     await us.delivered();
     expect(await app.linkFor("emp-fay@example.com")).not.toBeNull();
     expect(await app.linkFor(fay.id)).toBeNull();
+  });
+
+  it.each([["put"], ["patch"]] as const)("the Enterprise User extension arrives (%s), the manager as the receiver's SCIM id for them", async (update) => {
+    const app = await receiver();
+    const us = await idp(app, { target: { enterprise: true, update }, userFields: ["employeeNumber", "department", "costCenter", "organization", "division", "managerId"] });
+    const boss = await us.newUser("gus@example.com", "Gus Boss");
+    const hal = await us.newUser("hal@example.com", "Hal Report");
+    await us.ctx.internalAdapter.updateUser(hal.id, { employeeNumber: "E-42", department: "Ops", costCenter: "CC1", organization: "Acme", division: "North", managerId: boss.id });
+    await us.delivered();
+    const scimIdOf = async (externalId: string) => ((await app.scimUsers()).find((u) => u.externalId === externalId) as { id: string }).id;
+    const res = await app.auth.handler(new Request(`${RECEIVER}/api/auth/scim/v2/Users/${await scimIdOf(hal.id)}`, { headers: { authorization: `Bearer ${TOKEN}` } }));
+    const user = (await res.json()) as Record<string, any>;
+    expect(user.schemas).toContain("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User");
+    expect(user["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]).toMatchObject({
+      employeeNumber: "E-42",
+      department: "Ops",
+      costCenter: "CC1",
+      organization: "Acme",
+      division: "North",
+      manager: { value: await scimIdOf(boss.id) },
+    });
+    // Cleared here: cleared there (PUT leaves it out, PATCH removes it; never-set ones are removed too, and accepted).
+    await us.ctx.internalAdapter.updateUser(hal.id, { department: null, managerId: null });
+    await us.delivered();
+    const after = (await (await app.auth.handler(new Request(`${RECEIVER}/api/auth/scim/v2/Users/${await scimIdOf(hal.id)}`, { headers: { authorization: `Bearer ${TOKEN}` } }))).json()) as Record<string, any>;
+    const ext = after["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"] ?? {};
+    expect(ext.department).toBeUndefined();
+    expect(ext.manager).toBeUndefined();
+    expect(ext.employeeNumber).toBe("E-42");
   });
 });

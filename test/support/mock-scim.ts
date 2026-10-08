@@ -2,6 +2,8 @@
 // bearer token checked, userName unique case-insensitively (409 uniqueness), given and family
 // names required (as AWS IAM Identity Center requires), PUT/PATCH/DELETE, and injectable faults.
 
+const ENTERPRISE = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
+
 export interface StoredUser {
   id: string;
   userName: string;
@@ -144,6 +146,12 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     }
     if (method === "PATCH") {
       for (const op of (body?.Operations as { op: string; path?: string; value?: unknown }[]) ?? []) {
+        // A remove of an Enterprise User attribute ("<urn>:department"), as RFC 7644 §3.5.2.2.
+        if (op.op.toLowerCase() === "remove" && o.patch && op.path?.startsWith(`${ENTERPRISE}:`)) {
+          const ext = (existing as unknown as Record<string, Record<string, unknown> | undefined>)[ENTERPRISE];
+          if (ext) delete ext[op.path.slice(ENTERPRISE.length + 1)];
+          continue;
+        }
         if (op.op.toLowerCase() !== "replace") continue;
         const value = op.value as Record<string, unknown> | undefined;
         if (!o.patch) {
@@ -155,6 +163,9 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
         delete changes.schemas;
         if (o.keepsExternalId === false) delete changes.externalId;
         if (typeof changes.userName === "string" && taken(changes.userName, existing.id)) return error(409, "userName already exists", "uniqueness");
+        // A complex attribute's sub-attributes are merged, the others kept (RFC 7644 §3.5.2.3).
+        const ext = changes[ENTERPRISE] as Record<string, unknown> | undefined;
+        if (ext) changes[ENTERPRISE] = { ...((existing as unknown as Record<string, object | undefined>)[ENTERPRISE] ?? {}), ...ext };
         Object.assign(existing, changes);
       }
       return reply(200, view(existing));

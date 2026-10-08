@@ -30,11 +30,11 @@ export function schemaOptions(database?: unknown) {
   };
 }
 
-export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; onFailure?: ScimProvisioningOptions["onFailure"]; registry?: TargetRegistryOptions; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number } = {}) {
+export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; onFailure?: ScimProvisioningOptions["onFailure"]; registry?: TargetRegistryOptions; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number; googleHoldNew?: string; userFields?: Record<string, { type: "string" | "number"; required?: boolean }> } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
   const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}), ...(s.membersOnRequest ? { membersOnRequest: true } : {}), ...(s.indexPaged ? { indexPaged: true } : {}) })]));
   // A Google Workspace target gets a mock Directory API instead (one per host).
-  const google = specs.some((s) => s.type === "google-workspace") ? await mockGoogle({ lag: o.googleLag, renameLag: o.googleRenameLag, groupLag: o.googleGroupLag, groupReadLag: o.googleGroupReadLag, groupScope: o.googleGroupScope, membersPageSize: o.googleMembersPageSize }) : undefined;
+  const google = specs.some((s) => s.type === "google-workspace") ? await mockGoogle({ lag: o.googleLag, renameLag: o.googleRenameLag, groupLag: o.googleGroupLag, groupReadLag: o.googleGroupReadLag, groupScope: o.googleGroupScope, membersPageSize: o.googleMembersPageSize, holdNew: o.googleHoldNew }) : undefined;
   const webhook = specs.some((s) => s.type === "webhook") ? mockWebhook() : undefined;
   const pending = new Set<Promise<unknown>>();
   const db = new DatabaseSync(":memory:");
@@ -45,6 +45,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
     telemetry: { enabled: false },
     database: database.database as never,
     emailAndPassword: { enabled: true },
+    ...(o.userFields ? { user: { additionalFields: Object.fromEntries(Object.entries(o.userFields).map(([k, v]) => [k, { required: false, ...v }])) } } : {}),
     advanced: {
       backgroundTasks: {
         handler: (p: Promise<unknown>) => {
