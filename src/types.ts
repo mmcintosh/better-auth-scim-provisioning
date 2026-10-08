@@ -12,6 +12,16 @@ export interface ProvisionedUser {
   [field: string]: unknown;
 }
 
+/** Which user field holds each Enterprise User attribute; `manager` holds the manager's Better Auth user id. */
+export interface EnterpriseFields {
+  employeeNumber?: string | undefined;
+  costCenter?: string | undefined;
+  organization?: string | undefined;
+  division?: string | undefined;
+  department?: string | undefined;
+  manager?: string | undefined;
+}
+
 /** What every target has, whatever kind of app it is. */
 export interface TargetOptions {
   /** Stable id: jobs, links and logs use it. Letters, digits, - and _. */
@@ -41,6 +51,18 @@ export interface TargetOptions {
   organizationId?: string | undefined;
   /** The SCIM user sent; default: userName = email, names split from `name`, one primary email. */
   mapUser?: ((user: ProvisionedUser) => ScimUser) | undefined;
+  /**
+   * The Enterprise User extension (RFC 7643 §4.3): employee number, cost center, organization,
+   * division, department and manager, read from fields of the user (Better Auth's
+   * `user.additionalFields`). `true` reads fields of the same names, and the manager's user id
+   * from `managerId`; or name the fields (`{ employeeNumber: "employeeId", manager: "reportsTo" }`),
+   * listing only those to send. An empty field clears that attribute at the app. The manager is
+   * sent as their id at the app, once they're provisioned there; their reports are updated when
+   * that changes. At Google Workspace: the organization, cost center and department (one primary
+   * organization), the employee number as an `organization` external id, and the manager relation.
+   * A `mapUser` that sets the extension itself takes precedence.
+   */
+  enterprise?: boolean | EnterpriseFields | undefined;
   /**
    * Organizations (Better Auth's organization plugin) as groups at the app, their provisioned
    * members as the group's members. Every organization (or only `organizationId`'s), or those a

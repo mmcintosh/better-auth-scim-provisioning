@@ -6,18 +6,19 @@ import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
 import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
+import { enterpriseOption } from "./mapping";
 import { registrySource, secretText, TARGET_MODEL } from "./registry";
 import { registryEndpoints } from "./registry-endpoints";
 import type { ScimProvisioningOptions, Target } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
 export { atlassian, awsIamIdentityCenter, cloudflareAccess, githubEnterprise, profiles, slack, slackUserName } from "./profiles";
-export { SCIM_GROUP_SCHEMA, SCIM_USER_SCHEMA, ScimError, type ScimGroup, type ScimUser } from "./scim-client";
+export { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, SCIM_USER_SCHEMA, ScimError, type ScimEnterpriseUser, type ScimGroup, type ScimUser } from "./scim-client";
 export type { ScimAuth } from "./credentials";
 export { type CheckId, type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SCHEMA_VERSION, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, WebhookSignatureError, webhookSignature } from "./webhook";
 export type { StoredTargetView } from "./registry-endpoints";
-export type { DeliveryFailure, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
+export type { DeliveryFailure, EnterpriseFields, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
 
 
 const targetSchema = z.strictObject({
@@ -58,6 +59,7 @@ const targetSchema = z.strictObject({
   adopt: z.boolean().optional(),
   organizationId: z.string().min(1).optional(),
   mapUser: z.function().optional(),
+  enterprise: enterpriseOption.optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
   update: z.enum(["put", "patch"]).optional(),
   compat: z

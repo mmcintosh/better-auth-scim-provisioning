@@ -8,10 +8,10 @@
 //
 // A link is written before an account is created at the app (remoteId empty: "pending"), so an
 // account whose create reply was lost can still be found, and undone, later.
-import { defaultScimUser, isBanned } from "./mapping";
+import { defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, enterpriseValues, isBanned } from "./mapping";
 import { googleWorkspaceClient } from "./google";
 import { webhookClient } from "./webhook";
-import { SCIM_GROUP_SCHEMA, ScimError, scimClient } from "./scim-client";
+import { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, type ScimEnterpriseUser, ScimError, type ScimUser, scimClient } from "./scim-client";
 import type { DeliveryFailure, ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
 
 export const JOB_MODEL = "scimProvisioningJob";
@@ -276,18 +276,66 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * Make the app match the user: create, update, adopt, reactivate or deprovision. Returns when to
    * look again without a change, if ever: the end of a timed ban.
    */
+  /**
+   * The Enterprise User extension added to a user about to be sent (unless `mapUser` set it), and
+   * the attributes it no longer has, which a PATCH removes. The manager is their id at this app,
+   * or their address at Google Workspace, and only once they're provisioned and active there.
+   */
+  async function withEnterprise(target: Target, user: ProvisionedUser, scim: ScimUser): Promise<{ scim: ScimUser; clears: string[] }> {
+    const fields = enterpriseFields(target.enterprise);
+    if (!fields || scim[SCIM_ENTERPRISE_USER_SCHEMA] !== undefined) return { scim, clears: [] };
+    const { values, managerId } = enterpriseValues(user, fields);
+    const extension: ScimEnterpriseUser = { ...values };
+    if (managerId) {
+      const link = await findLink(keyOf(target.id, managerId));
+      if (link?.remoteId && link.active) extension.manager = { value: target.type === "google-workspace" ? link.userName : link.remoteId };
+    }
+    const named = [...ENTERPRISE_VALUES.filter((a) => fields[a]), ...(fields.manager ? (["manager"] as const) : [])];
+    return {
+      scim: { ...scim, schemas: [...new Set([...scim.schemas, SCIM_ENTERPRISE_USER_SCHEMA])], [SCIM_ENTERPRISE_USER_SCHEMA]: extension },
+      clears: named.filter((a) => extension[a] === undefined).map((a) => `${SCIM_ENTERPRISE_USER_SCHEMA}:${a}`),
+    };
+  }
+
+  /**
+   * A user's delivery. With the Enterprise User manager, the users who report to them are queued
+   * again when their account at the app appears or goes, so the reports' manager follows.
+   */
   async function deliver(target: Target, userId: string, change?: string): Promise<Date | null> {
+    const managerField = enterpriseFields(target.enterprise)?.manager;
+    if (!managerField) return deliverUser(target, userId, change);
+    const linked = (l: Link | null) => !!(l?.remoteId && l.active);
+    const before = linked(await findLink(keyOf(target.id, userId)));
+    const result = await deliverUser(target, userId, change);
+    if (linked(await findLink(keyOf(target.id, userId))) !== before) await queueReports(target, managerField, userId);
+    return result;
+  }
+
+  /** Queue the users whose manager field names this user (at most a page; a reconcile covers more). Never fails the manager's job. */
+  async function queueReports(target: Target, field: string, managerId: string): Promise<void> {
+    try {
+      const reports = (await adapter.findMany({ model: "user", where: [{ field, value: managerId }], limit: PAGE })) as ProvisionedUser[];
+      for (const r of reports) if (r[field] === managerId && r.id !== managerId) await enqueue(target.id, r.id);
+      if (reports.length >= PAGE) log.warn(`[scim] ${target.id}: user ${managerId} has more than ${PAGE} reports; run a reconcile to update the rest`);
+    } catch (e) {
+      log.error(`[scim] ${target.id}: could not queue the users reporting to ${managerId} (is enterprise.manager a user field?): ${(e as Error).message}`);
+    }
+  }
+
+  async function deliverUser(target: Target, userId: string, change?: string): Promise<Date | null> {
     const client = clientFor(target, change);
     const user = (await adapter.findOne({ model: "user", where: [{ field: "id", value: userId }] })) as ProvisionedUser | null;
     const key = keyOf(target.id, userId);
     let link = await findLink(key);
 
     if (await wanted(target, user)) {
-      const scim = (target.mapUser ?? defaultScimUser)(user as ProvisionedUser);
+      const { scim, clears } = await withEnterprise(target, user as ProvisionedUser, (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
       const externalId = scim.externalId ?? null;
+      /** Update the account: PUT, or PATCH (with the enterprise attributes cleared since). */
+      const update = (id: string) => (target.update === "patch" ? (client as ReturnType<typeof scimClient>).patch(id, scim, clears) : client.replace(id, scim));
       if (link?.remoteId) {
         try {
-          await (target.update === "patch" ? client.patch : client.replace)(link.remoteId, scim);
+          await update(link.remoteId);
           await saveLink(target, userId, { remoteId: link.remoteId, userName: scim.userName, externalId, active: true });
           return null;
         } catch (e) {
@@ -296,7 +344,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // app's list can tell, and asking it also catches a wrong URL, which 404s for everything.
           const other = await stillThere(target, client, userId, link.userName, link.externalId ?? null, link.remoteId);
           if (other) {
-            await (target.update === "patch" ? client.patch : client.replace)(other, scim);
+            await update(other);
             await saveLink(target, userId, { remoteId: other, userName: scim.userName, externalId, active: true });
             return null;
           }
@@ -307,7 +355,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       if (link && !link.remoteId && link.userName !== scim.userName) {
         const settled = await settlePending(target, client, link);
         if (settled) {
-          await (target.update === "patch" ? client.patch : client.replace)(settled.remoteId, scim);
+          await update(settled.remoteId);
           await saveLink(target, userId, { remoteId: settled.remoteId, userName: scim.userName, externalId, active: true });
           return null;
         }
@@ -372,7 +420,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           if (scim.userName.toLowerCase() !== (user as ProvisionedUser).email.toLowerCase())
             return refuse("an account with this userName exists at the app, and its userName isn't the user's verified email, so it isn't taken over");
         }
-        await (target.update === "patch" ? client.patch : client.replace)(found.id, scim);
+        await update(found.id);
         remoteId = found.id;
         // Made elsewhere (not ours by externalId): adopted, so never deleted by us, only deactivated.
         if (!ours) {

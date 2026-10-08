@@ -22,6 +22,8 @@ export function targetUrl(value: string, o: { query?: boolean } = {}): boolean {
 }
 
 export const SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User";
+/** The Enterprise User extension (RFC 7643 §4.3): its schema URN, also the key of its attributes in a user. */
+export const SCIM_ENTERPRISE_USER_SCHEMA = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
 /**
  * What a failed fetch says, safe to log and store: a timeout, or the error's own text, except
  * when building the request failed on a header (a token with a line break, say), whose text
@@ -45,6 +47,18 @@ export interface ScimUser {
   displayName?: string | undefined;
   emails?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
   active: boolean;
+  /** The Enterprise User extension's attributes (with its URN in `schemas`). */
+  "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"?: ScimEnterpriseUser | undefined;
+}
+
+/** The Enterprise User extension's attributes (RFC 7643 §4.3). `manager.value` is the manager's id at the app. */
+export interface ScimEnterpriseUser {
+  employeeNumber?: string | undefined;
+  costCenter?: string | undefined;
+  organization?: string | undefined;
+  division?: string | undefined;
+  department?: string | undefined;
+  manager?: { value: string } | undefined;
 }
 
 export interface ScimGroup {
@@ -231,10 +245,13 @@ export function scimClient(endpoint: ScimEndpoint) {
     async replace(id: string, user: ScimUser): Promise<void> {
       await request("PUT", `/Users/${encodeURIComponent(id)}`, { ...user, id });
     },
-    /** Like replace, but only the attributes we send change: anything set at the app is kept. */
-    async patch(id: string, user: ScimUser): Promise<void> {
+    /**
+     * Like replace, but only the attributes we send change: anything set at the app is kept.
+     * `remove` names attributes (paths) of ours that now have no value, so they're cleared too.
+     */
+    async patch(id: string, user: ScimUser, remove: readonly string[] = []): Promise<void> {
       const { schemas: _, ...value } = user;
-      await request("PATCH", `/Users/${encodeURIComponent(id)}`, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "replace", value }] });
+      await request("PATCH", `/Users/${encodeURIComponent(id)}`, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "replace", value }, ...remove.map((path) => ({ op: "remove", path }))] });
     },
     async setActive(id: string, active: boolean): Promise<void> {
       await request("PATCH", `/Users/${encodeURIComponent(id)}`, {

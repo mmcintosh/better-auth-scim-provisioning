@@ -4,6 +4,14 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+
+- **Enterprise User attributes (`enterprise`)**: employee number, cost center, organization, division, department and manager, read from user fields (`true` for fields of the same names and `managerId`, or a map of your own field names), sent as SCIM's Enterprise User extension (RFC 7643 §4.3). An empty field clears the attribute at the app (PATCH removes it by path). The manager is their id at that app once they're provisioned there, and the reports are updated when that changes. Google Workspace gets the primary organization, the `organization` external id and the `manager` relation, keeping an admin's other values; webhooks get the same object as SCIM. Organizations' stored targets can set it too. Exports `SCIM_ENTERPRISE_USER_SCHEMA` and the `ScimEnterpriseUser` and `EnterpriseFields` types.
+
+### Fixed
+
+- **Google Workspace: an account Google suspended itself** (`suspensionReason` such as `WEB_LOGIN_REQUIRED`, which Google applies to some new accounts until the user signs in) made every later change fail: each one asked to unsuspend it, Google refused with 412, and the plugin retried that for hours as "Google is still creating the user". Now that suspension is left as Google has it and the rest of the change goes, and a 412 "suspended for abuse" fails at once with a message saying who can lift it. Found live.
+
 ## [1.1.0] - 2026-10-08
 
 Organizations connect their own apps at runtime (the target registry), and Better Auth apps using @better-auth/scim are tested as receivers, ID-JAG's SCIM link included.
