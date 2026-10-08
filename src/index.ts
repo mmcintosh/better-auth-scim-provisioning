@@ -318,35 +318,29 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     return issues;
   }
 
+  /** The first stored target after a removed one's id (stored targets come in id order, after the code ones), that `keep` accepts. */
+  const storedAfter = (list: Target[], id: string, keep: (t: Target) => boolean) => list.find((t) => !options.targets.some((c) => c.id === t.id) && t.id > id && keep(t));
+
   /**
    * Queue everything a target of an organization should have: its members, the users with an
    * account there (to deactivate those who left), and its groups; and make the target's waiting
-   * and failed jobs due. Queued before the response (deliveries run in the background, the rest
-   * by the scheduled run), so nothing is lost if the background work is cut short.
+   * and failed jobs due (`resume`). Queued as one "resync" job, which the deliveries expand a page
+   * at a time (the first pages now, in the background; the rest by the scheduled run): an
+   * organization of thousands queued in the request would run past a Workers invocation's limits.
    */
-  async function resync(s: State, organizationId: string, targetId: string) {
+  async function resync(s: State, targetId: string, o: { resume: boolean }) {
     const target = await s.source.get(targetId);
     if (!target) return;
-    await s.box.resume(targetId);
-    const userIds = new Set<string>();
-    for (const m of await findAll<{ userId: string; organizationId: string }>(s.adapter, "member", [{ field: "organizationId", value: organizationId }], (r) => r.organizationId === organizationId)) userIds.add(m.userId);
-    for await (const userId of s.box.allLinkedUsers(targetId)) userIds.add(userId);
-    for (const userId of userIds) await s.box.enqueue(targetId, userId, { now: true });
-    const refs = [...(await s.box.groupsForOrganization(target, organizationId))];
-    for (let after: string | null = null; ; ) {
-      const page = await s.box.linkedGroups(targetId, after, 500);
-      for (const l of page) {
-        if (!refs.some((r) => r.id === l.ref.id && r.kind === l.ref.kind)) refs.push(l.ref);
-        after = l.key;
-      }
-      if (page.length < 500) break;
-    }
-    for (const ref of refs) await s.box.enqueue(targetId, ref.id, { kind: ref.kind, now: true });
+    if (o.resume) await s.box.resume(targetId);
+    await s.box.enqueue(targetId, "m:", { kind: "resync", now: true });
     if (isPaused(target)) return;
     s.background(
       (async () => {
-        for (const userId of userIds) await s.box.runFor(targetId, userId);
-        for (const ref of refs) await s.box.runFor(targetId, ref.id, ref.kind);
+        // A few batches now; what's left is the scheduled run's.
+        for (let i = 0; i < 5; i++) {
+          const t = await s.box.runDue(50, targetId);
+          if (t.done + t.retry + t.failed === 0) break;
+        }
       })(),
     );
   }
@@ -556,7 +550,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       ],
     },
     endpoints: {
-      // Always there, so they're typed for every app; without `registry` they answer 404.
+      // Always there, so they're typed for every app; without `registry` they answer 404 (401 signed out).
       ...registryEndpoints(
         {
           options: options.registry,
@@ -566,7 +560,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             const s = stateOf(ctx.context);
             if (!s) return undefined;
             return {
-              resync: (organizationId, targetId) => resync(s, organizationId, targetId),
+              resync: (targetId, o) => resync(s, targetId, o),
               status: async (targetId) => {
                 const [counts] = await s.box.status([targetId]);
                 const { id: _, ...rest } = counts as NonNullable<typeof counts>;
@@ -585,13 +579,35 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
        * and the accounts and groups at the app. With `userId`, that user's account and pending
        * job at each target.
        */
-      scimProvisioningStatus: createAuthEndpoint.serverOnly({ method: "POST", body: z.strictObject({ userId: z.string().min(1).optional() }).optional() }, async (ctx) => {
-        const s = stateOf(ctx.context);
-        if (!s) throw new Error("[scim] not initialised");
-        const ids = (await s.source.every()).map((t) => t.id);
-        const userId = ctx.body?.userId;
-        return ctx.json(userId ? { user: await s.box.userStatus(userId, ids) } : { targets: await s.box.status(ids) });
-      }),
+      scimProvisioningStatus: createAuthEndpoint.serverOnly(
+        { method: "POST", body: z.strictObject({ userId: z.string().min(1).optional(), targetId: z.string().optional(), after: z.string().optional(), limit: z.number().int().min(1).max(100).optional() }).optional() },
+        async (ctx) => {
+          const s = stateOf(ctx.context);
+          if (!s) throw new Error("[scim] not initialised");
+          const targetId = ctx.body?.targetId;
+          let ids: string[];
+          let next: string | null = null;
+          if (targetId !== undefined) {
+            if (!(await s.source.get(targetId))) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+            ids = [targetId];
+          } else {
+            // A page of targets (`limit`; then `after: next`): each costs a few queries, and with a
+            // registry there can be one per organization, so it's 25 by default then.
+            const every = await s.source.every();
+            const all = every.map((t) => t.id);
+            const cursor = ctx.body?.after;
+            // A cursor's target removed since (an organization deleted it): on from the next one.
+            const resumeAt = cursor === undefined ? undefined : all.includes(cursor) ? cursor : storedAfter(every, cursor, () => true)?.id;
+            const from = cursor === undefined ? 0 : resumeAt === undefined ? all.length : all.indexOf(resumeAt) + (resumeAt === cursor ? 1 : 0);
+            // Without a registry, every target unless `limit` asks for pages, as before 1.1.
+            const limit = ctx.body?.limit ?? (options.registry ? 25 : all.length);
+            ids = all.slice(from, from + limit);
+            if (from + limit < all.length) next = ids[ids.length - 1] ?? null;
+          }
+          const userId = ctx.body?.userId;
+          return ctx.json(userId ? { user: await s.box.userStatus(userId, ids), next } : { targets: await s.box.status(ids), next });
+        },
+      ),
       /**
        * Queue at every target, or one, and deliver in the background, for changes Better Auth's
        * endpoints don't show this plugin (memberships written by an SSO sync, inbound SCIM or your
@@ -666,10 +682,18 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           let queued = 0;
           // The cursor: "u:<last user id>" while walking users, then "l:<target>:<last user id>"
           // while walking each target's links, then the groups ("g:…", "G:…", below).
-          const cursor = ctx.body?.after ?? "u:";
-          const handedOut = /^(u:.*|[lgG]:([A-Za-z0-9_-]{1,64}):.*)$/.exec(cursor);
-          if (!handedOut || (handedOut[2] !== undefined && !all.includes(handedOut[2])))
-            throw new APIError("BAD_REQUEST", { message: "[scim] unknown cursor: pass `after` the `next` of a previous reconcile" });
+          let cursor = ctx.body?.after ?? "u:";
+          const handedOut = /^(u:.*|([lgG]):([A-Za-z0-9_-]{1,64}):.*)$/.exec(cursor);
+          if (!handedOut) throw new APIError("BAD_REQUEST", { message: "[scim] unknown cursor: pass `after` the `next` of a previous reconcile" });
+          const gone = handedOut[3];
+          if (gone !== undefined && !all.includes(gone)) {
+            // Its target was removed since (an organization deleted it): go on from the next one.
+            // Stored targets come in id order after the code ones, which can't be removed while running.
+            const after = storedAfter(targetList, gone, handedOut[2] === "l" ? () => true : b.hasGroups);
+            if (handedOut[2] === "l") cursor = after ? `l:${after.id}:` : "g::";
+            else if (after) cursor = `g:${after.id}:`;
+            else return ctx.json({ queued: 0, next: null as string | null });
+          }
           const page = () => Math.min(500, budget);
           // A caller from 0.3 (no limit, no cursor) expected everything in one call: say it isn't.
           const stopped = (next: string) => {
@@ -729,7 +753,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                     last = userId;
                   }
                 }
-                budget -= linked.length;
+                // Each target costs at least one, however few links it has: with a registry there can be
+                // one per organization, and `limit` must bound the call.
+                budget -= Math.max(1, linked.length);
                 if (linked.length < size) break;
                 if (budget <= 0) return stopped(`l:${t}:${last}`);
               }
@@ -748,10 +774,13 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             const resuming = t === fromGroupTarget;
             if ((!resuming || phase === "g") && target.organizationId) {
               // An organization's target: its own organization's groups, not a walk of every organization.
-              for (const ref of await b.groupsForOrganization(target, target.organizationId)) {
+              if (budget <= 0) return stopped(`g:${t}:`);
+              const refs = await b.groupsForOrganization(target, target.organizationId);
+              for (const ref of refs) {
                 await b.enqueue(t, ref.id, { kind: ref.kind, now: true });
                 queued++;
               }
+              budget -= Math.max(1, refs.length);
             } else if (!resuming || phase === "g") {
               let after: string | null = resuming && fromGroup ? fromGroup : null;
               for (;;) {
@@ -779,7 +808,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                 queued++;
                 afterKey = l.key;
               }
-              budget -= linked.length;
+              budget -= Math.max(1, linked.length);
               if (linked.length < size) break;
             }
           }

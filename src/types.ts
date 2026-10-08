@@ -238,8 +238,9 @@ export interface TargetRegistryOptions {
    */
   allowHosts?: string[] | undefined;
   /**
-   * The fetch stored targets use; default the global one. To send them through an egress proxy,
-   * or a fetch that refuses names resolving to private addresses (which the URL check can't see).
+   * The fetch stored targets use, to send them through an egress proxy, say. By default, the
+   * global fetch behind a guard that checks every request's URL as it's made and refuses names
+   * resolving to private addresses: your own fetch replaces that guard, so it must do the same.
    */
   fetch?: typeof fetch | undefined;
 }

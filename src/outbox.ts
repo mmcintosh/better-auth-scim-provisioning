@@ -74,6 +74,12 @@ const RELEASED = new Date("2000-01-01T00:00:00.000Z");
  */
 /** A paused target's jobs wait until then: never due, until resumed. */
 export const PAUSED_UNTIL = new Date("2999-01-01T00:00:00.000Z");
+/** A stored target whose credentials can't be read: its jobs are tried again this often (no attempt counted), so they go once it's fixed. */
+export const UNREADABLE_RETRY_MS = 15 * 60_000;
+/** Jobs one target may take of a scheduled run's batch, while others' are due: so one slow app can't hold up the rest. */
+const PER_TARGET_SHARE = 0.5;
+/** Users (or groups) a resync queues per step. */
+const RESYNC_PAGE = 100;
 
 const leaseFor = (target: Target | undefined, kind?: string | null) =>
   kind && kind !== "user"
@@ -100,6 +106,12 @@ export const groupKeyOf = (targetId: string, organizationId: string) => `${targe
 export type Kind = "user" | "group" | "team" | "role";
 export type GroupRef = { kind: Exclude<Kind, "user">; id: string };
 /**
+ * A job's kind: a delivery, or "resync", a marker that queues an organization's target's members,
+ * accounts and groups a page at a time ("m:<member id>", "l:<user id>", "g:", "G:<group link key>"),
+ * each step queueing the next, so a large organization isn't queued inside one request.
+ */
+type JobKind = Kind | "resync";
+/**
  * A role group's id is "<organization id>:<role>", and roles are named by people: "Admin" and
  * "admin" can both exist. Keys must stay distinct under a case-insensitive collation (MySQL's), so
  * a role with anything beyond [a-z0-9_-] is written as "~" and its UTF-8 in hex. Plain roles keep
@@ -113,7 +125,7 @@ const roleKeyPart = (id: string) => {
   const role = id.slice(at + 1);
   return SAFE_ROLE.test(role) ? id : `${id.slice(0, at)}:~${hexOf(role)}`;
 };
-const keyFor = (kind: Kind, targetId: string, id: string) =>
+const keyFor = (kind: JobKind, targetId: string, id: string) =>
   kind === "user" ? keyOf(targetId, id) : kind === "group" ? groupKeyOf(targetId, id) : `${targetId}:${kind}:${kind === "role" ? roleKeyPart(id) : id}`;
 /** The key 0.3 wrote for a role group, unencoded: found and moved to the new key once. */
 const legacyRoleKey = (targetId: string, id: string) => `${targetId}:role:${id}`;
@@ -144,10 +156,14 @@ export const clientFor = (target: Target, change?: string) =>
       ? webhookClient(target, change)
       : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
 
-/** Targets that exist but aren't delivered to now (disabled, or stored credentials that can't be read): their jobs are queued, and wait. */
-const pausedTargets = new WeakSet<object>();
-export const markPaused = <T extends Target>(t: T): T => {
-  pausedTargets.add(t);
+/**
+ * Targets that exist but aren't delivered to now: their jobs are queued, and wait. A disabled one's
+ * until it's enabled (resume); one whose stored credentials can't be read is looked at again every
+ * few minutes, since nothing tells this server when the right secret is back.
+ */
+const pausedTargets = new WeakMap<object, "disabled" | "unreadable">();
+export const markPaused = <T extends Target>(t: T, why: "disabled" | "unreadable" = "disabled"): T => {
+  pausedTargets.set(t, why);
   return t;
 };
 export const isPaused = (t: Target) => pausedTargets.has(t);
@@ -201,7 +217,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * asked for, unless `now` (reconcile, after fixing a target). A job deleted between the read and the bump (its delivery
    * just finished) is created again, so the change isn't lost.
    */
-  async function enqueue(targetId: string, userId: string, o: { now?: boolean; kind?: Kind } = {}): Promise<void> {
+  async function enqueue(targetId: string, userId: string, o: { now?: boolean; kind?: JobKind } = {}): Promise<void> {
     const kind = o.kind ?? "user";
     const key = keyFor(kind, targetId, userId);
     for (let i = 0; i < 3; i++) {
@@ -469,8 +485,16 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     }
     if (isPaused(target)) {
       // Kept, not attempted, and out of the scheduled run's way until the target is resumed
-      // (resume) or the job is queued again (a change, a reconcile).
-      await adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }], update: { lockedUntil: RELEASED, nextAttemptAt: PAUSED_UNTIL } });
+      // (resume) or the job is queued again (a change, a reconcile). Only the version read: a job
+      // queued again meanwhile (the target enabled, its organization queued) stays due.
+      const until = pausedTargets.get(target) === "unreadable" ? new Date(Date.now() + UNREADABLE_RETRY_MS) : PAUSED_UNTIL;
+      const parked = await adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }, { field: "version", value: current.version }], update: { lockedUntil: RELEASED, nextAttemptAt: until } });
+      if (parked === 0) await release(current.id);
+      // Enabled while this was parking it (resume ran before the parking): due again.
+      else {
+        const latest = await source.get(current.targetId);
+        if (latest && !isPaused(latest)) await adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: current.id }, { field: "nextAttemptAt", value: until }], update: { nextAttemptAt: new Date() } });
+      }
       return "busy";
     }
     // Duplicates (a database without the UNIQUE key): one delivery per user at a time.
@@ -491,6 +515,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     }
     let recheckAt: Date | null;
     const isGroup = current.kind === "group" || current.kind === "team" || current.kind === "role";
+    const isResync = current.kind === "resync";
     // A group delivery has no fixed number of requests (members a page and a batch at a time; at
     // Google one per member changed): the hold is renewed while it runs, so no second worker
     // claims the job halfway through.
@@ -504,7 +529,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       : undefined;
     try {
       const change = `${current.id}@${current.version}`;
-      recheckAt = isGroup ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }, change) : await deliver(target, current.userId, change);
+      recheckAt = isResync
+        ? await resyncStep(target, current.userId)
+        : isGroup
+          ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }, change)
+          : await deliver(target, current.userId, change);
     } catch (e) {
       const attempts = current.attempts + 1;
       const err = e instanceof ScimError ? e : new ScimError((e as Error).message, null, true);
@@ -516,7 +545,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const wait = Math.max(err.retryAfterMs ?? 0, attempts >= maxAttempts ? MAX_DELAY_MS : backoff(attempts));
       const loud = giveUp || attempts === maxAttempts;
       (loud ? log.error : log.warn)(
-        `[scim] ${target.id}: ${isGroup ? `${current.kind === "group" ? "" : `${current.kind} `}group` : "user"} ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
+        `[scim] ${target.id}: ${isResync ? "queueing its organization at" : isGroup ? `${current.kind === "group" ? "" : `${current.kind} `}group` : "user"} ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
       );
       const recorded = await adapter.updateMany({
         model: JOB_MODEL,
@@ -525,7 +554,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       });
       // Only a failure that was recorded: a job bumped during delivery goes out again at once,
       // so it hasn't failed. The host's hook gets a few seconds; this worker still holds the job.
-      if (loud && recorded > 0 && options.onFailure) {
+      if (loud && recorded > 0 && options.onFailure && !isResync) {
         const failure: DeliveryFailure = { targetId: target.id, kind: (isGroup ? current.kind : "user") as DeliveryFailure["kind"], subjectId: current.userId, error: err.message, status: err.status, attempts, failed: giveUp };
         try {
           await Promise.race([options.onFailure(failure), new Promise((_, reject) => setTimeout(() => reject(new Error(`no answer within ${ON_FAILURE_TIMEOUT_MS / 1000} s`)), ON_FAILURE_TIMEOUT_MS))]);
@@ -565,7 +594,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (settled === 0) await release(current.id);
     const outcome = (await nextFor(current.key, round)) ?? "done";
     // The user's groups follow: added once they exist at the app, left once they don't.
-    if (!isGroup && hasGroups(target)) await syncGroupsOf(target, current.userId);
+    if (!isGroup && !isResync && hasGroups(target)) await syncGroupsOf(target, current.userId);
     return outcome;
   }
 
@@ -585,18 +614,22 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * time was the bottleneck at scale (about 0.7 s a user on Workers and D1). Each job's
    * lease still keeps two deliveries for one user apart.
    */
-  async function runDue(limit = 50): Promise<Record<Outcome, number>> {
-    const due = (await adapter.findMany({
+  async function runDue(limit = 50, targetId?: string): Promise<Record<Outcome, number>> {
+    // A few times the batch, so that if one target has most of what's due (a slow app, a large
+    // organization just queued), it takes at most half the batch and the others' go too.
+    const candidates = (await adapter.findMany({
       model: JOB_MODEL,
       // Not held: jobs another worker holds (or held when it died) mustn't use up the limit.
       where: [
+        ...(targetId === undefined ? [] : [{ field: "targetId", value: targetId }]),
         { field: "failed", value: false },
         { field: "nextAttemptAt", value: new Date(Date.now() + 1), operator: "lt" },
         { field: "lockedUntil", value: new Date(Date.now()), operator: "lt" },
       ],
       sortBy: { field: "nextAttemptAt", direction: "asc" },
-      limit,
+      limit: targetId === undefined ? limit * 4 : limit,
     })) as Job[];
+    const due = fairShare(candidates, limit);
     const tally: Record<Outcome, number> = { done: 0, retry: 0, failed: 0, busy: 0 };
     let next = 0;
     const worker = async () => {
@@ -604,6 +637,22 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     };
     await Promise.all(Array.from({ length: Math.min(options.concurrency ?? 4, due.length) }, worker));
     return tally;
+  }
+
+  /** Up to `limit` jobs, oldest first, no target taking more than its share while others' wait; the rest of the batch fills from what's left. */
+  function fairShare(jobs: Job[], limit: number): Job[] {
+    const cap = Math.max(1, Math.floor(limit * PER_TARGET_SHARE));
+    const taken = new Map<string, number>();
+    const picked: Job[] = [];
+    const skipped: Job[] = [];
+    for (const j of jobs) {
+      const n = taken.get(j.targetId) ?? 0;
+      if (n < cap && picked.length < limit) {
+        picked.push(j);
+        taken.set(j.targetId, n + 1);
+      } else skipped.push(j);
+    }
+    return [...picked, ...skipped].slice(0, limit);
   }
 
   /** Deliver (target, user) now if due, e.g. right after enqueue. */
@@ -939,6 +988,40 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   };
   const uniqueRefs = (refs: GroupRef[]) => [...new Map(refs.map((r) => [`${r.kind}:${r.id}`, r])).values()];
 
+  /**
+   * One step of queueing an organization's target (a "resync" job): a page of its members, then
+   * of the users with an account there (to deactivate those who left), then its groups and every
+   * group linked there. Queues the next step; null when done. Pages, so a large organization
+   * doesn't run past a Workers invocation's limits.
+   */
+  async function resyncStep(target: Target, cursor: string): Promise<null> {
+    const organizationId = target.organizationId;
+    if (!organizationId) return null;
+    const after = cursor.slice(2);
+    let next: string | null = null;
+    if (cursor.startsWith("m:")) {
+      const where: Where[] = [{ field: "organizationId", value: organizationId }];
+      if (after) where.push({ field: "id", value: after, operator: "gt" });
+      const page = (await adapter.findMany({ model: "member", where, limit: RESYNC_PAGE, sortBy: { field: "id", direction: "asc" } })) as { id: string; userId: string; organizationId: string }[];
+      for (const m of page) if (m.organizationId === organizationId) await enqueue(target.id, m.userId, { now: true });
+      next = page.length < RESYNC_PAGE ? "l:" : `m:${(page[page.length - 1] as { id: string }).id}`;
+    } else if (cursor.startsWith("l:")) {
+      const users = await linkedUsers(target.id, after || null, RESYNC_PAGE);
+      for (const userId of users) await enqueue(target.id, userId, { now: true });
+      next = users.length < RESYNC_PAGE ? (hasGroups(target) ? "g:" : null) : `l:${users[users.length - 1]}`;
+    } else if (cursor.startsWith("g:")) {
+      for (const ref of await groupsForOrganization(target, organizationId)) await enqueue(target.id, ref.id, { kind: ref.kind, now: true });
+      next = "G:";
+    } else if (cursor.startsWith("G:")) {
+      // Every group linked there, so those whose organization, team or role is gone are removed.
+      const linked = await linkedGroups(target.id, after || null, RESYNC_PAGE);
+      for (const l of linked) await enqueue(target.id, l.ref.id, { kind: l.ref.kind, now: true });
+      next = linked.length < RESYNC_PAGE ? null : `G:${(linked[linked.length - 1] as { key: string }).key}`;
+    }
+    if (next) await enqueue(target.id, next, { kind: "resync", now: true });
+    return null;
+  }
+
   /** The groups at this target that include (or may include) this user. */
   async function groupsOf(target: Target, userId: string): Promise<GroupRef[]> {
     if (!hasGroups(target)) return [];
@@ -951,7 +1034,15 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     }
     if (target.teamGroups) {
       const teamIds = await capped<{ userId: string; teamId: string }>(adapter.findMany({ model: "teamMember", where: [{ field: "userId", value: userId }], limit: 1000 }).catch(() => []), `user ${userId}: teams`);
-      for (const t of teamIds) if (t.userId === userId) refs.push({ kind: "team", id: t.teamId });
+      const mine = teamIds.filter((t) => t.userId === userId).map((t) => t.teamId);
+      if (target.organizationId) {
+        // An organization's target: only that organization's teams (others' would be queued and dropped).
+        for (let i = 0; i < mine.length; i += IN_BATCH) {
+          const ids = mine.slice(i, i + IN_BATCH);
+          const teams = (await adapter.findMany({ model: "team", where: [{ field: "id", value: ids, operator: "in" }], limit: ids.length })) as { id: string; organizationId: string }[];
+          for (const t of teams) if (ids.includes(t.id) && t.organizationId === target.organizationId) refs.push({ kind: "team", id: t.id });
+        }
+      } else for (const id of mine) refs.push({ kind: "team", id });
     }
     return uniqueRefs(refs);
   }
@@ -1013,7 +1104,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const rows = (await adapter.findMany({ model: JOB_MODEL, where, sortBy: { field: "id", direction: "asc" }, limit: o.limit + 1 })) as Job[];
     const items = rows.slice(0, o.limit).map((j) => ({
       targetId: j.targetId,
-      kind: (j.kind ?? "user") as "user" | "group" | "team" | "role",
+      kind: (j.kind ?? "user") as "user" | "group" | "team" | "role" | "resync",
       subjectId: j.userId,
       failed: j.failed,
       attempts: j.attempts,

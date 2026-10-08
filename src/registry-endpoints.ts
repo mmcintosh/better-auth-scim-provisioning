@@ -1,10 +1,12 @@
 // The target registry's API: organizations' administrators connect, change, check and remove
 // their organization's targets; the host's administrators (`registry.canManage`) any organization's.
-// Every route needs a fresh session (checked against the database), of a user who isn't banned
-// or impersonated, decided on memberships as the database has them now, never the session's
-// active organization. Credentials go in and never come out: a target shows only their kind, and
-// they're never sent anywhere new (a change of where a target sends needs them given again).
-// The routes are always there (so they're typed for every app); without `registry` they're 404.
+// Every route needs a session re-read from the database (stateful deployments; a stateless one's
+// signed cookie), of a user who isn't banned or impersonated, decided on memberships as the
+// database has them now, never the session's active organization; changes need a fresh one too
+// (signed in within Better Auth's `session.freshAge`, a day by default). Credentials go in and
+// never come out: a target shows only their kind, and they're sealed for where it sends (a change
+// of where needs them given again). The routes are always there (so they're typed for every
+// app); without `registry` they're 404 (401 first, signed out).
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthEndpoint, sensitiveSessionMiddleware } from "better-auth/api";
 import * as z from "zod";
@@ -23,6 +25,7 @@ import {
   TARGET_MODEL,
   type TargetRow,
   unseal,
+  destination,
 } from "./registry";
 import { ScimError } from "./scim-client";
 import type { Target, TargetRegistryOptions } from "./types";
@@ -40,7 +43,7 @@ export interface RegistryHost {
   /** This instance's outbox, for a target's organization. */
   instance(ctx: GenericEndpointContext):
     | {
-        resync(organizationId: string, targetId: string): Promise<void>;
+        resync(targetId: string, o: { resume: boolean }): Promise<void>;
         status(targetId: string): Promise<{ queued: number; waiting: number; stuck: number; failed: number; accounts: number; groups: number }>;
         failures(targetId: string): Promise<{ kind: string; subjectId: string; failed: boolean; status: number | null; nextAttemptAt: string }[]>;
       }
@@ -82,9 +85,6 @@ const isBanned = (user: Record<string, unknown>) => {
   return Number.isNaN(t) || t > Date.now();
 };
 
-/** The settings that say where a target sends (and as whom): changing one needs the credentials given again. */
-const destination = (s: StoredSettings) => JSON.stringify([s.url ?? null, s.google?.clientEmail ?? null, s.google?.adminEmail ?? null]);
-
 interface Actor {
   userId: string;
   /** A host administrator: every organization. */
@@ -94,12 +94,19 @@ interface Actor {
 }
 const may = (actor: Actor, organizationId: string) => actor.host || actor.organizations.has(organizationId);
 
-async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptions | undefined): Promise<Actor> {
+async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptions | undefined, o: { change?: boolean } = {}): Promise<Actor> {
   if (!options) throw refuse("NOT_FOUND", "the target registry isn't enabled (registry option)");
   const s = (ctx.context as { session?: { user: { id: string }; session: Record<string, unknown> } }).session;
   if (!s) throw refuse("FORBIDDEN", "sign in to manage targets");
   // An administrator acting as someone else doesn't manage targets as them.
   if (s.session.impersonatedBy) throw refuse("FORBIDDEN", "not while impersonating");
+  if (o.change) {
+    // Fresh, as Better Auth asks for a password or email change: a session cookie stolen days ago
+    // mustn't be able to point an organization's users at another app.
+    const freshAge = (ctx.context as { sessionConfig?: { freshAge?: number } }).sessionConfig?.freshAge ?? 60 * 60 * 24;
+    const createdAt = new Date(s.session.createdAt as string | Date).getTime();
+    if (freshAge !== 0 && !(Date.now() - createdAt < freshAge * 1000)) throw refuse("FORBIDDEN", "sign in again to change targets (the session isn't fresh)");
+  }
   const user = (await ctx.context.internalAdapter.findUserById(s.user.id)) as ({ id: string; email: string; emailVerified: boolean } & Record<string, unknown>) | null;
   if (!user || isBanned(user)) throw refuse("FORBIDDEN", "not allowed");
   let host = false;
@@ -146,7 +153,8 @@ function checkResult(e: unknown): { ok: false; problem: string; status?: number 
 
 export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpointContext) => SealKey) {
   const adapterOf = (ctx: GenericEndpointContext) => ctx.context.adapter as unknown as Adapter;
-  const audit = (ctx: GenericEndpointContext, actor: Actor, what: string) => ctx.context.logger.info(`[scim] registry: user ${actor.userId}${actor.host ? " (host administrator)" : ""} ${what}`);
+  // At warn, Better Auth's default level: who connected what, and where, must not be dropped.
+  const audit = (ctx: GenericEndpointContext, actor: Actor, what: string) => ctx.context.logger.warn(`[scim] registry: user ${actor.userId}${actor.host ? " (host administrator)" : ""} ${what}`);
   const instance = (ctx: GenericEndpointContext) => {
     const i = host.instance(ctx);
     if (!i) throw new Error("[scim] not initialised");
@@ -195,7 +203,16 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
     ];
     if (settings.success && credentials.success) {
       issues.push(...storedProblems(settings.data, credentials.data, host.options?.allowHosts));
-      if (!issues.length) issues.push(...host.targetProblems(assemble(ids, settings.data, credentials.data)));
+      if (!issues.length) {
+        // A profile refuses what its app can't do (githubEnterprise: deprovision "delete") by throwing.
+        let whole: Target | null = null;
+        try {
+          whole = assemble(ids, settings.data, credentials.data);
+        } catch (e) {
+          issues.push(`settings: ${(e as Error).message.replace(/^\[scim\]\s*/, "")}`);
+        }
+        if (whole) issues.push(...host.targetProblems(whole));
+      }
     }
     if (issues.length) throw refuse("BAD_REQUEST", "invalid target", issues);
     return { settings: settings.data as StoredSettings, credentials: credentials.data as StoredCredentials };
@@ -238,7 +255,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         body: z.strictObject({ organizationId: z.string().min(1).max(256), settings: z.unknown(), credentials: z.unknown(), enabled: z.boolean().optional() }),
       },
       async (ctx) => {
-        const actor = await actorOf(ctx, host.options);
+        const actor = await actorOf(ctx, host.options, { change: true });
         const { organizationId } = ctx.body;
         if (!may(actor, organizationId)) throw refuse("FORBIDDEN", "not allowed");
         const adapter = adapterOf(ctx);
@@ -256,11 +273,11 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const now = new Date();
         const row = (await adapter.create({
           model: TARGET_MODEL,
-          data: { targetId, organizationId, type: settings.type ?? "scim", config: JSON.stringify(settings), sealed: await seal(key(ctx), targetId, organizationId, credentials), enabled, createdAt: now, updatedAt: now },
+          data: { targetId, organizationId, type: settings.type ?? "scim", config: JSON.stringify(settings), sealed: await seal(key(ctx), targetId, organizationId, credentials, settings), enabled, createdAt: now, updatedAt: now },
         })) as TargetRow;
-        audit(ctx, actor, `created target ${targetId} (${settings.type ?? "scim"}) for organization ${organizationId}`);
-        // The organization's members and groups, queued now (a disabled target's wait).
-        await instance(ctx).resync(organizationId, targetId);
+        audit(ctx, actor, `created target ${targetId} (${settings.type ?? "scim"}, ${settings.url !== undefined ? new URL(settings.url).host : (settings.google?.adminEmail.split("@")[1] ?? "")}) for organization ${organizationId}`);
+        // The organization's members and groups, queued (a disabled target's wait).
+        await instance(ctx).resync(targetId, { resume: false });
         return ctx.json({ target: view(row, credentials) });
       },
     ),
@@ -280,12 +297,13 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         body: z.strictObject({ id: z.string().min(1).max(100), settings: z.unknown().optional(), credentials: z.unknown().optional(), enabled: z.boolean().optional() }),
       },
       async (ctx) => {
-        const actor = await actorOf(ctx, host.options);
+        const actor = await actorOf(ctx, host.options, { change: true });
         const row = await rowFor(ctx, actor, ctx.body.id);
         const update: Record<string, unknown> = { updatedAt: new Date() };
         let current: StoredCredentials | null = null;
+        const before = settingsOf(row);
+        let after = before;
         if (ctx.body.settings !== undefined || ctx.body.credentials !== undefined) {
-          const before = settingsOf(row);
           const settings = ctx.body.settings !== undefined ? ctx.body.settings : before;
           const type = (settings as { type?: unknown } | null)?.type ?? "scim";
           if (type !== row.type) throw refuse("BAD_REQUEST", `a target's type can't change (it's ${row.type}): remove it and connect a new one`);
@@ -297,18 +315,34 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           }
           const checked = check(row, settings, ctx.body.credentials ?? current);
           current = checked.credentials;
+          after = checked.settings;
           update.config = JSON.stringify(checked.settings);
-          if (ctx.body.credentials !== undefined) update.sealed = await seal(key(ctx), row.targetId, row.organizationId, checked.credentials);
+          if (ctx.body.credentials !== undefined) update.sealed = await seal(key(ctx), row.targetId, row.organizationId, checked.credentials, checked.settings);
         }
         if (ctx.body.enabled !== undefined) update.enabled = ctx.body.enabled;
-        await adapterOf(ctx).update({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }], update });
-        const after = { ...row, ...update } as TargetRow;
+        // Only over the row as read: two changes at once mustn't mix one's URL with the other's
+        // credentials. The loser is told to try again.
+        const written = await adapterOf(ctx).updateMany({
+          model: TARGET_MODEL,
+          where: [
+            { field: "id", value: row.id },
+            { field: "config", value: row.config },
+            { field: "sealed", value: row.sealed },
+          ],
+          update,
+        });
+        if (written === 0) throw refuse("CONFLICT", "the target was changed meanwhile: read it again and retry");
+        const saved = { ...row, ...update } as TargetRow;
         audit(ctx, actor, `updated target ${row.targetId} (${Object.keys(update).filter((k) => k !== "updatedAt").map((k) => (k === "sealed" ? "credentials" : k === "config" ? "settings" : k)).join(", ") || "nothing"})`);
-        // New settings or credentials apply to everyone now, and what was waiting or failed goes
-        // again. Only pausing changes nothing to send: later changes are queued, and wait.
-        const pausedOnly = ctx.body.enabled === false && ctx.body.settings === undefined && ctx.body.credentials === undefined;
-        if (!pausedOnly) await instance(ctx).resync(row.organizationId, row.targetId);
-        return ctx.json({ target: view(after, current ?? (await readable(ctx, after))) });
+        // What's to be sent changed (settings beyond the label, new credentials, enabled): queued
+        // again for everyone, and what was waiting or failed goes again (new credentials or a
+        // re-enabled target). Pausing, or renaming the label, sends nothing new.
+        const { name: _a, ...sendsBefore } = before;
+        const { name: _b, ...sendsAfter } = after;
+        const settingsChanged = JSON.stringify(sendsBefore) !== JSON.stringify(sendsAfter);
+        const resume = ctx.body.credentials !== undefined || (ctx.body.enabled === true && !truthy(row.enabled));
+        if (settingsChanged || resume) await instance(ctx).resync(row.targetId, { resume });
+        return ctx.json({ target: view(saved, current ?? (await readable(ctx, saved))) });
       },
     ),
 
@@ -321,7 +355,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
       "/scim-provisioning/targets/delete",
       { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100) }) },
       async (ctx) => {
-        const actor = await actorOf(ctx, host.options);
+        const actor = await actorOf(ctx, host.options, { change: true });
         const row = await rowFor(ctx, actor, ctx.body.id);
         const adapter = adapterOf(ctx);
         // The target first: deliveries look it up each time, so none starts after this. One
