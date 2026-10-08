@@ -38,7 +38,10 @@ interface GoogleUser {
   nextPageToken?: string;
 }
 
-export function googleWorkspaceClient(target: Target): ReturnType<typeof scimClient> {
+/** The SCIM client's operations; `replace` also takes whether this is a reactivation (see update). */
+export type GoogleWorkspaceClient = Omit<ReturnType<typeof scimClient>, "replace"> & { replace(id: string, user: ScimUser, o?: { reactivate?: boolean }): Promise<void> };
+
+export function googleWorkspaceClient(target: Target): GoogleWorkspaceClient {
   const google = target.google;
   if (!google) throw new Error(`[scim] target ${target.id}: type "google-workspace" needs google`);
   const base = trimSlashes(target.url ?? GOOGLE_DIRECTORY_URL);
@@ -124,7 +127,8 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
 
   /**
    * The Enterprise User attributes, where Google keeps them, merged into what the user has now
-   * (nothing, for a new user), only when the target sends them:
+   * (nothing, for a new user). Only the attributes the target names are touched (their keys are in
+   * the extension, undefined when empty); anything else an admin set at Google is left alone:
    * - organization, department, cost center and division (as `description`) in the primary
    *   organization, keeping its other fields (an admin's job title, say);
    * - the employee number as the `organization` external id;
@@ -134,16 +138,23 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
   function enterprise(user: ScimUser, now: GoogleUser | null): Partial<Pick<GoogleUser, "organizations" | "relations">> & { employeeNumber?: string | null } {
     const e = user[SCIM_ENTERPRISE_USER_SCHEMA];
     if (!e) return {};
-    const orgs = now?.organizations ?? [];
-    const primary: GoogleOrganization = { ...(orgs.find((o) => o.primary) ?? {}) };
-    for (const [ours, theirs] of [["organization", "name"], ["department", "department"], ["costCenter", "costCenter"], ["division", "description"]] as const) {
-      if (e[ours]) primary[theirs] = e[ours];
-      else delete primary[theirs];
+    const named = (a: keyof typeof e) => Object.hasOwn(e, a);
+    const out: Partial<Pick<GoogleUser, "organizations" | "relations">> & { employeeNumber?: string | null } = {};
+    const orgParts = (["organization", "department", "costCenter", "division"] as const).filter(named);
+    if (orgParts.length) {
+      const orgs = now?.organizations ?? [];
+      const primary: GoogleOrganization = { ...(orgs.find((o) => o.primary) ?? {}) };
+      const theirs = { organization: "name", department: "department", costCenter: "costCenter", division: "description" } as const;
+      for (const ours of orgParts) {
+        if (e[ours]) primary[theirs[ours]] = e[ours];
+        else delete primary[theirs[ours]];
+      }
+      const { primary: _, ...rest } = primary;
+      out.organizations = [...orgs.filter((o) => !o.primary), ...(Object.keys(rest).length ? [{ ...rest, primary: true }] : [])];
     }
-    const { primary: _, ...rest } = primary;
-    const organizations = [...orgs.filter((o) => !o.primary), ...(Object.keys(rest).length ? [{ ...rest, primary: true }] : [])];
-    const relations = [...(now?.relations ?? []).filter((r) => r.type !== "manager"), ...(e.manager ? [{ type: "manager", value: e.manager.value }] : [])];
-    return { organizations, relations, employeeNumber: e.employeeNumber ?? null };
+    if (named("manager")) out.relations = [...(now?.relations ?? []).filter((r) => r.type !== "manager"), ...(e.manager ? [{ type: "manager", value: e.manager.value }] : [])];
+    if (named("employeeNumber")) out.employeeNumber = e.employeeNumber ?? null;
+    return out;
   }
 
   /** Our entry in externalIds, and the employee number if the target sends it, keeping any others (an admin's own ids, say). */
@@ -171,14 +182,19 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
     }
   }
 
-  async function update(id: string, user: ScimUser) {
+  /**
+   * A change to an existing user. `suspended` is only ever set to suspend (the user left), or to
+   * lift a suspension the plugin itself made (`reactivate`: the user is back after a ban or a
+   * removal). Otherwise it's left as it is at Google: an admin's suspension, say during an
+   * incident, isn't undone by a rename or a manager's change; nor is a hold of Google's own
+   * (WEB_LOGIN_REQUIRED on new accounts, abuse), which the API can't lift (412; found live).
+   */
+  async function update(id: string, user: ScimUser, o: { reactivate?: boolean } = {}) {
     const now = await current(id, user.userName);
     const { employeeNumber, ...extra } = enterprise(user, now);
     const body: Record<string, unknown> = { ...toGoogle(user), ...extra, externalIds: externalIdsOf(now, user.externalId, employeeNumber) };
-    // Suspended by Google itself (WEB_LOGIN_REQUIRED for new accounts, abuse holds), not by an
-    // admin or us: asking to lift it fails (412), and only the user signing in or an admin can.
-    // So it's left as Google has it, and the rest of the change still goes (found live).
-    if (user.active && now?.suspended && now.suspensionReason && now.suspensionReason !== "ADMIN") delete body.suspended;
+    const googlesHold = !!(now?.suspended && now.suspensionReason && now.suspensionReason !== "ADMIN");
+    if (user.active && (!o.reactivate || googlesHold)) delete body.suspended;
     await change(id, body, user.userName);
   }
 
@@ -317,7 +333,7 @@ export function googleWorkspaceClient(target: Target): ReturnType<typeof scimCli
       return created.id;
     },
     replace: update,
-    patch: update,
+    patch: (id: string, user: ScimUser) => update(id, user),
     async setActive(id: string, active: boolean) {
       await change(id, { suspended: !active });
     },

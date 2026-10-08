@@ -206,7 +206,7 @@ betterAuth({
     additionalFields: {
       employeeNumber: { type: "string", required: false },
       department: { type: "string", required: false },
-      managerId: { type: "string", required: false }, // the manager's user id
+      managerId: { type: "string", required: false, index: true }, // the manager's user id; indexed, since a manager's reports are looked up by it
     },
   },
   plugins: [
@@ -220,12 +220,13 @@ betterAuth({
 });
 ```
 
-- **`true`** reads `employeeNumber`, `costCenter`, `organization`, `division` and `department`, and the manager's user id from `managerId`. **A map** names your fields, and only those attributes are sent. A number is written out as text.
-- **An empty field clears the attribute at the app**: a PUT leaves it out, and a PATCH (`update: "patch"`) removes it by path.
-- **The manager** is sent as their id at that app (SCIM's `manager.value`), and only once they're provisioned and active there. When a manager's account at the app appears or goes, the users reporting to them are queued again, so their manager follows. A user named as their own manager has none.
-- **Google Workspace** keeps these differently: the organization, department, cost center and division (as `description`) go in the user's primary organization, keeping its other fields such as an admin's job title. The employee number becomes the `organization` external id, and the manager the `manager` relation, by their address; other relations are kept.
-- **Webhooks** get the same object as SCIM, with the manager's id at the receiver (their `externalId`).
+- **`true`** reads `employeeNumber`, `costCenter`, `organization`, `division` and `department`, and the manager's user id from `managerId`, for those fields your users have: an attribute without a field is neither sent nor cleared. **A map** names your fields, and only those attributes are sent; a field it names that your users don't have stops the plugin at startup. A number is written out as text.
+- **An empty field clears the attribute at the app**: a PUT leaves it out, and a PATCH (`update: "patch"`) removes it by path. An app that refuses to remove an attribute it doesn't have (400) gets the change again without the removes, then each remove on its own. A user with no values at all isn't sent the extension.
+- **The manager** is sent as their id at that app (SCIM's `manager.value`), and only once they're provisioned and active there. Whenever that changes (their account appears, goes, is made again under a new id, or at Google gets a new address), the users reporting to them are queued again, at an organization's target only its members, so their manager follows at the next scheduled run. That's a job of its own, retried if it fails. A user named as their own manager has none. Index the manager field: each such change looks up the reports by it.
+- **Google Workspace** keeps these differently: the organization, department, cost center and division (as `description`) go in the user's primary organization, keeping its other fields such as an admin's job title. The employee number becomes the `organization` external id, and the manager the `manager` relation, by their address; other relations are kept. Only the attributes the target reads are touched: with a map of a few, what an admin set for the others stays.
+- **Webhooks** get the same object as SCIM, with the manager's id at the receiver: their `externalId` as the target sends it (the user id, unless `mapUser` changes it).
 - A `mapUser` that sets the extension itself is sent as it is.
+- **Organizations' own targets** may read only the fields you allow, since their administrators choose the fields and the values go to their app: by default the attribute names and `managerId`; `registry.enterpriseFields` sets the list (`[]` turns it off). Never list a field you wouldn't show them.
 - **Verified live at AWS IAM Identity Center** (every attribute, the manager as AWS's id for them, and clearing), and tested against Better Auth's own `@better-auth/scim` with PUT and PATCH. Slack documents the extension too. Send it only to apps that accept it.
 
 ## Groups
@@ -378,7 +379,7 @@ Google takes a while to settle, and the plugin waits it out rather than failing:
 - reads of a new user can trail its changes by a minute or more, so the Admin console may briefly show older details;
 - a group made seconds ago can answer 404 to its first members, and say "already exists" while a read of it still finds nothing.
 
-Google sometimes suspends new accounts itself (`suspensionReason` `WEB_LOGIN_REQUIRED`, for example after many accounts are created in a short time), until the user signs in once or an admin lifts it in the Admin console. The API can't lift that, so the plugin leaves it as Google has it and still applies every other change; only a suspension by an admin, or by the plugin, is lifted when a user is unbanned.
+Google sometimes suspends new accounts itself (`suspensionReason` `WEB_LOGIN_REQUIRED`, for example after many accounts are created in a short time), until the user signs in once or an admin lifts it in the Admin console. The API can't lift that, so the plugin leaves it as Google has it and still applies every other change. The plugin lifts only a suspension it made itself, when the user is back (unbanned, or included again); an admin's own suspension, say during an incident, is left alone by every other change.
 
 ### Webhooks
 
