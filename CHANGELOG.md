@@ -7,6 +7,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 ### Project
 
 - Every dependency install in CI goes through Socket Firewall, which blocks confirmed malware before it downloads, the release job included. pnpm 10.34.6 won't resolve a version less than a day old (`minimumReleaseAge` in the new pnpm-workspace.yaml; Better Auth exempt for the canary and the latest-1.7 row), and Dependabot waits 3 days (`cooldown`). The README shows Socket's package badge.
+- Interoperability tests against Better Auth's own inbound SCIM server, `@better-auth/scim`, as a real receiver, at the same version as Better Auth in each CI row. They cover users through their whole life, `deprovision: "delete"`, organizations as groups, sessions ended on deactivation, and the link an ID-JAG `sub` resolves through, including that a `mapUser` `externalId` breaks it.
 
 ### Documentation
 
@@ -14,6 +15,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 - `SECURITY.md`: a 7-day acknowledgement target, how fixed vulnerabilities are announced, and how releases are protected.
 - `.bestpractices.json`: answers for the OpenSSF Best Practices badge, which bestpractices.dev reads to pre-fill them.
 - The README shows the OpenSSF Best Practices badge (passing, project 15270).
+- README, **Better Auth apps, and ID-JAG**: provisioning an app that uses `@better-auth/scim`, and how an ID-JAG receiver finds the user through the SCIM link. Keep the default `externalId` (the user id, which is an ID-JAG's `sub`). Deactivation there also signs the user out.
 
 ### Added
 
