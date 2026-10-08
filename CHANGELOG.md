@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-08
+
+Enterprise User attributes (employee number, cost center, organization, division, department and manager) at SCIM apps, Google Workspace and webhooks; Google Workspace now leaves an admin's suspensions and Google's own holds alone.
+
 ### Added
 
 - **Enterprise User attributes (`enterprise`)**: employee number, cost center, organization, division, department and manager, read from user fields, sent as SCIM's Enterprise User extension (RFC 7643 §4.3).
