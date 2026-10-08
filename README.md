@@ -42,11 +42,11 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 | Google Workspace | ✓ | ✓ (Google Groups) | live tests in a real Workspace, which found and fixed how Google settles after creates and email changes |
 | AWS IAM Identity Center | ✓ | ✓ (including a group of over 100) | live tests with the `awsIamIdentityCenter` profile |
 
-The live tests run by hand with real credentials, not in CI. Webhooks have no third party to verify against: CI sends them over HTTP to a receiver written as shown below ([Webhooks](#webhooks)). Slack, Atlassian and GitHub Enterprise are built from each app's documentation and tested against a model of it. The code was reviewed independently before 0.1.0 and 0.2.0, and three more times before 1.0, each review's findings fixed with a test.
+The live tests run by hand with real credentials, not in CI. Webhooks have no third party to verify against: CI sends them over HTTP to a receiver written as shown below ([Webhooks](#webhooks)). Better Auth apps are tested against the real `@better-auth/scim` in CI ([Better Auth apps](#better-auth-apps-and-id-jag)). Slack, Atlassian and GitHub Enterprise are built from each app's documentation and tested against a model of it. The code was reviewed independently before 0.1.0 and 0.2.0, and three more times before 1.0, each review's findings fixed with a test.
 
 ## Contents
 
-[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Google Workspace](#google-workspace) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Organizations' own targets](#organizations-own-targets) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
+[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Better Auth apps, and ID-JAG](#better-auth-apps-and-id-jag) · [Google Workspace](#google-workspace) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Organizations' own targets](#organizations-own-targets) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
 
 ## Install
 
@@ -250,6 +250,7 @@ scimProvisioning({
 | Slack | `slack` | documented | userNames must be lowercase, at most 21 characters, with only `.` `_` `-`: taken from the email's local part (`slackUserName`). Deleting only deactivates. Since the userName isn't the email, Slack accounts made by hand are never adopted: give them our `externalId`, or remove them, first. |
 | Atlassian | `atlassian` | documented | Groups can't be renamed, so a renamed group is created anew with its members, then the old one deleted (retried until it is). If a group with the new name exists and isn't ours, the job fails. |
 | GitHub Enterprise Managed Users | `githubEnterprise` | documented | GitHub's DELETE permanently suspends an account, so this only deactivates, and refuses `deprovision: "delete"`. |
+| Better Auth apps (`@better-auth/scim`) | | tested against the real package | Nothing differs. See [Better Auth apps](#better-auth-apps-and-id-jag), which also covers ID-JAG. |
 | Google Workspace | `type: "google-workspace"` | verified live | Not SCIM: see [Google Workspace](#google-workspace). |
 | Anything else | `type: "webhook"` | | Signed webhooks to your own code or an automation platform: see [Webhooks](#webhooks). |
 
@@ -270,6 +271,29 @@ scimProvisioning({
   - GitHub asks for at most 1,000 users an hour, so keep `concurrency` low for a first reconcile.
 - **Anything else that speaks SCIM 2.0**, with a bearer token, Basic auth, an API-key header or OAuth 2.0 client credentials (Salesforce, Zoom, your own apps).
   - If an app differs in a way a profile would cover, `compat` sets the same behaviours by hand: `groupUpdate: "patch"`, `groupMembers: "users-filter"`, `maxGroupMembersPerRequest`, `groupRename: "recreate"`.
+
+### Better Auth apps, and ID-JAG
+
+An app built on Better Auth can take users in with Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim). Give it a connection for your identity provider, and point a target at its endpoint:
+
+```ts
+// The app: inbound SCIM, one connection for your identity provider.
+scim({ connections: [{ id: "our-idp", credentials: [{ type: "bearer", id: "idp-token", token: process.env.SCIM_TOKEN! }] }] });
+
+// Your identity provider: a target for that app.
+scimProvisioning({ targets: [{ id: "app", url: "https://app.example.com/api/auth/scim/v2", token: process.env.APP_SCIM_TOKEN! }] });
+```
+
+The tests run this pair for real: [`@better-auth/scim`](https://www.npmjs.com/package/@better-auth/scim) at the same versions as Better Auth, in CI. They show:
+
+- Users are created there, updated, deactivated when banned or deleted here, and reactivated when unbanned; `deprovision: "delete"` deletes them there.
+- Organizations arrive as SCIM Groups with their provisioned members (`groups`).
+- **Deactivation signs the user out there.** `@better-auth/scim` deletes a user's sessions once none of their SCIM connections has them active.
+
+**ID-JAG.** An app that accepts ID-JAGs (Identity Assertion JWT Authorization Grants, the grant behind Cross App Access and MCP's Enterprise-Managed Authorization) can find the user an ID-JAG names through this link: `acquireActiveSCIMUserLink({ connectionId, externalId: sub })` from `@better-auth/scim`. That works because an ID-JAG issued by a Better Auth identity provider carries the Better Auth user id as its `sub`, and that id is the `externalId` this package sends by default.
+
+- **Keep the default `externalId`.** A `mapUser` that changes `externalId` breaks the link: the `sub` no longer finds anyone. The tests pin this.
+- **Deprovisioning blocks it.** The link is found only while the user is active there, so a banned, deleted or deprovisioned user's ID-JAGs find no one.
 
 ### Google Workspace
 

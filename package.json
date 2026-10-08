@@ -57,6 +57,7 @@
     "@arethetypeswrong/cli": "^0.18.5",
     "@better-auth/core": "1.7.6",
     "@better-auth/drizzle-adapter": "1.7.6",
+    "@better-auth/scim": "1.7.6",
     "@better-auth/utils": "0.4.2",
     "@biomejs/biome": "^2.5.14",
     "@prisma/adapter-pg": "7.10.0",

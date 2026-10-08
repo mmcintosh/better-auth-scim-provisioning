@@ -9,4 +9,5 @@ case "$want" in
   *) v="$want" ;;
 esac
 echo "better-auth $want -> $v"
-pnpm add -D "better-auth@$v" "@better-auth/core@$v"
+# @better-auth/scim (the interop tests' receiver) follows Better Auth's version.
+pnpm add -D "better-auth@$v" "@better-auth/core@$v" "@better-auth/scim@$v"
