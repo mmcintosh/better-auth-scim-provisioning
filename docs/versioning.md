@@ -25,7 +25,7 @@ A change to any of these that could break an app using them as documented comes 
 
 ## Better Auth versions
 
-The peer range (`better-auth` only; it brings `@better-auth/core` with it) covers the Better Auth versions this release is tested with: `>=1.7.5 <1.8.0` for 1.x so far. A new Better Auth minor (1.8) gets a release of this package that widens the range once it's tested, usually a minor one. Until then, npm will warn about the peer range. A weekly canary in CI runs the tests against Better Auth's newest releases, so that release comes quickly.
+The peer range (`better-auth` only; it brings `@better-auth/core` with it) covers the Better Auth versions this release is tested with: `>=1.7.7 <1.8.0` for 1.x so far. A new Better Auth minor (1.8) gets a release of this package that widens the range once it's tested, usually a minor one. Until then, npm will warn about the peer range. A weekly canary in CI runs the tests against Better Auth's newest releases, so that release comes quickly. The lower bound rises in a patch release when an older Better Auth has a security advisory, so installing this package doesn't keep a vulnerable Better Auth in place (1.2.1 raised it to 1.7.7).
 
 ## Node.js and runtimes
 
