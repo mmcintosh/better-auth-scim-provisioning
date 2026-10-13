@@ -27,7 +27,7 @@ jobs:
         run: |
           v="$(npm view better-auth@${{ matrix.tag }} version)"
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          node -e 'const [a,b]=process.argv.slice(1).map(s=>s.split(/[.-]/).slice(0,3).map(Number));process.exit(a[0]>b[0]||(a[0]===b[0]&&(a[1]>b[1]||(a[1]===b[1]&&a[2]>=b[2])))?0:1)' "$v" 1.7.5 \
+          node -e 'const [a,b]=process.argv.slice(1).map(s=>s.split(/[.-]/).slice(0,3).map(Number));process.exit(a[0]>b[0]||(a[0]===b[0]&&(a[1]>b[1]||(a[1]===b[1]&&a[2]>=b[2])))?0:1)' "$v" 1.7.7 \
             && echo "run=true" >> "$GITHUB_OUTPUT" || echo "run=false" >> "$GITHUB_OUTPUT"
       - if: steps.ver.outputs.run == 'true'
         run: sfw scripts/use-better-auth.sh ${{ steps.ver.outputs.version }}

@@ -48,7 +48,7 @@
     "release": "node scripts/release.mjs"
   },
   "peerDependencies": {
-    "better-auth": ">=1.7.5 <1.8.0"
+    "better-auth": ">=1.7.7 <1.8.0"
   },
   "dependencies": {
     "zod": "^4.6.5"

@@ -4,7 +4,7 @@ Keep your users' accounts in step at the apps they use, straight from your [Bett
 
 [![CI](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml/badge.svg)](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/better-auth-scim-provisioning)](https://www.npmjs.com/package/better-auth-scim-provisioning)
-[![Better Auth](https://img.shields.io/badge/better--auth-%E2%89%A51.7.5%20%3C1.8-black)](https://www.better-auth.com)
+[![Better Auth](https://img.shields.io/badge/better--auth-%E2%89%A51.7.7%20%3C1.8-black)](https://www.better-auth.com)
 [![Runs on](https://img.shields.io/badge/runs%20on-Workers%20%7C%20Node%2022%2B-f38020)](#databases-and-runtimes)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mmcintosh/better-auth-scim-provisioning/badge)](https://scorecard.dev/viewer/?uri=github.com/mmcintosh/better-auth-scim-provisioning)
@@ -55,7 +55,7 @@ The live tests run by hand with real credentials, not in CI. Webhooks have no th
 npm install better-auth-scim-provisioning
 ```
 
-Requires Better Auth `>=1.7.5 <1.8.0` (a peer dependency), and Node.js 22 or later or Cloudflare Workers.
+Requires Better Auth `>=1.7.7 <1.8.0` (a peer dependency), and Node.js 22 or later or Cloudflare Workers.
 
 ## Set up
 
@@ -512,7 +512,7 @@ On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`,
 
 ## Databases and runtimes
 
-Proven in CI. The whole suite runs on SQLite with Better Auth 1.7.5 and the latest 1.7.x, on Node.js 22 and 24; the database suite runs on Node.js 24 with the Better Auth version in the lockfile:
+Proven in CI. The whole suite runs on SQLite with Better Auth 1.7.7 and the latest 1.7.x, on Node.js 22 and 24; the database suite runs on Node.js 24 with the Better Auth version in the lockfile:
 
 | Database | Through | |
 | --- | --- | --- |
