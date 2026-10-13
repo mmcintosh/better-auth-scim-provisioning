@@ -4,6 +4,18 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+
+- **Microsoft Entra ID targets (`type: "entra-id"`)**: users created, updated, disabled and deleted in Entra ID (Microsoft 365) through Microsoft Graph, signed in with an app registration's client credentials (`entra: { tenantId, clientId, clientSecret }`, with the Graph application permission `User.ReadWrite.All`).
+  - Each user's `onPremisesImmutableId` is our user id, which Entra matches a federated sign-in's NameID against: with better-auth-saml-idp as the domain's identity provider, a provisioned user signs in at once. No password is set on a federated domain; on a managed one, a random one nobody knows.
+  - Deprovisioning disables the account and revokes its sessions. With `deprovision: "delete"`, the user goes to the recycle bin, never purged, and a user back within 30 days is restored.
+  - An admin's disabling isn't undone by other changes; only the plugin's own is.
+  - `adopt` is off by default, as for Google Workspace.
+  - Enterprise User attributes go to `employeeId`, `department`, `companyName`, `employeeOrgData` and the `manager`.
+  - Graph's lag after a write (a new user 404s by id for seconds) is retried, and a create whose reply was lost finds the account by its immutableId instead of making another.
+  - Users only, and only in code, for now: groups and stored (`registry`) Entra ID targets aren't supported yet.
+  - Exports the `EntraIdTarget` type.
+
 ## [1.2.1] - 2026-10-13
 
 Requires Better Auth 1.7.7 or later, which fixes a critical Magic Link account takeover; no other changes.

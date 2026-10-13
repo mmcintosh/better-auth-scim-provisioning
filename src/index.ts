@@ -18,12 +18,12 @@ export type { ScimAuth } from "./credentials";
 export { type CheckId, type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SCHEMA_VERSION, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, WebhookSignatureError, webhookSignature } from "./webhook";
 export type { StoredTargetView } from "./registry-endpoints";
-export type { DeliveryFailure, EnterpriseFields, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
+export type { DeliveryFailure, EnterpriseFields, EntraIdTarget, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
 
 
 const targetSchema = z.strictObject({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "letters, digits, - and _ (1-64)"),
-  type: z.enum(["scim", "google-workspace", "webhook"]).optional(),
+  type: z.enum(["scim", "google-workspace", "entra-id", "webhook"]).optional(),
   secret: secretText(32).optional(),
   url: z.string().optional(),
   google: z
@@ -34,6 +34,14 @@ const targetSchema = z.strictObject({
       orgUnitPath: z.string().startsWith("/").optional(),
       groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/, "a domain, such as example.com").optional(),
       groupEmail: z.function().optional(),
+      tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
+    })
+    .optional(),
+  entra: z
+    .strictObject({
+      tenantId: z.string().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "the tenant's id, a GUID (Entra admin center, Overview)"),
+      clientId: z.string().min(1),
+      clientSecret: secretText(),
       tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
     })
     .optional(),
@@ -84,13 +92,16 @@ const optionsSchema = z.strictObject({
   targets: z
     .array(
       targetSchema
-        .refine((t) => t.type === "google-workspace" || t.url !== undefined, { message: "url is required", path: ["url"] })
+        .refine((t) => t.type === "google-workspace" || t.type === "entra-id" || t.url !== undefined, { message: "url is required", path: ["url"] })
         .refine((t) => t.url === undefined || t.type === "webhook" || targetUrl(t.url), { message: "must be an https URL (http only for localhost), without credentials, query or fragment", path: ["url"] })
         .refine((t) => t.url === undefined || t.type !== "webhook" || targetUrl(t.url, { query: true }), { message: "must be an https URL (http only for localhost), without credentials or fragment", path: ["url"] })
-        .refine((t) => t.type === "google-workspace" || t.type === "webhook" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
+        .refine((t) => t.type === "google-workspace" || t.type === "entra-id" || t.type === "webhook" || (t.token === undefined) !== (t.auth === undefined), "give either token or auth")
         .refine((t) => t.type !== "webhook" || (t.secret !== undefined && t.token === undefined && t.auth === undefined && t.google === undefined), "a webhook target takes url and secret, not token, auth or google")
         .refine((t) => t.type === "webhook" || t.secret === undefined, "secret is for webhook targets")
         .refine((t) => t.type !== "google-workspace" || (t.google !== undefined && t.token === undefined && t.auth === undefined), "a google-workspace target takes google, not token or auth")
+        .refine((t) => t.type !== "entra-id" || (t.entra !== undefined && t.token === undefined && t.auth === undefined && t.google === undefined), "an entra-id target takes entra, not token, auth or google")
+        .refine((t) => t.type === "entra-id" || t.entra === undefined, { message: "entra is for entra-id targets", path: ["entra"] })
+        .refine((t) => t.type !== "entra-id" || (!t.groups && !t.teamGroups && !t.roleGroups), "groups aren't supported for entra-id targets yet (groups, teamGroups, roleGroups)")
         .refine((t) => t.type === undefined || t.type === "scim" || t.update === undefined, { message: "update is for scim targets only", path: ["update"] })
         .refine((t) => t.type === undefined || t.type === "scim" || t.compat === undefined, { message: "compat is for scim targets only", path: ["compat"] }),
     )

@@ -1,6 +1,6 @@
 # better-auth-scim-provisioning
 
-Keep your users' accounts in step at the apps they use, straight from your [Better Auth](https://www.better-auth.com) server: **created before their first sign-in, updated when they change, switched off when they leave.** Over **SCIM 2.0**, **Google Workspace**'s Directory API, or **signed webhooks**. Runs on **Cloudflare Workers** and **Node.js**.
+Keep your users' accounts in step at the apps they use, straight from your [Better Auth](https://www.better-auth.com) server: **created before their first sign-in, updated when they change, switched off when they leave.** Over **SCIM 2.0**, **Google Workspace**'s Directory API, **Microsoft Entra ID** through Microsoft Graph, or **signed webhooks**. Runs on **Cloudflare Workers** and **Node.js**.
 
 [![CI](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml/badge.svg)](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/better-auth-scim-provisioning)](https://www.npmjs.com/package/better-auth-scim-provisioning)
@@ -20,12 +20,12 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 
 ## ✨ Features
 
-- 🎯 **Three kinds of target**: any **SCIM 2.0** app (Cloudflare Access, AWS IAM Identity Center, Slack, Atlassian, GitHub Enterprise, Zoom…), **Google Workspace** through its Directory API, and **signed webhooks** for your own apps or automation tools (Zapier, Make, n8n).
-- 🪪 **Enterprise User attributes**: employee number, cost center, organization, division, department and manager, from your users' fields, as SCIM's Enterprise User extension (and Google Workspace's own fields), the manager kept in step as people join and leave.
+- 🎯 **Four kinds of target**: any **SCIM 2.0** app (Cloudflare Access, AWS IAM Identity Center, Slack, Atlassian, GitHub Enterprise, Zoom…), **Google Workspace** through its Directory API, **Microsoft Entra ID** (Microsoft 365) through Microsoft Graph, and **signed webhooks** for your own apps or automation tools (Zapier, Make, n8n).
+- 🪪 **Enterprise User attributes**: employee number, cost center, organization, division, department and manager, from your users' fields, as SCIM's Enterprise User extension (and Google Workspace's and Entra ID's own fields), the manager kept in step as people join and leave.
 - 👥 **Groups**: organizations, teams and roles in your app become groups at the app (SCIM groups or Google Groups), with the provisioned members, kept in sync as people join, leave and change roles.
 - 🚪 **Real offboarding**: a ban or a delete deactivates (or deletes) the account at every app at once, not when a session expires; a timed ban is lifted on time by the scheduled run. In the field test, Cloudflare Access revoked a live session within 35 seconds.
 - 📬 **Delivery that holds up**: a database outbox with leases, retries with backoff (honouring `Retry-After`), concurrency, and a scheduled run. Once queued, a change isn't lost to an outage, a timeout or a reply that never arrived, and a 404 counts as "gone" only when the app's list agrees.
-- 🤝 **Careful adoption**: an account that already exists at the app is taken over only where you allow it (`adopt`, off by default for Google Workspace), only if it's nobody's and its userName is the user's verified email, and it's then only ever deactivated, never deleted. Never handed to someone who reused a deleted user's email.
+- 🤝 **Careful adoption**: an account that already exists at the app is taken over only where you allow it (`adopt`, off by default for Google Workspace and Entra ID), only if it's nobody's and its userName is the user's verified email, and it's then only ever deactivated, never deleted. Never handed to someone who reused a deleted user's email.
 - 🧩 **Profiles for real apps**: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`, each built from the app's documented quirks (no PUT on groups, batches of 100, groups that can't be renamed…).
 - 🔑 **Every sign-in method apps use**: bearer tokens, Basic, an API-key header, OAuth 2.0 client credentials, and Google service accounts with domain-wide delegation.
 - 🏢 **Organizations' own targets**: with `registry`, each organization connects its own SCIM app, Google Workspace or webhook at runtime, through an API its owners and admins use, with credentials encrypted and never shown again, and only its own members sent there.
@@ -47,7 +47,7 @@ The live tests run by hand with real credentials, not in CI. Webhooks have no th
 
 ## Contents
 
-[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Better Auth apps, and ID-JAG](#better-auth-apps-and-id-jag) · [Google Workspace](#google-workspace) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Organizations' own targets](#organizations-own-targets) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
+[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Better Auth apps, and ID-JAG](#better-auth-apps-and-id-jag) · [Google Workspace](#google-workspace) · [Microsoft Entra ID](#microsoft-entra-id) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Organizations' own targets](#organizations-own-targets) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
 
 ## Install
 
@@ -119,15 +119,15 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | Option | Default | |
 |---|---|---|
 | `id` | required | Stable id: letters, digits, `-`, `_`. Jobs, links and logs use it. |
-| `type` | `"scim"` | `"google-workspace"` for Google Workspace's Directory API (see [Google Workspace](#google-workspace)), or `"webhook"` for signed webhooks (see [Webhooks](#webhooks)). |
-| `url` | required (not for Google Workspace) | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
+| `type` | `"scim"` | `"google-workspace"` for Google Workspace's Directory API (see [Google Workspace](#google-workspace)), `"entra-id"` for Microsoft Entra ID through Microsoft Graph (see [Microsoft Entra ID](#microsoft-entra-id)), or `"webhook"` for signed webhooks (see [Webhooks](#webhooks)). |
+| `url` | required (not for Google Workspace or Entra ID) | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
 | `token` | | Its bearer token. Or `auth`, for anything else: one of the two is required. |
 | `auth` | | `{ type: "bearer", token }` (the same as `token`; give one or the other), `{ type: "basic", username, password }`, `{ type: "header", name, value }` (an API key), or `{ type: "oauth2", tokenUrl, clientId, clientSecret, scope?, clientAuth?, params? }` (client credentials; tokens cached and renewed before they expire). |
 | `update` | `"put"` | SCIM targets: `"put"` replaces the whole user at the app; `"patch"` changes only the attributes we send, keeping what an admin set there. |
 | `organizationId` | | Only members of this organization (Better Auth's organization plugin). |
 | `include` | | `(user) => boolean`: who else to leave out. Only `true` includes; anything else deprovisions a provisioned user at their next delivery. |
 | `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. An account that already exists at the app is still only taken over for a verified email. |
-| `adopt` | `true` (`false` for Google Workspace) | Take over an account made elsewhere when it's nobody's, active, and its userName is the user's verified email. It's then never deleted, only deactivated. |
+| `adopt` | `true` (`false` for Google Workspace and Entra ID) | Take over an account made elsewhere when it's nobody's, active, and its userName is the user's verified email. It's then never deleted, only deactivated. |
 | `mapUser` | see below | `(user) => ScimUser`: what's sent. |
 | `groups` | `false` | Organizations as groups at the app: `true`, or `(organization) => boolean` to choose which (see [Groups](#groups)). |
 | `groupName` | the organization's name | `(organization) => string`: the group's name. |
@@ -223,6 +223,7 @@ betterAuth({
 - **`true`** reads `employeeNumber`, `costCenter`, `organization`, `division` and `department`, and the manager's user id from `managerId`, for those fields your users have: an attribute without a field is neither sent nor cleared. **A map** names your fields, and only those attributes are sent; a field it names that your users don't have stops the plugin at startup. A number is written out as text.
 - **An empty field clears the attribute at the app**: a PUT leaves it out, and a PATCH (`update: "patch"`) removes it by path. An app that refuses to remove an attribute it doesn't have (400) gets the change again without the removes, then each remove on its own. A user with no values at all isn't sent the extension.
 - **The manager** is sent as their id at that app (SCIM's `manager.value`), and only once they're provisioned and active there. Whenever that changes (their account appears, goes, is made again under a new id, or at Google gets a new address), the users reporting to them are queued again, at an organization's target only its members, so their manager follows at the next scheduled run. That's a job of its own, retried if it fails. A user named as their own manager has none. Index the manager field: each such change looks up the reports by it.
+- **Entra ID** keeps these in its own fields: the employee number as `employeeId` (Entra allows at most 16 characters), the department as `department`, the organization as `companyName`, the cost center and division in `employeeOrgData` (keeping the other one when only one is read), and the manager as the user's `manager`.
 - **Google Workspace** keeps these differently: the organization, department, cost center and division (as `description`) go in the user's primary organization, keeping its other fields such as an admin's job title. The employee number becomes the `organization` external id, and the manager the `manager` relation, by their address; other relations are kept. Only the attributes the target reads are touched: with a map of a few, what an admin set for the others stays.
 - **Webhooks** get the same object as SCIM, with the manager's id at the receiver: their `externalId` as the target sends it (the user id, unless `mapUser` changes it).
 - A `mapUser` that sets the extension itself is sent as it is.
@@ -261,7 +262,7 @@ Most apps grant access by group: assign the group to the app or role there (AWS 
 - **Leases.** A job is claimed before delivery, so two workers don't deliver it at once; a group delivery renews its claim while it runs. A change that arrives during a delivery goes out straight after it.
 - **Retries.** 429 (honouring `Retry-After`, at every kind of target), 408, 5xx, timeouts, network errors, 401/403 (an expired token is the host's problem, not the user's), and a wrong target URL (a 404 for everything, or a redirect) are retried with backoff, for as long as it takes. The job's last error says which: "check the target's token", "check the target's url". Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
 - **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off. At apps that don't keep `externalId`, we can't always tell that account from one made by hand in the meantime: then the job fails with a message instead of guessing, and the pending record is kept, so a later leave fails loudly too rather than passing for done.
-- **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, active, the user's email verified, the account's userName that same email, and the target allowing it (`adopt`, off by default for Google Workspace). An account taken over is marked so, and is only ever deactivated, never deleted, even with `deprovision: "delete"`. With a custom `mapUser` userName (an employee id, a handle), accounts made by hand at the app are therefore never taken over: give them our `externalId` at the app, or remove them, first. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
+- **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, active, the user's email verified, the account's userName that same email, and the target allowing it (`adopt`, off by default for Google Workspace and Entra ID). An account taken over is marked so, and is only ever deactivated, never deleted, even with `deprovision: "delete"`. With a custom `mapUser` userName (an employee id, a handle), accounts made by hand at the app are therefore never taken over: give them our `externalId` at the app, or remove them, first. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
 - **A 404 is checked, not believed.** A user is taken as gone at the app only when the app's own list agrees. A wrong URL answers 404 for everything, and believing it would mark people deactivated here while they stay active there.
 - **Reconcile** covers every user, and every user still linked at a target, so deleted users whose deprovisioning was lost are cleaned up too.
 - **Deleted users' links are kept** (with `deprovision: "deactivate"`): the account stays at the app, deactivated, and its link (with the userName, usually the email) stays here, so switching to `delete` later can still remove it. Every reconcile looks at them again. If you need that data gone, delete those rows from `scimProvisioningLink`.
@@ -288,9 +289,10 @@ scimProvisioning({
 | GitHub Enterprise Managed Users | `githubEnterprise` | documented | GitHub's DELETE permanently suspends an account, so this only deactivates, and refuses `deprovision: "delete"`. |
 | Better Auth apps (`@better-auth/scim`) | | tested against the real package | Nothing differs. See [Better Auth apps](#better-auth-apps-and-id-jag), which also covers ID-JAG. |
 | Google Workspace | `type: "google-workspace"` | verified live | Not SCIM: see [Google Workspace](#google-workspace). |
+| Microsoft Entra ID (Microsoft 365) | `type: "entra-id"` | tested against a model of Graph, built on live probes | Not SCIM: see [Microsoft Entra ID](#microsoft-entra-id). Users only, for now. |
 | Anything else | `type: "webhook"` | | Signed webhooks to your own code or an automation platform: see [Webhooks](#webhooks). |
 
-"Verified live" means tested against the app itself. "Documented" means built from the app's documentation and tested against a model of it. Run `check` against it first (below), and tell us what you find.
+"Verified live" means tested against the app itself. For Entra ID, Graph's behaviour (lookups, conflicts, the recycle bin, its lag) and a federated sign-in of a user created this way were tested live in a test tenant, and the plugin is tested against a model of that; its own live test is to come. "Documented" means built from the app's documentation and tested against a model of it. Run `check` against it first (below), and tell us what you find.
 
 - **Cloudflare Access.** Zero Trust → Integrations → Identity providers → your identity provider → turn on **Enable SCIM** and **Enable user deprovisioning**, **save**, then copy the SCIM endpoint and secret.
   - The secret only works once the provider is saved: if you copied it before saving, regenerate it, copy it, and save.
@@ -380,6 +382,41 @@ Google takes a while to settle, and the plugin waits it out rather than failing:
 - a group made seconds ago can answer 404 to its first members, and say "already exists" while a read of it still finds nothing.
 
 Google sometimes suspends new accounts itself (`suspensionReason` `WEB_LOGIN_REQUIRED`, for example after many accounts are created in a short time), until the user signs in once or an admin lifts it in the Admin console. The API can't lift that, so the plugin leaves it as Google has it and still applies every other change. The plugin lifts only a suspension it made itself, when the user is back (unbanned, or included again); an admin's own suspension, say during an incident, is left alone by every other change.
+
+### Microsoft Entra ID
+
+Entra ID, Microsoft 365's directory, doesn't take SCIM from outside, so it's its own kind of target, through Microsoft Graph: users, for now (groups aren't supported yet). Each user's `onPremisesImmutableId` is our user id, which is what Entra matches a federated sign-in's NameID against. So with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) as a domain's SAML identity provider (its NameID the user id, as it is by default), a user provisioned here can sign in to Microsoft 365 straight away, with no password at Microsoft. That was tested live: a user created through Graph this way, without a password, signed in to My Apps through the identity provider on the first try.
+
+```ts
+{
+  id: "entra",
+  type: "entra-id",
+  entra: {
+    tenantId: "00000000-0000-0000-0000-000000000000", // Entra admin center → Overview → Tenant ID
+    clientId: process.env.ENTRA_CLIENT_ID!,           // the app registration's Application (client) ID
+    clientSecret: process.env.ENTRA_CLIENT_SECRET!,   // one of its client secrets
+  },
+}
+```
+
+Setting it up:
+1. In the Entra admin center, App registrations → **New registration**: single tenant, no redirect URI.
+2. API permissions → Add a permission → Microsoft Graph → **Application permissions** → `User.ReadWrite.All`, then **Grant admin consent**.
+3. Certificates & secrets → **New client secret**, and copy its value (it's shown once). Note when it expires: after that, deliveries are retried until you give a new one.
+4. Users' emails must be on domains verified in the tenant. For sign-in through your identity provider, federate the domain to it. A user on a domain that isn't federated gets a random password that nobody knows.
+
+How it maps:
+- the email (`userName`) becomes `userPrincipalName`, and its local part the `mailNickname`; the names map to `displayName`, `givenName` and `surname`;
+- our user id is `onPremisesImmutableId`. Entra won't change it on a federated user, so it's set only when an account is created or taken over;
+- deprovisioning disables the account (`accountEnabled: false`) and revokes its sessions, so a signed-in user is out straight away rather than when their tokens expire;
+- with `deprovision: "delete"`, the user goes to Entra's recycle bin for 30 days and is never purged by the plugin. A user back within that time is restored: the same account, with their mailbox, as it was;
+- the account is enabled again only if the plugin disabled it (the user is unbanned, or included again). An admin who disabled it, say during an incident, isn't overruled by a rename.
+
+Adoption is off by default, as for Google Workspace: an account with the user's email made elsewhere could be someone's real mailbox, and taking it over gives it our immutableId, which changes how that person signs in. With `adopt: true`, it follows the same rules as SCIM, and a disabled account isn't taken over until an admin enables it.
+
+Graph's replicas take seconds to agree after a write (found live), and the plugin waits it out rather than failing:
+- a user created seconds ago can answer 404 by id, though the lookup by immutableId already finds them: retried;
+- a deleted user keeps their immutableId in the recycle bin, so creating them anew is refused. The plugin restores them instead. If someone else has their old userPrincipalName by then, Graph refuses the restore, and the job fails with Graph's reason.
 
 ### Webhooks
 
@@ -530,7 +567,7 @@ It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. CI runs [the 
 
 ## Not yet
 
-- **Microsoft 365 / Entra ID** as a target (through Microsoft Graph), the other big suite after Google Workspace.
+- **Groups at Entra ID**, and Entra ID targets in organizations' own targets (`registry`). Entra ID targets are users only, and set in code, for now.
 - **Live verification of the Slack, Atlassian and GitHub Enterprise profiles.** They're built from each app's documentation and tested against a model.
 
 ## Development

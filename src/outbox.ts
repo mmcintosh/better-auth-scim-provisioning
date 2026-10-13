@@ -9,6 +9,7 @@
 // A link is written before an account is created at the app (remoteId empty: "pending"), so an
 // account whose create reply was lost can still be found, and undone, later.
 import { defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, enterpriseValues, isBanned } from "./mapping";
+import { entraIdClient } from "./entra";
 import { googleWorkspaceClient } from "./google";
 import { webhookClient } from "./webhook";
 import { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, type ScimEnterpriseUser, ScimError, type ScimUser, scimClient } from "./scim-client";
@@ -147,12 +148,14 @@ export type Outcome = "done" | "retry" | "failed" | "busy";
 
 const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
 
-/** The client for a target: SCIM, or Google Workspace's Directory API behind the same operations. */
+/** The client for a target: SCIM, or Google Workspace's Directory API or Microsoft Graph behind the same operations. */
 /** `change` names the change being delivered (its job and version), for webhook event ids. */
 export const clientFor = (target: Target, change?: string) =>
   target.type === "google-workspace"
     ? googleWorkspaceClient(target)
-    : target.type === "webhook"
+    : target.type === "entra-id"
+      ? entraIdClient(target)
+      : target.type === "webhook"
       ? webhookClient(target, change)
       : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
 
@@ -359,13 +362,13 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const { scim, clears } = await withEnterprise(target, user as ProvisionedUser, (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
       const externalId = scim.externalId ?? null;
       // Back after the plugin deactivated them (a ban, a removal): only then is a Google suspension
-      // lifted, never an admin's own or one of Google's.
+      // (or a disabled Entra account) lifted, never an admin's own or one of Google's.
       const reactivate = !!link?.remoteId && !link.active;
       /** Update the account: PUT, or PATCH (with the enterprise attributes cleared since). */
       const update = (id: string) =>
         target.update === "patch"
           ? (client as ReturnType<typeof scimClient>).patch(id, scim, clears)
-          : target.type === "google-workspace"
+          : target.type === "google-workspace" || target.type === "entra-id"
             ? (client as ReturnType<typeof googleWorkspaceClient>).replace(id, scim, { reactivate })
             : client.replace(id, scim);
       if (link?.remoteId) {
@@ -425,8 +428,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           throw new ScimError(`${scim.userName}: ${why}; resolve it at the app`, 409, false);
         };
         if (!found) {
-          // Google's directory takes a moment to show a new account: retried, with the link kept.
-          if (target.type === "google-workspace") throw new ScimError(`${scim.userName}: Google says the account exists but can't find it yet; retrying`, 409, true);
+          // Google's directory (and Graph's replicas) take a moment to show a new account: retried, with the link kept.
+          if (target.type === "google-workspace" || target.type === "entra-id") throw new ScimError(`${scim.userName}: ${target.type === "entra-id" ? "Microsoft" : "Google"} says the account exists but can't find it yet; retrying`, 409, true);
           return refuse("the app says it exists but can't find it");
         }
         const ours = found.externalId !== null && found.externalId === externalId;
@@ -441,16 +444,20 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // who the account was made for.
           if ((user as ProvisionedUser).emailVerified !== true) return refuse("an account with this userName exists at the app, and the user's email is not verified");
           // Taking over accounts made elsewhere is a choice per target: on by default, except at
-          // Google Workspace, where it could reach someone's real mailbox.
-          if (!(target.adopt ?? target.type !== "google-workspace"))
-            return refuse(`an account with this userName already exists at the app, and this target doesn't take over existing accounts (adopt: ${target.type === "google-workspace" ? "false, the default for Google Workspace" : "false"})`);
+          // Google Workspace and Entra ID, where it could reach someone's real mailbox (and at
+          // Entra, setting the immutableId changes how they sign in).
+          const mailbox = target.type === "google-workspace" ? "Google Workspace" : target.type === "entra-id" ? "Entra ID" : null;
+          if (!(target.adopt ?? !mailbox))
+            return refuse(`an account with this userName already exists at the app, and this target doesn't take over existing accounts (adopt: ${mailbox ? `false, the default for ${mailbox}` : "false"})`);
           // Taking it over would switch it back on, with whatever it held (at Google, someone's
           // mailbox): an admin decides that.
           if (found.active === false)
             return refuse(
               target.type === "google-workspace"
                 ? "the Workspace account is suspended; unsuspend it at Google first if it should be taken over"
-                : "the app's account is deactivated; reactivate it at the app first if it should be taken over",
+                : target.type === "entra-id"
+                  ? "the Entra account is disabled; enable it in Entra first if it should be taken over"
+                  : "the app's account is deactivated; reactivate it at the app first if it should be taken over",
             );
           if (scim.userName.toLowerCase() !== (user as ProvisionedUser).email.toLowerCase())
             return refuse("an account with this userName exists at the app, and its userName isn't the user's verified email, so it isn't taken over");
