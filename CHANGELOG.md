@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-13
+
+Requires Better Auth 1.7.7 or later, which fixes a critical Magic Link account takeover; no other changes.
+
 ### Security
 
 - **Better Auth 1.7.7 or later is now required** (the peer range is `>=1.7.7 <1.8.0`). Better Auth 1.7.7 fixes a critical Magic Link account takeover ([GHSA-965c-763c-88jm](https://github.com/better-auth/better-auth/security/advisories/GHSA-965c-763c-88jm)). This plugin doesn't use Magic Link, but the app it's installed in may, so the plugin no longer accepts the vulnerable versions. Upgrade Better Auth along with this release; see the advisory for apps that share verification storage between servers.
