@@ -123,7 +123,13 @@ describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, ()
     const prefix = `scim-live-${stamp}-`;
     const named = (await graph("GET", `/users?$filter=${encodeURIComponent(`startswith(userPrincipalName,'${prefix}')`)}&$select=id`)).json?.value ?? [];
     const live = [...new Set([...made, ...named.map((u: { id: string }) => u.id)])];
-    for (const id of live) await graph("DELETE", `/users/${id}`);
+    // A user made seconds ago can 404 by id (Graph's lag): asked again for a while.
+    for (const id of live) {
+      for (let i = 0; i < 8 && (await graph("DELETE", `/users/${id}`)).status === 404; i++) {
+        if ((await graph("GET", `/directory/deletedItems/${id}?$select=id`)).status === 200) break;
+        await sleep(5000);
+      }
+    }
     await sleep(20_000);
     let purged = 0;
     for (let round = 0; round < 3; round++) {
@@ -206,7 +212,9 @@ describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, ()
     expect(await h.jobs()).toEqual([]);
     const id = (await h.remoteOf(u.id))!;
     const bossId = (await h.remoteOf(boss.id))!;
-    const r = await read(id, (x) => x?.department === "Engines");
+    // Graph applies a change in parts (two audit entries), and a replica can show one part before
+    // the other (found live): wait for all of it.
+    const r = await read(id, (x) => x?.department === "Engines" && x?.employeeOrgData?.costCenter === "CC9" && x?.employeeOrgData?.division === "R&D" && x?.employeeId === "E-1");
     console.log("3 enterprise", JSON.stringify(r));
     expect(r).toMatchObject({ employeeId: "E-1", department: "Engines", companyName: "Acme", employeeOrgData: { costCenter: "CC9", division: "R&D" } });
     expect(await managerOf(id, bossId)).toBe(bossId);
@@ -214,7 +222,7 @@ describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, ()
     await h.ctx.internalAdapter.updateUser(u.id, { division: null, department: null, managerId: null });
     await h.settle();
     expect(await h.jobs()).toEqual([]);
-    expect(await read(id, (x) => x?.department === null)).toMatchObject({ department: null, employeeOrgData: { costCenter: "CC9", division: null } });
+    expect(await read(id, (x) => x?.department === null && x?.employeeOrgData?.costCenter === "CC9" && x?.employeeOrgData?.division === null)).toMatchObject({ department: null, employeeOrgData: { costCenter: "CC9", division: null } });
     expect(await managerOf(id, null)).toBeNull();
   });
 
