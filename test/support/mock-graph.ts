@@ -8,6 +8,9 @@
 // `User_<id>`), a deleted user kept in the bin under `<id without hyphens><old UPN>` until
 // restored (back under its UPN) or purged, a POST without a body answered 411, and "not found" as
 // Graph's JSON error. Anything else gets a plain 404.
+// `lose`: as found live (a disable three seconds after an enable, answered 204 and never applied),
+// the next `lose.accountEnabled` changes of accountEnabled and `lose.delete` deletes are answered
+// as done and dropped.
 // `deleteLag`: as found live, a user deleted moments ago still reads as live by id (GET 200) though
 // changes to it 404, for the next `deleteLag` reads.
 // `lag`: as found live, a user created moments ago isn't there by id or userPrincipalName yet
@@ -47,6 +50,8 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
   const revoked: string[] = [];
   /** Users deleted moments ago that still read as live (by id), for this many more reads. */
   const ghosts = new Map<string, number>();
+  /** Writes to answer as done and drop, like Graph's replicas sometimes do. */
+  const lose = { accountEnabled: 0, delete: 0 };
   const requests: { method: string; path: string; body?: unknown }[] = [];
   const tokenRequests: { body: URLSearchParams }[] = [];
   let next = 1;
@@ -204,10 +209,19 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
       if (m[2]) return gerror(405, "Request_BadRequest", "method not allowed");
       if (method === "GET") return json(200, select(user, q));
       if (method === "PATCH") {
-        const refused = apply(user, body ?? {});
+        const b = { ...(body ?? {}) };
+        if ("accountEnabled" in b && lose.accountEnabled > 0) {
+          lose.accountEnabled--;
+          delete b.accountEnabled;
+        }
+        const refused = apply(user, b);
         return refused ?? new Response(null, { status: 204 });
       }
       if (method === "DELETE") {
+        if (lose.delete > 0) {
+          lose.delete--;
+          return new Response(null, { status: 204 });
+        }
         users.delete(user.id);
         user.binnedUpn = user.userPrincipalName;
         user.userPrincipalName = `${user.id.replace(/-/g, "")}${user.userPrincipalName}`;
@@ -219,5 +233,5 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
     return new Response("not found", { status: 404 });
   };
 
-  return { url, tokenUrl, tenantId, clientId, clientSecret, users, bin, revoked, requests, tokenRequests, fetch: handler };
+  return { url, tokenUrl, tenantId, clientId, clientSecret, users, bin, revoked, lose, requests, tokenRequests, fetch: handler };
 }

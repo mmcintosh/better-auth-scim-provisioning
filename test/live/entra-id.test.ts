@@ -4,6 +4,7 @@
 // Enterprise User attributes with a manager. Everything is read back from Graph, and everything
 // the test made is deleted and purged at the end. Graph's replicas lag for seconds after a write,
 // so reads are retried until they agree.
+// A deprovisioning is followed by a confirm check a minute later, which this waits for: about 8 minutes in all.
 // Runs only with ENTRA_TENANT_ID, ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET and ENTRA_TEST_DOMAIN (a
 // verified domain of the tenant, such as its <name>.onmicrosoft.com) in .env.live: an app
 // registration with the Graph application permission User.ReadWrite.All, admin consented. With
@@ -25,7 +26,7 @@ const configured = !!(tenantId && clientId && clientSecret && domain);
 const G = "https://graph.microsoft.com/v1.0";
 const SELECT = "id,userPrincipalName,displayName,givenName,surname,accountEnabled,onPremisesImmutableId,employeeId,department,companyName,employeeOrgData";
 
-describe.skipIf(!configured)("live Microsoft Entra ID", () => {
+describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, () => {
   const stamp = Date.now().toString(36);
   const email = (n: string, d = domain) => `scim-live-${stamp}-${n}@${d}`;
   const pending = new Set<Promise<unknown>>();
@@ -92,13 +93,17 @@ describe.skipIf(!configured)("live Microsoft Entra ID", () => {
     const ctx = await auth.$context;
     await (await getMigrations(ctx.options)).runMigrations();
     const jobs = () => ctx.adapter.findMany<Record<string, any>>({ model: "scimProvisioningJob" });
-    /** Every background delivery, then the scheduled run until nothing is due (Graph's lag is retried). */
+    /**
+     * Every background delivery, then the scheduled run until nothing is left: retries (Graph's lag)
+     * are brought forward, but the confirm checks a deprovisioning queues wait their real minute,
+     * so they see Graph as it has settled.
+     */
     const settle = async () => {
-      for (const until = Date.now() + 300_000; Date.now() < until; ) {
+      for (const until = Date.now() + 360_000; Date.now() < until; ) {
         while (pending.size) await Promise.allSettled([...pending]);
         if (!(await jobs()).some((j) => !j.failed)) break;
         await sleep(3000);
-        await ctx.adapter.updateMany({ model: "scimProvisioningJob", where: [{ field: "failed", value: false }], update: { nextAttemptAt: new Date(0) } });
+        await ctx.adapter.updateMany({ model: "scimProvisioningJob", where: [{ field: "failed", value: false }, { field: "nextAttemptAt", value: new Date(Date.now() + 30_000), operator: "lt" }], update: { nextAttemptAt: new Date(0) } });
         await auth.api.scimProvisioningRun({ body: {} });
       }
     };

@@ -11,7 +11,18 @@ import { type Adapter, outbox } from "../src/outbox";
 import { createHost } from "./support/host";
 
 const E = { id: "entra", type: "entra-id" as const };
-const atGraph = (h: Awaited<ReturnType<typeof createHost>>) => [...h.graph.users.values()];
+type Host = Awaited<ReturnType<typeof createHost>>;
+const atGraph = (h: Host) => [...h.graph.users.values()];
+/** The user deliveries queued (not the "confirm" checks that follow a deprovisioning). */
+const deliveries = async (h: Host) => (await h.jobs()).filter((j) => !j.kind);
+/** Everything queued, run now (the confirm checks included), until nothing is left. */
+async function drain(h: Host) {
+  for (let i = 0; i < 6 && (await h.jobs()).some((j) => !j.failed); i++) {
+    h.db.prepare('UPDATE "scimProvisioningJob" SET "nextAttemptAt" = 0').run();
+    await h.auth.api.scimProvisioningRun({ body: {} });
+    await h.settle();
+  }
+}
 
 describe("Entra ID", () => {
   it("a user's life: created with our id as immutableId and no password, renamed, disabled with sessions revoked, enabled, disabled when deleted", async () => {
@@ -43,7 +54,11 @@ describe("Entra ID", () => {
     await h.settle();
     expect(atGraph(h)[0]!.accountEnabled).toBe(false);
     expect(h.graph.revoked).toEqual([id, id]);
+    // A check is queued for a minute later, that Graph has the disable; it finds it so, and ends.
+    expect(await h.jobs()).toEqual([expect.objectContaining({ kind: "confirm", userId: u.id })]);
+    await drain(h);
     expect(await h.jobs()).toEqual([]);
+    expect(h.graph.revoked).toEqual([id, id]);
   });
 
   it("a managed (cloud) domain gets a random password nobody knows", async () => {
@@ -79,7 +94,10 @@ describe("Entra ID", () => {
     expect(h.graph.bin.size).toBe(0);
     expect(atGraph(h)).toEqual([expect.objectContaining({ id, userPrincipalName: u.email, onPremisesImmutableId: u.id, displayName: "Ada Byron", accountEnabled: true })]);
     expect(await h.links()).toEqual([expect.objectContaining({ remoteId: id, active: true })]);
+    expect(await deliveries(h)).toEqual([]);
+    await drain(h);
     expect(await h.jobs()).toEqual([]);
+    expect(atGraph(h)).toEqual([expect.objectContaining({ id, accountEnabled: true })]);
   });
 
   it("back moments after a delete, while Graph still reads the account as live: retried, then restored from the bin", async () => {
@@ -90,12 +108,8 @@ describe("Entra ID", () => {
     await h.settle();
     await h.ctx.internalAdapter.updateUser(u.id, { banned: false, name: "Ada Byron" });
     await h.settle();
-    expect(await h.jobs()).toEqual([expect.objectContaining({ userId: u.id, failed: false, lastError: expect.stringContaining("on its way to the recycle bin") })]);
-    for (let i = 0; i < 5 && (await h.jobs()).length; i++) {
-      h.db.prepare('UPDATE "scimProvisioningJob" SET "nextAttemptAt" = 0').run();
-      await h.auth.api.scimProvisioningRun({ body: {} });
-      await h.settle();
-    }
+    expect(await deliveries(h)).toEqual([expect.objectContaining({ userId: u.id, failed: false, lastError: expect.stringContaining("on its way to the recycle bin") })]);
+    await drain(h);
     expect(await h.jobs()).toEqual([]);
     expect(atGraph(h)).toEqual([expect.objectContaining({ id, userPrincipalName: u.email, displayName: "Ada Byron", accountEnabled: true })]);
   });
@@ -112,7 +126,62 @@ describe("Entra ID", () => {
     await h.settle();
     expect(h.graph.bin.has(id)).toBe(true);
     expect(h.graph.users.get("newcomer")).toMatchObject({ displayName: "Newcomer", onPremisesImmutableId: "theirs" });
-    expect(await h.jobs()).toEqual([expect.objectContaining({ userId: u.id, failed: true, lastError: expect.stringContaining("restore: 400 Another object with the same value for property userPrincipalName") })]);
+    expect(await deliveries(h)).toEqual([expect.objectContaining({ userId: u.id, failed: true, lastError: expect.stringContaining("restore: 400 Another object with the same value for property userPrincipalName") })]);
+  });
+
+  it("a disable Graph answers as done but drops (found live) is sent again by the check a minute later", async () => {
+    const h = await createHost({ targets: [E] });
+    const u = await h.user("Ada Lovelace");
+    h.graph.lose.accountEnabled = 1;
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    expect(atGraph(h)[0]!.accountEnabled).toBe(true); // dropped
+    expect(await h.links()).toEqual([expect.objectContaining({ active: false })]);
+    await drain(h);
+    expect(atGraph(h)[0]!.accountEnabled).toBe(false);
+    expect(await h.jobs()).toEqual([]);
+  });
+
+  it("a delete Graph answers as done but drops is sent again by the check a minute later", async () => {
+    const h = await createHost({ targets: [{ ...E, deprovision: "delete" }] });
+    const u = await h.user("Ada Lovelace");
+    const id = atGraph(h)[0]!.id;
+    h.graph.lose.delete = 1;
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    expect(atGraph(h)).toHaveLength(1); // dropped
+    await drain(h);
+    expect(atGraph(h)).toEqual([]);
+    expect(h.graph.bin.has(id)).toBe(true);
+    expect(await h.jobs()).toEqual([]);
+  });
+
+  it("an enable Graph drops is only logged by the check, never forced: an admin may have disabled the account", async () => {
+    const h = await createHost({ targets: [E] });
+    const u = await h.user("Ada Lovelace");
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    await drain(h);
+    h.graph.lose.accountEnabled = 1;
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: false });
+    await h.settle();
+    await drain(h);
+    expect(atGraph(h)[0]!.accountEnabled).toBe(false);
+    expect(await h.jobs()).toEqual([]);
+  });
+
+  it("deleted moments after its create: Graph's 404 is checked by immutableId and retried, never taken as gone", async () => {
+    const h = await createHost({ targets: [{ ...E, deprovision: "delete" }], graphLag: 2 });
+    const u = await h.user("Ada Lovelace");
+    const id = atGraph(h)[0]!.id;
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    expect(atGraph(h)).toHaveLength(1);
+    expect(await deliveries(h)).toEqual([expect.objectContaining({ failed: false, lastError: expect.stringContaining("still being created") })]);
+    await drain(h);
+    expect(atGraph(h)).toEqual([]);
+    expect(h.graph.bin.has(id)).toBe(true);
+    expect(await h.jobs()).toEqual([]);
   });
 
   it("a create whose reply was lost: found by its immutableId and linked, never made twice", async () => {

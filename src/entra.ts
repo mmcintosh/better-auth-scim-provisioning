@@ -41,7 +41,13 @@ export class GraphError extends ScimError {
 }
 
 /** The SCIM client's operations; `replace` also takes whether this is a reactivation (see update). */
-export type EntraIdClient = Omit<ReturnType<typeof scimClient>, "replace"> & { replace(id: string, user: ScimUser, o?: { reactivate?: boolean }): Promise<void> };
+export type EntraIdClient = Omit<ReturnType<typeof scimClient>, "replace"> & {
+  replace(id: string, user: ScimUser, o?: { reactivate?: boolean }): Promise<void>;
+  /** The user with this immutableId: shows at once after a write, while the userPrincipalName lags (found live). */
+  findByExternalId(externalId: string): Promise<{ id: string; externalId: string | null; active?: boolean } | null>;
+  /** Whether the account is enabled, or null if Graph says it doesn't exist. */
+  enabled(id: string): Promise<boolean | null>;
+};
 
 /** An OData string literal: quotes doubled. */
 const odata = (s: string) => `'${s.replace(/'/g, "''")}'`;
@@ -260,10 +266,18 @@ export function entraIdClient(target: Target): EntraIdClient {
     throw new ScimError("groups aren't supported for Entra ID targets yet", null, false);
   };
 
+  const found = (u: GraphUser | null) => (u?.id ? { id: u.id, externalId: u.onPremisesImmutableId || null, active: u.accountEnabled !== false } : null);
+
   return {
-    async findByUserName(userName: string) {
-      const u = await findBy("userPrincipalName", userName);
-      return u?.id ? { id: u.id, externalId: u.onPremisesImmutableId || null, active: u.accountEnabled !== false } : null;
+    findByUserName: async (userName: string) => found(await findBy("userPrincipalName", userName)),
+    findByExternalId: async (externalId: string) => found(await findBy("onPremisesImmutableId", externalId)),
+    async enabled(id: string) {
+      try {
+        return (await request("GET", `${path(id)}?$select=accountEnabled`))?.accountEnabled !== false;
+      } catch (e) {
+        if (notFoundAtGraph(e)) return null;
+        throw e;
+      }
     },
     async create(user: ScimUser) {
       const { body: extra, manager } = enterprise(user, null);
