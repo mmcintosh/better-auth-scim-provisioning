@@ -80,10 +80,12 @@ export const UNREADABLE_RETRY_MS = 15 * 60_000;
 /** Jobs one target may take of a scheduled run's batch, while others' are due: so one slow app can't hold up the rest. */
 const PER_TARGET_SHARE = 0.5;
 /**
- * How long after the plugin disables, deletes or re-enables an Entra ID user it checks that Graph
- * has it so: Graph's replicas can drop a write made seconds after another to the same user.
+ * How long after the plugin disables or deletes an Entra ID user its job comes back to check that
+ * Graph has it so: Graph's replicas can drop a write made seconds after another to the same user.
  */
 const CONFIRM_MS = 60_000;
+/** The earlier of two times to look again, either possibly absent. */
+const earliest = (a: Date | null, b: Date) => (a && a.getTime() < b.getTime() ? a : b);
 /** Users (or groups) a resync queues per step. */
 const RESYNC_PAGE = 100;
 
@@ -114,11 +116,10 @@ export type GroupRef = { kind: Exclude<Kind, "user">; id: string };
 /**
  * A job's kind: a delivery, or "resync", a marker that queues an organization's target's members,
  * accounts and groups a page at a time ("m:<member id>", "l:<user id>", "g:", "G:<group link key>"),
- * each step queueing the next, so a large organization isn't queued inside one request; "reports",
- * which queues a manager's reports; or "confirm" (Entra ID), which checks a minute after a
- * deprovisioning that Graph has it, and sends it again if not.
+ * each step queueing the next, so a large organization isn't queued inside one request; or
+ * "reports", which queues a manager's reports.
  */
-type JobKind = Kind | "resync" | "reports" | "confirm";
+type JobKind = Kind | "resync" | "reports";
 /**
  * A role group's id is "<organization id>:<role>", and roles are named by people: "Admin" and
  * "admin" can both exist. Keys must stay distinct under a case-insensitive collation (MySQL's), so
@@ -229,12 +230,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * asked for, unless `now` (reconcile, after fixing a target). A job deleted between the read and the bump (its delivery
    * just finished) is created again, so the change isn't lost.
    */
-  async function enqueue(targetId: string, userId: string, o: { now?: boolean; kind?: JobKind; at?: Date } = {}): Promise<void> {
+  async function enqueue(targetId: string, userId: string, o: { now?: boolean; kind?: JobKind } = {}): Promise<void> {
     const kind = o.kind ?? "user";
     const key = keyFor(kind, targetId, userId);
     for (let i = 0; i < 3; i++) {
       const now = new Date();
-      const fresh = { attempts: 0, nextAttemptAt: o.at ?? now, failed: false, lastError: null, lastStatus: null, updatedAt: now };
+      const fresh = { attempts: 0, nextAttemptAt: now, failed: false, lastError: null, lastStatus: null, updatedAt: now };
       const existing = (await jobsFor(key))[0];
       if (existing) {
         const waiting = !o.now && !existing.failed && existing.lastStatus === 429 && new Date(existing.nextAttemptAt).getTime() > now.getTime();
@@ -382,7 +383,6 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         try {
           await update(link.remoteId);
           await saveLink(target, userId, { remoteId: link.remoteId, userName: scim.userName, externalId, active: true });
-          if (reactivate) await confirmLater(target, userId);
           return null;
         } catch (e) {
           if (!notFound(e)) throw e;
@@ -419,8 +419,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         if (!(e instanceof ScimError)) throw e;
         if (e.status !== 409) {
           // Maybe created (no reply, or an error on the way back): keep the pending link to find
-          // it later. A refusal means nothing was created.
-          if (!e.retryable) await dropLink(key);
+          // it later. A refusal means nothing was created, except at Entra ID, where an error can
+          // follow the account's creation (its manager refused, say): the pending link is kept
+          // there, and found again by its immutableId, so a later ban or delete still reaches it.
+          if (!e.retryable && !("findByExternalId" in client)) await dropLink(key);
           throw e;
         }
         // Already there (provisioned by hand, or our own create whose reply was lost): adopt it,
@@ -487,18 +489,28 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (link && !link.remoteId) link = await settlePending(target, client, link);
     if (!link) return recheckAt;
     const externalId = link.externalId ?? null;
+    // At Entra ID, Graph can answer a write made seconds after another as done and drop it (found
+    // live): so after a disable or a delete, this job comes back a minute later and checks.
+    const entra = target.type === "entra-id";
+    const confirmAt = () => earliest(recheckAt, new Date(Date.now() + CONFIRM_MS));
     // An adopted account wasn't made by us: it's deactivated, never deleted, whatever the target says.
     if ((target.deprovision ?? "deactivate") === "delete" && !link.adopted) {
       // Inactive links too: a target switched from deactivate to delete.
+      let removed: string | null = link.remoteId;
       try {
         await client.remove(link.remoteId);
       } catch (e) {
         if (!notFound(e)) throw e;
-        const other = await stillThere(target, client, userId, link.userName, externalId, link.remoteId);
-        if (other) await client.remove(other);
+        removed = await stillThere(target, client, userId, link.userName, externalId, link.remoteId);
+        if (removed) await client.remove(removed);
+      }
+      // At Entra, the link stays (inactive) until a delete finds the account gone: the check a
+      // minute later deletes again, and its 404 (then not found by the immutableId) ends it.
+      if (entra && removed) {
+        await saveLink(target, userId, { remoteId: removed, userName: link.userName, externalId, active: false });
+        return confirmAt();
       }
       await dropLink(key);
-      await confirmLater(target, userId);
       return recheckAt;
     }
     if (link.active) {
@@ -514,51 +526,16 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         }
       }
       await saveLink(target, userId, { remoteId, userName: link.userName, externalId, active: false });
-      await confirmLater(target, userId);
+      return entra ? confirmAt() : recheckAt;
+    }
+    // Disabled already, by us: at Entra, is that how Graph has it? (The check a minute after the
+    // disable, and any later delivery while the user is out.)
+    if (entra && (await (client as unknown as EntraIdClient).enabled(link.remoteId))) {
+      log.warn(`[scim] ${target.id}: user ${userId}: Entra shows the account enabled, though it was disabled; disabling it again`);
+      await client.setActive(link.remoteId, false);
+      return confirmAt();
     }
     return recheckAt;
-  }
-
-  /** At Entra ID, a "confirm" job a minute from now (see confirmStep). */
-  async function confirmLater(target: Target, userId: string) {
-    if (target.type === "entra-id") await enqueue(target.id, userId, { kind: "confirm", at: new Date(Date.now() + CONFIRM_MS) });
-  }
-
-  /**
-   * A "confirm" job, at Entra ID: does Graph have what the plugin last did to this user? Graph's
-   * replicas can drop a write made seconds after another to the same user (found live: a disable
-   * three seconds after an enable was answered 204 and never applied). So a minute later:
-   * - a user the plugin disabled but Graph shows enabled is disabled again;
-   * - a user the plugin deleted but still live by their immutableId is deleted again;
-   * and each is checked again a minute after that. A user the plugin enabled but Graph shows
-   * disabled is only logged: an admin may have disabled them since, and that's theirs to decide.
-   * Waits while a delivery for the user is queued: that's newer, and it confirms itself.
-   */
-  async function confirmStep(target: Target, userId: string): Promise<Date | null> {
-    const later = new Date(Date.now() + CONFIRM_MS);
-    if ((await jobsFor(keyOf(target.id, userId))).some((j) => !j.failed)) return later;
-    const client = clientFor(target) as EntraIdClient;
-    const link = await findLink(keyOf(target.id, userId));
-    if (link?.remoteId) {
-      const enabled = await client.enabled(link.remoteId);
-      if (enabled === null) return null; // gone at Entra since
-      if (!link.active && enabled) {
-        log.warn(`[scim] ${target.id}: user ${userId}: Entra still shows the account enabled a minute after it was disabled; disabling it again`);
-        await client.setActive(link.remoteId, false);
-        return later;
-      }
-      if (link.active && !enabled) log.warn(`[scim] ${target.id}: user ${userId}: the account was enabled, but Entra shows it disabled; enable it in Entra unless an admin disabled it`);
-      return null;
-    }
-    if (link) return null; // a create still pending: its own delivery settles it
-    // Deleted: live again (or still) under our id, with nobody's link to it here?
-    const found = await client.findByExternalId(userId);
-    if (found && found.externalId === userId && !(await ownerOf(target, found.id))) {
-      log.warn(`[scim] ${target.id}: user ${userId}: Entra still shows the account a minute after it was deleted; deleting it again`);
-      await client.remove(found.id);
-      return later;
-    }
-    return null;
   }
 
   /**
@@ -667,7 +644,6 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const isGroup = current.kind === "group" || current.kind === "team" || current.kind === "role";
     const isResync = current.kind === "resync";
     const isReports = current.kind === "reports";
-    const isConfirm = current.kind === "confirm";
     // A group delivery has no fixed number of requests (members a page and a batch at a time; at
     // Google one per member changed): the hold is renewed while it runs, so no second worker
     // claims the job halfway through.
@@ -685,8 +661,6 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         ? await resyncStep(target, current.userId)
         : isReports
           ? await reportsStep(target, current.userId)
-          : isConfirm
-          ? await confirmStep(target, current.userId)
           : isGroup
           ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }, change)
           : await deliver(target, current.userId, change);
@@ -701,7 +675,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const wait = Math.max(err.retryAfterMs ?? 0, attempts >= maxAttempts ? MAX_DELAY_MS : backoff(attempts));
       const loud = giveUp || attempts === maxAttempts;
       (loud ? log.error : log.warn)(
-        `[scim] ${target.id}: ${isResync ? "queueing its organization at" : isReports ? "queueing the users reporting to" : isConfirm ? "confirming user" : isGroup ? `${current.kind === "group" ? "" : `${current.kind} `}group` : "user"} ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
+        `[scim] ${target.id}: ${isResync ? "queueing its organization at" : isReports ? "queueing the users reporting to" : isGroup ? `${current.kind === "group" ? "" : `${current.kind} `}group` : "user"} ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
       );
       const recorded = await adapter.updateMany({
         model: JOB_MODEL,
@@ -710,7 +684,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       });
       // Only a failure that was recorded: a job bumped during delivery goes out again at once,
       // so it hasn't failed. The host's hook gets a few seconds; this worker still holds the job.
-      if (loud && recorded > 0 && options.onFailure && !isResync && !isReports && !isConfirm) {
+      if (loud && recorded > 0 && options.onFailure && !isResync && !isReports) {
         const failure: DeliveryFailure = { targetId: target.id, kind: (isGroup ? current.kind : "user") as DeliveryFailure["kind"], subjectId: current.userId, error: err.message, status: err.status, attempts, failed: giveUp };
         try {
           await Promise.race([options.onFailure(failure), new Promise((_, reject) => setTimeout(() => reject(new Error(`no answer within ${ON_FAILURE_TIMEOUT_MS / 1000} s`)), ON_FAILURE_TIMEOUT_MS))]);
@@ -750,7 +724,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (settled === 0) await release(current.id);
     const outcome = (await nextFor(current.key, round)) ?? "done";
     // The user's groups follow: added once they exist at the app, left once they don't.
-    if (!isGroup && !isResync && !isReports && !isConfirm && hasGroups(target)) await syncGroupsOf(target, current.userId);
+    if (!isGroup && !isResync && !isReports && hasGroups(target)) await syncGroupsOf(target, current.userId);
     return outcome;
   }
 
@@ -1260,7 +1234,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const rows = (await adapter.findMany({ model: JOB_MODEL, where, sortBy: { field: "id", direction: "asc" }, limit: o.limit + 1 })) as Job[];
     const items = rows.slice(0, o.limit).map((j) => ({
       targetId: j.targetId,
-      kind: (j.kind ?? "user") as "user" | "group" | "team" | "role" | "resync" | "reports" | "confirm",
+      kind: (j.kind ?? "user") as "user" | "group" | "team" | "role" | "resync" | "reports",
       subjectId: j.userId,
       failed: j.failed,
       attempts: j.attempts,

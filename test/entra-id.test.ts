@@ -4,9 +4,10 @@
 // 404 checks as SCIM targets, and Graph's own ways: no password on a federated domain, the
 // recycle bin holding the immutableId, and replicas that lag for seconds after a write.
 import { describe, expect, it } from "vitest";
-import { scimProvisioning } from "../src";
+import { defaultScimUser, scimProvisioning } from "../src";
 import { forgetTokens } from "../src/credentials";
-import { mailNickname } from "../src/entra";
+import { entraIdClient, mailNickname } from "../src/entra";
+import { ScimError } from "../src/scim-client";
 import { type Adapter, outbox } from "../src/outbox";
 import { createHost } from "./support/host";
 
@@ -54,8 +55,9 @@ describe("Entra ID", () => {
     await h.settle();
     expect(atGraph(h)[0]!.accountEnabled).toBe(false);
     expect(h.graph.revoked).toEqual([id, id]);
-    // A check is queued for a minute later, that Graph has the disable; it finds it so, and ends.
-    expect(await h.jobs()).toEqual([expect.objectContaining({ kind: "confirm", userId: u.id })]);
+    // The job comes back a minute later to check that Graph has the disable; it finds it so, and ends.
+    expect(await h.jobs()).toEqual([expect.objectContaining({ userId: u.id, failed: false, nextAttemptAt: expect.any(Date) })]);
+    expect(new Date((await h.jobs())[0]!.nextAttemptAt as Date).getTime()).toBeGreaterThan(Date.now() + 50_000);
     await drain(h);
     expect(await h.jobs()).toEqual([]);
     expect(h.graph.revoked).toEqual([id, id]);
@@ -86,7 +88,11 @@ describe("Entra ID", () => {
     await h.settle();
     expect(atGraph(h)).toEqual([]);
     expect(h.graph.bin.get(id)).toMatchObject({ onPremisesImmutableId: u.id, userPrincipalName: `${id.replace(/-/g, "")}${u.email}` });
+    // Kept (inactive) until the check a minute later finds the account gone.
+    expect(await h.links()).toEqual([expect.objectContaining({ remoteId: id, active: false })]);
+    await drain(h);
     expect(await h.links()).toEqual([]);
+    expect(await h.jobs()).toEqual([]);
 
     // Back: the create meets the immutableId in the bin, and the account is restored and updated.
     await h.ctx.internalAdapter.updateUser(u.id, { banned: false, name: "Ada Byron" });
@@ -156,7 +162,7 @@ describe("Entra ID", () => {
     expect(await h.jobs()).toEqual([]);
   });
 
-  it("an enable Graph drops is only logged by the check, never forced: an admin may have disabled the account", async () => {
+  it("an enable Graph drops isn't forced later: an admin may have disabled the account (documented)", async () => {
     const h = await createHost({ targets: [E] });
     const u = await h.user("Ada Lovelace");
     await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
@@ -184,14 +190,84 @@ describe("Entra ID", () => {
     expect(await h.jobs()).toEqual([]);
   });
 
+  it("a timed ban: a dropped disable is checked a minute later, not when the ban ends; then the job waits for the ban's end", async () => {
+    const h = await createHost({ targets: [E] });
+    const u = await h.user("Ada Lovelace");
+    h.graph.lose.accountEnabled = 1;
+    const until = new Date(Date.now() + 30 * 86_400_000);
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true, banExpires: until });
+    await h.settle();
+    expect(atGraph(h)[0]!.accountEnabled).toBe(true); // dropped
+    const next = async () => new Date((await h.jobs())[0]!.nextAttemptAt as Date).getTime();
+    expect(await next()).toBeLessThan(Date.now() + 120_000);
+    const runOnce = async () => {
+      h.db.prepare('UPDATE "scimProvisioningJob" SET "nextAttemptAt" = 0').run();
+      await h.auth.api.scimProvisioningRun({ body: {} });
+      await h.settle();
+    };
+    await runOnce();
+    expect(atGraph(h)[0]!.accountEnabled).toBe(false); // disabled again
+    await runOnce();
+    expect(await next()).toBe(until.getTime()); // confirmed: back to waiting for the ban's end
+  });
+
+  it("back before the check runs: the return and the check are one job, so a returning user is never disabled again", async () => {
+    const h = await createHost({ targets: [E] });
+    const u = await h.user("Ada Lovelace");
+    h.graph.lose.accountEnabled = 1;
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: false });
+    await h.settle();
+    await drain(h);
+    expect(atGraph(h)[0]!.accountEnabled).toBe(true);
+    expect(await h.links()).toEqual([expect.objectContaining({ active: true })]);
+    expect(await h.jobs()).toEqual([]);
+  });
+
+  it("with a custom externalId (mapUser), a delete Graph drops is still sent again", async () => {
+    const h = await createHost({ targets: [{ ...E, deprovision: "delete", mapUser: (user) => ({ ...defaultScimUser(user), externalId: `emp-${user.id}` }) }] });
+    const u = await h.user("Ada Lovelace");
+    expect(atGraph(h)[0]!.onPremisesImmutableId).toBe(`emp-${u.id}`);
+    h.graph.lose.delete = 1;
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    expect(atGraph(h)).toHaveLength(1); // dropped
+    await drain(h);
+    expect(atGraph(h)).toEqual([]);
+    expect(await h.jobs()).toEqual([]);
+  });
+
+  it("an error after the account was made (its manager refused) keeps the link, so a later ban still disables it", async () => {
+    const h = await createHost({ targets: [{ ...E, enterprise: { manager: "managerId" } }], userFields: { managerId: { type: "string" } } });
+    const boss = await h.user("Di Boss");
+    h.graph.refuse.manager = true;
+    const u = await h.ctx.internalAdapter.createUser({ email: "cy@example.com", name: "Cy Report", emailVerified: true, managerId: boss.id } as never, { method: "admin" });
+    await h.settle();
+    const cy = atGraph(h).find((x) => x.userPrincipalName === "cy@example.com")!;
+    expect(cy.accountEnabled).toBe(true);
+    expect((await h.jobs()).find((j) => j.userId === u.id)).toMatchObject({ failed: true });
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    expect(cy.accountEnabled).toBe(false);
+  });
+
+  it("an address another object holds (proxyAddresses) fails the job with Graph's reason, never retried as 'can't find it yet'", async () => {
+    const h = await createHost({ targets: [E] });
+    h.graph.refuse.conflict = "proxyAddresses";
+    const u = await h.user("Ada Lovelace");
+    expect(await deliveries(h)).toEqual([expect.objectContaining({ userId: u.id, failed: true, lastError: expect.stringContaining("proxyAddresses") })]);
+  });
+
   it("a create whose reply was lost: found by its immutableId and linked, never made twice", async () => {
     const h = await createHost({ targets: [E] });
     const u = await h.user("Ada Lovelace");
     const id = atGraph(h)[0]!.id;
     h.db.prepare('DELETE FROM "scimProvisioningLink"').run();
-    await h.ctx.internalAdapter.updateUser(u.id, { name: "Ada Byron" });
+    // A new address too: only the immutableId conflicts, so the account is found by it.
+    await h.ctx.internalAdapter.updateUser(u.id, { name: "Ada Byron", email: "ada.byron@example.com" });
     await h.settle();
-    expect(atGraph(h)).toEqual([expect.objectContaining({ id, displayName: "Ada Byron" })]);
+    expect(atGraph(h)).toEqual([expect.objectContaining({ id, displayName: "Ada Byron", userPrincipalName: "ada.byron@example.com" })]);
     expect(await h.links()).toEqual([expect.objectContaining({ remoteId: id, active: true })]);
   });
 
@@ -279,14 +355,14 @@ describe("Entra ID", () => {
     await h.user("One Person");
     await h.user("Two Person");
     expect(h.graph.tokenRequests).toHaveLength(1);
-    expect(Object.fromEntries(h.graph.tokenRequests[0]!.body)).toEqual({ grant_type: "client_credentials", client_id: h.graph.clientId, client_secret: h.graph.clientSecret, scope: "https://graph.microsoft.com/.default" });
+    expect(Object.fromEntries(h.graph.tokenRequests[0]!.body)).toEqual({ grant_type: "client_credentials", client_id: h.graph.clientId, client_secret: h.graph.clientSecret, scope: "https://graph.microsoft.test/.default" });
   });
 
   it("a wrong client secret is retried with a message, never failing users for good", async () => {
     forgetTokens();
     const h = await createHost({ targets: [E] });
     const box = outbox(
-      { targets: [{ ...E, url: h.graph.url, entra: { tenantId: h.graph.tenantId, clientId: h.graph.clientId, clientSecret: "wrong", tokenUrl: h.graph.tokenUrl }, fetch: h.graph.fetch }] },
+      { targets: [{ ...E, url: h.graph.url, entra: { tenantId: h.graph.tenantId, clientId: h.graph.clientId, clientSecret: "Zq8~wrong-secret-value", tokenUrl: h.graph.tokenUrl }, fetch: h.graph.fetch }] },
       h.ctx.adapter as unknown as Adapter,
       { warn() {}, error() {} },
     );
@@ -296,6 +372,7 @@ describe("Entra ID", () => {
     await box.enqueue("entra", u.id, { now: true });
     expect(await box.runFor("entra", u.id)).toBe("retry");
     expect((await h.jobs())[0]).toMatchObject({ failed: false });
+    expect(String((await h.jobs())[0]!.lastError)).not.toContain("Zq8~wrong-secret-value");
     forgetTokens();
   });
 
@@ -314,6 +391,60 @@ describe("Entra ID", () => {
     expect(await h.links()).toEqual([expect.objectContaining({ active: true })]);
   });
 
+  describe("the client on its own", () => {
+    const token = new Response(JSON.stringify({ access_token: "t", expires_in: 3600 }), { status: 200 });
+    const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const conflictOn = (holder: string) =>
+      json(400, { error: { code: "Request_BadRequest", message: "Another object with the same value for property onPremisesImmutableId already exists.", details: [{ code: "ObjectConflict", target: "onPremisesImmutableId" }, { code: "ConflictingObjects", target: `User_${holder}` }] } });
+    const notFound = json(404, { error: { code: "Request_ResourceNotFound", message: "Resource does not exist" } });
+    const user = { schemas: [], userName: "ada@example.com", externalId: "ours", active: true, displayName: "Ada" };
+    const client = (url: string, routes: (method: string, path: string, body: string | undefined) => Response | undefined, extra: object = {}) => {
+      forgetTokens();
+      const seen: { url: string; body: string | undefined }[] = [];
+      const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const href = String(input);
+        seen.push({ url: href, body: init?.body as string | undefined });
+        if (href.includes("/oauth2/")) return token.clone();
+        return routes(init?.method ?? "GET", new URL(href).pathname.replace(/^\/v1\.0/, ""), init?.body as string | undefined) ?? new Response("no route", { status: 500 });
+      }) as typeof globalThis.fetch;
+      const c = entraIdClient({ id: "e", type: "entra-id", url, entra: { tenantId: "00000000-0000-4000-8000-000000000001", clientId: "c", clientSecret: "s", ...extra }, fetch } as never);
+      return { c, seen };
+    };
+
+    it("a holder of the immutableId that isn't ours (live or in the bin) is never taken over", async () => {
+      const live = client("https://graph.microsoft.com/v1.0", (m, p) => (m === "POST" && p === "/users" ? conflictOn("x") : p === "/users/x" ? json(200, { id: "x", onPremisesImmutableId: "theirs" }) : undefined));
+      await expect(live.c.create(user)).rejects.toThrow(/belongs to another Entra account/);
+      const binned = client("https://graph.microsoft.com/v1.0", (m, p) => (m === "POST" && p === "/users" ? conflictOn("x") : p === "/users/x" ? notFound.clone() : p === "/directory/deletedItems/x" ? json(200, { id: "x", onPremisesImmutableId: "theirs" }) : undefined));
+      await expect(binned.c.create(user)).rejects.toThrow(/deleted Entra account/);
+      expect(binned.seen.some((r) => r.url.endsWith("/restore"))).toBe(false);
+    });
+
+    it("a holder Graph names but can't show yet is retried without a status, never as a 409", async () => {
+      const { c } = client("https://graph.microsoft.com/v1.0", (m, p) => (m === "POST" && p === "/users" ? conflictOn("x") : p === "/users/x" || p === "/directory/deletedItems/x" ? notFound.clone() : undefined));
+      const e = (await c.create(user).catch((x) => x)) as ScimError;
+      expect(e).toBeInstanceOf(ScimError);
+      expect([e.status, e.retryable]).toEqual([null, true]);
+    });
+
+    it("a redirect is never followed, and retried", async () => {
+      const { c } = client("https://graph.microsoft.com/v1.0", () => new Response(null, { status: 302, headers: { location: "https://elsewhere.example/" } }));
+      const e = (await c.setActive("x", false).catch((x) => x)) as ScimError;
+      expect([e.status, e.retryable]).toEqual([302, true]);
+    });
+
+    it("a national cloud: the token's scope and the manager reference name that cloud's Graph; behind a proxy, the scope option does", async () => {
+      const ok = (m: string, p: string) => (p === "/users/x" && m === "GET" ? json(200, { id: "x", onPremisesImmutableId: "ours" }) : new Response(null, { status: 204 }));
+      const us = client("https://graph.microsoft.us/v1.0", ok);
+      await us.c.replace("x", { ...user, "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": { manager: { value: "m" } } } as never);
+      expect(new URLSearchParams(us.seen[0]!.body).get("scope")).toBe("https://graph.microsoft.us/.default");
+      expect(us.seen.find((r) => r.url.endsWith("/manager/$ref"))!.body).toContain("https://graph.microsoft.us/v1.0/directoryObjects/m");
+      const proxied = client("https://graph-proxy.internal.example/v1.0", ok, { scope: "https://graph.microsoft.com/.default" });
+      await proxied.c.replace("x", { ...user, "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": { manager: { value: "m" } } } as never);
+      expect(new URLSearchParams(proxied.seen[0]!.body).get("scope")).toBe("https://graph.microsoft.com/.default");
+      expect(proxied.seen.find((r) => r.url.endsWith("/manager/$ref"))!.body).toContain("https://graph.microsoft.com/v1.0/directoryObjects/m");
+    });
+  });
+
   it("mailNickname: the local part, cleaned to what Graph accepts", () => {
     expect(mailNickname("ada.lovelace@example.com")).toBe("ada.lovelace");
     expect(mailNickname("o'neil (ops)@example.com")).toBe("o'neilops");
@@ -324,7 +455,7 @@ describe("Entra ID", () => {
   });
 
   it("options: entra is required with a GUID tenant id; token, auth and groups aren't allowed; url is optional", () => {
-    const entra = { tenantId: "29b0bd5f-aad2-40d4-aa21-576bdbffac40", clientId: "c", clientSecret: "s" };
+    const entra = { tenantId: "00000000-0000-4000-8000-000000000001", clientId: "c", clientSecret: "s" };
     const t = (x: object) => () => scimProvisioning({ targets: [{ id: "e", ...x } as never] });
     expect(t({ type: "entra-id", entra })).not.toThrow();
     expect(t({ type: "entra-id", entra, enterprise: true, deprovision: "delete", adopt: true })).not.toThrow();
@@ -335,5 +466,9 @@ describe("Entra ID", () => {
     expect(t({ type: "entra-id", entra, roleGroups: ["admin"] })).toThrow(/groups aren't supported/);
     expect(t({ type: "entra-id", entra, update: "patch" })).toThrow(/update is for scim/);
     expect(t({ url: "https://app.example.com/scim/v2", token: "t", entra })).toThrow(/entra is for entra-id/);
+    expect(t({ type: "entra-id", entra, url: "http://graph.example.com/v1.0" })).toThrow(/https/);
+    expect(t({ type: "entra-id", entra: { ...entra, tokenUrl: "http://login.example.com/token" } })).toThrow(/https/);
+    expect(t({ type: "entra-id", entra: { ...entra, scope: "graph.microsoft.com" } })).toThrow(/\/\.default/);
+    expect(t({ type: "entra-id", url: "https://graph.microsoft.us/v1.0", entra: { ...entra, tokenUrl: "https://login.microsoftonline.us/x/oauth2/v2.0/token" } })).not.toThrow();
   });
 });

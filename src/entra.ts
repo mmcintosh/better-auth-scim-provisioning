@@ -9,7 +9,6 @@ import { fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, typ
 import type { Target } from "./types";
 
 export const GRAPH_URL = "https://graph.microsoft.com/v1.0";
-const SCOPE = "https://graph.microsoft.com/.default";
 /** What a user is read with: enough to tell whose it is, and to merge the org data into. */
 const SELECT = "id,userPrincipalName,onPremisesImmutableId,accountEnabled,employeeOrgData";
 
@@ -72,9 +71,12 @@ export function entraIdClient(target: Target): EntraIdClient {
   const base = trimSlashes(target.url ?? GRAPH_URL);
   const doFetch = target.fetch ?? fetch;
   const timeoutMs = target.timeoutMs ?? 10_000;
+  // Graph's own origin: the url's (a national cloud's Graph), unless a scope names it (behind a proxy).
+  const scope = entra.scope ?? `${new URL(base).origin}/.default`;
+  const graph = scope.replace(/\/\.default$/, "");
   // The token endpoint is the tenant's own, so a token is only ever for that tenant.
   const creds = credentials(
-    { type: "oauth2", tokenUrl: entra.tokenUrl ?? `https://login.microsoftonline.com/${entra.tenantId}/oauth2/v2.0/token`, clientId: entra.clientId, clientSecret: entra.clientSecret, scope: SCOPE },
+    { type: "oauth2", tokenUrl: entra.tokenUrl ?? `https://login.microsoftonline.com/${entra.tenantId}/oauth2/v2.0/token`, clientId: entra.clientId, clientSecret: entra.clientSecret, scope },
     { fetch: doFetch, timeoutMs },
   );
 
@@ -184,7 +186,8 @@ export function entraIdClient(target: Target): EntraIdClient {
     if (manager === undefined) return;
     if (manager) {
       try {
-        await request("PUT", `${path(id)}/manager/$ref`, { "@odata.id": `${base}/directoryObjects/${manager}` });
+        // A reference is a URL of Graph's own (not a proxy's).
+        await request("PUT", `${path(id)}/manager/$ref`, { "@odata.id": `${graph}/v1.0/directoryObjects/${manager}` });
       } catch (e) {
         // The manager not there (yet: Graph's lag after their create), not this user: retried, and
         // never a 404, which would send the outbox looking for this user's account.
@@ -236,7 +239,9 @@ export function entraIdClient(target: Target): EntraIdClient {
     if (live?.id) {
       if (live.onPremisesImmutableId !== user.externalId) throw new ScimError(`POST /users: the immutableId ${user.externalId} belongs to another Entra account (${holder})`, 409, false);
       try {
-        await update(holder, user);
+        // Ours, and the user is being provisioned: enabled, if it was disabled (a restore whose
+        // reply was lost, or a target switched from deactivate to delete).
+        await update(holder, user, { reactivate: live.accountEnabled === false });
       } catch (e) {
         // For seconds after a delete, Graph still reads the user as live but answers changes with
         // 404 (found live): retried, and then found in the recycle bin and restored.
@@ -250,7 +255,8 @@ export function entraIdClient(target: Target): EntraIdClient {
       throw e;
     });
     // Neither yet: Graph names an object its replicas don't show yet (our own create, seconds ago).
-    if (!binned?.id) throw new ScimError(`${user.userName}: Microsoft says the account exists but can't find it yet; retrying`, 409, true);
+    // No status: a 409 would send the outbox looking for an account to take over.
+    if (!binned?.id) throw new ScimError(`${user.userName}: Microsoft says the account exists but can't find it yet; retrying`, null, true);
     if (binned.onPremisesImmutableId !== user.externalId) throw new ScimError(`POST /users: the immutableId ${user.externalId} belongs to a deleted Entra account (${holder}) that isn't this user's`, 409, false);
     await request("POST", `/directory/deletedItems/${encodeURIComponent(holder)}/restore`);
     try {
@@ -304,8 +310,11 @@ export function entraIdClient(target: Target): EntraIdClient {
       } catch (e) {
         if (!(e instanceof GraphError && e.conflict)) throw e;
         if (e.conflict === "onPremisesImmutableId" && e.holder && user.externalId) return reclaim(e.holder, user);
-        // The userPrincipalName (or an address) is another account's: a 409, so the outbox looks it up and decides.
-        throw new ScimError(`POST /users: ${user.userName}: another Entra account already has this ${e.conflict}`, 409, false);
+        // The userPrincipalName is another account's: a 409, so the outbox looks it up and decides.
+        if (e.conflict === "userPrincipalName") throw new ScimError(`POST /users: ${user.userName}: another Entra account already has this userPrincipalName`, 409, false);
+        // Anything else (an address in another account's proxyAddresses, say): no lookup by
+        // userName finds that account, so it's not a 409; the job fails with Graph's reason.
+        throw new ScimError(`POST /users: ${user.userName}: another Entra object already has this ${e.conflict}${e.holder ? ` (${e.holder})` : ""}`, e.status, false);
       }
       if (!created?.id) throw new ScimError("POST /users: the response has no id", null, false);
       // If this fails, the retry finds the account by its immutableId (above) and sets it then.

@@ -181,7 +181,7 @@ export interface GoogleWorkspaceTarget extends TargetOptions {
  */
 export interface EntraIdTarget extends TargetOptions {
   type: "entra-id";
-  /** Microsoft Graph's base URL; default `https://graph.microsoft.com/v1.0`. Change it only for a national cloud or a proxy. */
+  /** Microsoft Graph's base URL; default `https://graph.microsoft.com/v1.0`. Change it only for a national cloud (the token's scope follows it) or a proxy (then set `entra.scope`). */
   url?: string | undefined;
   /** An app registration in the tenant, with the Graph application permission User.ReadWrite.All (admin consented). */
   entra: {
@@ -193,6 +193,8 @@ export interface EntraIdTarget extends TargetOptions {
     clientSecret: string;
     /** The token endpoint; default `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/token`. Change it only for a national cloud or a proxy. */
     tokenUrl?: string | undefined;
+    /** The token's scope; default `<url's origin>/.default`. Set it behind a proxy: `https://graph.microsoft.com/.default`. */
+    scope?: string | undefined;
   };
   token?: undefined;
   auth?: undefined;

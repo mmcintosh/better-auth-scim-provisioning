@@ -43,6 +43,7 @@ const targetSchema = z.strictObject({
       clientId: z.string().min(1),
       clientSecret: secretText(),
       tokenUrl: z.string().refine(targetUrl, "must be an https URL (http only for localhost)").optional(),
+      scope: z.string().regex(/^https:\/\/[^/\s]+\/\.default$/, "an https origin followed by /.default, such as https://graph.microsoft.com/.default").optional(),
     })
     .optional(),
   token: secretText().optional(),

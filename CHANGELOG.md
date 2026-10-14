@@ -13,7 +13,8 @@ All notable changes to this project. The format follows [Keep a Changelog](https
   - `adopt` is off by default, as for Google Workspace.
   - Enterprise User attributes go to `employeeId`, `department`, `companyName`, `employeeOrgData` and the `manager`.
   - Graph's lag after a write (a new user 404s by id for seconds; a deleted one still reads as live) is retried, and a create whose reply was lost finds the account by its immutableId instead of making another.
-  - A minute after disabling, deleting or re-enabling a user, the plugin checks Graph has it: a disable or delete Graph answered as done but dropped (found live) is sent again; a dropped enable is logged.
+  - A minute after disabling or deleting a user, their job comes back and checks that Graph has it: a disable or delete Graph answered as done but dropped (found live) is sent again until it shows.
+  - National clouds: the token's scope follows `url`, or set `entra.scope` behind a proxy.
   - Verified live in a test tenant (`test/live/entra-id.test.ts`).
   - Users only, and only in code, for now: groups and stored (`registry`) Entra ID targets aren't supported yet.
   - Exports the `EntraIdTarget` type.
