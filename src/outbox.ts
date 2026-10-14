@@ -9,6 +9,7 @@
 // A link is written before an account is created at the app (remoteId empty: "pending"), so an
 // account whose create reply was lost can still be found, and undone, later.
 import { defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, enterpriseValues, isBanned } from "./mapping";
+import { type EntraIdClient, entraIdClient } from "./entra";
 import { googleWorkspaceClient } from "./google";
 import { webhookClient } from "./webhook";
 import { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, type ScimEnterpriseUser, ScimError, type ScimUser, scimClient } from "./scim-client";
@@ -78,6 +79,13 @@ export const PAUSED_UNTIL = new Date("2999-01-01T00:00:00.000Z");
 export const UNREADABLE_RETRY_MS = 15 * 60_000;
 /** Jobs one target may take of a scheduled run's batch, while others' are due: so one slow app can't hold up the rest. */
 const PER_TARGET_SHARE = 0.5;
+/**
+ * How long after the plugin disables or deletes an Entra ID user its job comes back to check that
+ * Graph has it so: Graph's replicas can drop a write made seconds after another to the same user.
+ */
+const CONFIRM_MS = 60_000;
+/** The earlier of two times to look again, either possibly absent. */
+const earliest = (a: Date | null, b: Date) => (a && a.getTime() < b.getTime() ? a : b);
 /** Users (or groups) a resync queues per step. */
 const RESYNC_PAGE = 100;
 
@@ -108,7 +116,8 @@ export type GroupRef = { kind: Exclude<Kind, "user">; id: string };
 /**
  * A job's kind: a delivery, or "resync", a marker that queues an organization's target's members,
  * accounts and groups a page at a time ("m:<member id>", "l:<user id>", "g:", "G:<group link key>"),
- * each step queueing the next, so a large organization isn't queued inside one request.
+ * each step queueing the next, so a large organization isn't queued inside one request; or
+ * "reports", which queues a manager's reports.
  */
 type JobKind = Kind | "resync" | "reports";
 /**
@@ -147,12 +156,14 @@ export type Outcome = "done" | "retry" | "failed" | "busy";
 
 const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
 
-/** The client for a target: SCIM, or Google Workspace's Directory API behind the same operations. */
+/** The client for a target: SCIM, or Google Workspace's Directory API or Microsoft Graph behind the same operations. */
 /** `change` names the change being delivered (its job and version), for webhook event ids. */
 export const clientFor = (target: Target, change?: string) =>
   target.type === "google-workspace"
     ? googleWorkspaceClient(target)
-    : target.type === "webhook"
+    : target.type === "entra-id"
+      ? entraIdClient(target)
+      : target.type === "webhook"
       ? webhookClient(target, change)
       : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
 
@@ -359,13 +370,13 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const { scim, clears } = await withEnterprise(target, user as ProvisionedUser, (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
       const externalId = scim.externalId ?? null;
       // Back after the plugin deactivated them (a ban, a removal): only then is a Google suspension
-      // lifted, never an admin's own or one of Google's.
+      // (or a disabled Entra account) lifted, never an admin's own or one of Google's.
       const reactivate = !!link?.remoteId && !link.active;
       /** Update the account: PUT, or PATCH (with the enterprise attributes cleared since). */
       const update = (id: string) =>
         target.update === "patch"
           ? (client as ReturnType<typeof scimClient>).patch(id, scim, clears)
-          : target.type === "google-workspace"
+          : target.type === "google-workspace" || target.type === "entra-id"
             ? (client as ReturnType<typeof googleWorkspaceClient>).replace(id, scim, { reactivate })
             : client.replace(id, scim);
       if (link?.remoteId) {
@@ -408,8 +419,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         if (!(e instanceof ScimError)) throw e;
         if (e.status !== 409) {
           // Maybe created (no reply, or an error on the way back): keep the pending link to find
-          // it later. A refusal means nothing was created.
-          if (!e.retryable) await dropLink(key);
+          // it later. A refusal means nothing was created, except at Entra ID, where an error can
+          // follow the account's creation (its manager refused, say): the pending link is kept
+          // there, and found again by its immutableId, so a later ban or delete still reaches it.
+          if (!e.retryable && !("findByExternalId" in client)) await dropLink(key);
           throw e;
         }
         // Already there (provisioned by hand, or our own create whose reply was lost): adopt it,
@@ -425,8 +438,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           throw new ScimError(`${scim.userName}: ${why}; resolve it at the app`, 409, false);
         };
         if (!found) {
-          // Google's directory takes a moment to show a new account: retried, with the link kept.
-          if (target.type === "google-workspace") throw new ScimError(`${scim.userName}: Google says the account exists but can't find it yet; retrying`, 409, true);
+          // Google's directory (and Graph's replicas) take a moment to show a new account: retried, with the link kept.
+          if (target.type === "google-workspace" || target.type === "entra-id") throw new ScimError(`${scim.userName}: ${target.type === "entra-id" ? "Microsoft" : "Google"} says the account exists but can't find it yet; retrying`, 409, true);
           return refuse("the app says it exists but can't find it");
         }
         const ours = found.externalId !== null && found.externalId === externalId;
@@ -441,16 +454,20 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // who the account was made for.
           if ((user as ProvisionedUser).emailVerified !== true) return refuse("an account with this userName exists at the app, and the user's email is not verified");
           // Taking over accounts made elsewhere is a choice per target: on by default, except at
-          // Google Workspace, where it could reach someone's real mailbox.
-          if (!(target.adopt ?? target.type !== "google-workspace"))
-            return refuse(`an account with this userName already exists at the app, and this target doesn't take over existing accounts (adopt: ${target.type === "google-workspace" ? "false, the default for Google Workspace" : "false"})`);
+          // Google Workspace and Entra ID, where it could reach someone's real mailbox (and at
+          // Entra, setting the immutableId changes how they sign in).
+          const mailbox = target.type === "google-workspace" ? "Google Workspace" : target.type === "entra-id" ? "Entra ID" : null;
+          if (!(target.adopt ?? !mailbox))
+            return refuse(`an account with this userName already exists at the app, and this target doesn't take over existing accounts (adopt: ${mailbox ? `false, the default for ${mailbox}` : "false"})`);
           // Taking it over would switch it back on, with whatever it held (at Google, someone's
           // mailbox): an admin decides that.
           if (found.active === false)
             return refuse(
               target.type === "google-workspace"
                 ? "the Workspace account is suspended; unsuspend it at Google first if it should be taken over"
-                : "the app's account is deactivated; reactivate it at the app first if it should be taken over",
+                : target.type === "entra-id"
+                  ? "the Entra account is disabled; enable it in Entra first if it should be taken over"
+                  : "the app's account is deactivated; reactivate it at the app first if it should be taken over",
             );
           if (scim.userName.toLowerCase() !== (user as ProvisionedUser).email.toLowerCase())
             return refuse("an account with this userName exists at the app, and its userName isn't the user's verified email, so it isn't taken over");
@@ -472,15 +489,26 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (link && !link.remoteId) link = await settlePending(target, client, link);
     if (!link) return recheckAt;
     const externalId = link.externalId ?? null;
+    // At Entra ID, Graph can answer a write made seconds after another as done and drop it (found
+    // live): so after a disable or a delete, this job comes back a minute later and checks.
+    const entra = target.type === "entra-id";
+    const confirmAt = () => earliest(recheckAt, new Date(Date.now() + CONFIRM_MS));
     // An adopted account wasn't made by us: it's deactivated, never deleted, whatever the target says.
     if ((target.deprovision ?? "deactivate") === "delete" && !link.adopted) {
       // Inactive links too: a target switched from deactivate to delete.
+      let removed: string | null = link.remoteId;
       try {
         await client.remove(link.remoteId);
       } catch (e) {
         if (!notFound(e)) throw e;
-        const other = await stillThere(target, client, userId, link.userName, externalId, link.remoteId);
-        if (other) await client.remove(other);
+        removed = await stillThere(target, client, userId, link.userName, externalId, link.remoteId);
+        if (removed) await client.remove(removed);
+      }
+      // At Entra, the link stays (inactive) until a delete finds the account gone: the check a
+      // minute later deletes again, and its 404 (then not found by the immutableId) ends it.
+      if (entra && removed) {
+        await saveLink(target, userId, { remoteId: removed, userName: link.userName, externalId, active: false });
+        return confirmAt();
       }
       await dropLink(key);
       return recheckAt;
@@ -498,9 +526,25 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         }
       }
       await saveLink(target, userId, { remoteId, userName: link.userName, externalId, active: false });
+      return entra ? confirmAt() : recheckAt;
+    }
+    // Disabled already, by us: at Entra, is that how Graph has it? (The check a minute after the
+    // disable, and any later delivery while the user is out.)
+    if (entra && (await (client as unknown as EntraIdClient).enabled(link.remoteId))) {
+      log.warn(`[scim] ${target.id}: user ${userId}: Entra shows the account enabled, though it was disabled; disabling it again`);
+      await client.setActive(link.remoteId, false);
+      return confirmAt();
     }
     return recheckAt;
   }
+
+  /**
+   * The account for a user, by our externalId where the client can look that up (Entra ID: the
+   * immutableId shows at once after a write, while the userPrincipalName lags for seconds, found
+   * live), otherwise by userName.
+   */
+  const lookUp = (client: ReturnType<typeof scimClient>, userName: string, externalId: string | null) =>
+    externalId && "findByExternalId" in client ? (client as unknown as EntraIdClient).findByExternalId(externalId) : client.findByUserName(userName);
 
   /**
    * After a 404 for one user: is the account still at the app, under another id? Asks the app's
@@ -509,7 +553,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * test). Returns the account's id if it's ours, or null when it's gone.
    */
   async function stillThere(target: Target, client: ReturnType<typeof scimClient>, userId: string, userName: string, externalId: string | null, missing: string): Promise<string | null> {
-    const found = await client.findByUserName(userName);
+    const found = await lookUp(client, userName, externalId);
     if (!found) return null;
     const ours = (found.externalId !== null && found.externalId === externalId) || (found.externalId === null && (await ownerOf(target, found.id)) === userId);
     if (!ours) return null;
@@ -527,7 +571,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     // A receiver has no lookup, but its id is our externalId: the user may have been received, so
     // they're deprovisioned (harmless at a receiver that never saw them).
     if (target.type === "webhook" && link.externalId) return { ...link, remoteId: link.externalId, active: true };
-    const found = await client.findByUserName(link.userName);
+    const found = await lookUp(client, link.userName, link.externalId ?? null);
     const owner = found ? await ownerOf(target, found.id) : null;
     if (!found || (owner && owner !== link.userId) || (found.externalId !== null && found.externalId !== link.externalId)) {
       await dropLink(link.key);

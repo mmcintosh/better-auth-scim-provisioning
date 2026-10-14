@@ -42,9 +42,9 @@ export interface TargetOptions {
   /**
    * Take over an account that already exists at the app, made by hand or by another tool, when
    * it's nobody's (no externalId, not linked here), active, and its userName is the user's
-   * verified email. On by default, except for Google Workspace, where it could reach someone's
-   * real mailbox. An account taken over is never deleted by this plugin, only deactivated, even
-   * with `deprovision: "delete"`.
+   * verified email. On by default, except for Google Workspace and Entra ID, where it could reach
+   * someone's real mailbox (and at Entra, change how they sign in). An account taken over is never
+   * deleted by this plugin, only deactivated, even with `deprovision: "delete"`.
    */
   adopt?: boolean | undefined;
   /** Only members of this organization (Better Auth's organization plugin). */
@@ -86,7 +86,11 @@ export interface TargetOptions {
   roleGroups?: boolean | string[] | undefined;
   /** A role group's displayName; default "<organization> / <role>". */
   roleGroupName?: ((role: string, organization: { id: string; name: string; slug: string | null }) => string) | undefined;
-  /** What leaving means at the app: `deactivate` (active=false, the default) or `delete`. */
+  /**
+   * What leaving means at the app: `deactivate` (active=false, the default) or `delete`. At Entra
+   * ID, deactivating also revokes the user's sessions, and deleting puts them in the recycle bin
+   * for 30 days, never purged: a user back within that time is restored.
+   */
   deprovision?: "deactivate" | "delete" | undefined;
   /** Per request; default 10 seconds. */
   timeoutMs?: number | undefined;
@@ -132,6 +136,7 @@ export interface ScimTarget extends TargetOptions {
       }
     | undefined;
   google?: undefined;
+  entra?: undefined;
   secret?: undefined;
 }
 
@@ -164,8 +169,45 @@ export interface GoogleWorkspaceTarget extends TargetOptions {
   token?: undefined;
   auth?: undefined;
   secret?: undefined;
+  entra?: undefined;
   update?: undefined;
   compat?: undefined;
+}
+
+/**
+ * Microsoft Entra ID (formerly Azure AD), through Microsoft Graph: users, with our id as their
+ * `onPremisesImmutableId`, which Entra matches a federated sign-in's NameID against, so a user
+ * provisioned here signs in through your SAML identity provider at once. Groups aren't supported yet.
+ */
+export interface EntraIdTarget extends TargetOptions {
+  type: "entra-id";
+  /** Microsoft Graph's base URL; default `https://graph.microsoft.com/v1.0`. Change it only for a national cloud (the token's scope follows it) or a proxy (then set `entra.scope`). */
+  url?: string | undefined;
+  /** An app registration in the tenant, with the Graph application permission User.ReadWrite.All (admin consented). */
+  entra: {
+    /** The tenant's id (a GUID; Entra admin center, Overview). */
+    tenantId: string;
+    /** The app registration's Application (client) ID. */
+    clientId: string;
+    /** One of its client secrets. */
+    clientSecret: string;
+    /** The token endpoint; default `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/token`. Change it only for a national cloud or a proxy. */
+    tokenUrl?: string | undefined;
+    /** The token's scope; default `<url's origin>/.default`. Set it behind a proxy: `https://graph.microsoft.com/.default`. */
+    scope?: string | undefined;
+  };
+  token?: undefined;
+  auth?: undefined;
+  secret?: undefined;
+  google?: undefined;
+  update?: undefined;
+  compat?: undefined;
+  groups?: undefined;
+  groupName?: undefined;
+  teamGroups?: undefined;
+  teamGroupName?: undefined;
+  roleGroups?: undefined;
+  roleGroupName?: undefined;
 }
 
 /**
@@ -181,12 +223,13 @@ export interface WebhookTarget extends TargetOptions {
   token?: undefined;
   auth?: undefined;
   google?: undefined;
+  entra?: undefined;
   update?: undefined;
   compat?: undefined;
 }
 
-/** A target: an app that speaks SCIM, Google Workspace, or a webhook. */
-export type Target = ScimTarget | GoogleWorkspaceTarget | WebhookTarget;
+/** A target: an app that speaks SCIM, Google Workspace, Microsoft Entra ID, or a webhook. */
+export type Target = ScimTarget | GoogleWorkspaceTarget | EntraIdTarget | WebhookTarget;
 
 /** A delivery that gave up, or reached `retry.maxAttempts` (it's then retried every 6 hours). */
 export interface DeliveryFailure {
