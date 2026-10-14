@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-14
+
+Microsoft Entra ID (Microsoft 365) as a target: users through Microsoft Graph, linked for federated sign-in through better-auth-saml-idp, verified live.
+
 ### Added
 
 - **Microsoft Entra ID targets (`type: "entra-id"`)**: users created, updated, disabled and deleted in Entra ID (Microsoft 365) through Microsoft Graph, signed in with an app registration's client credentials (`entra: { tenantId, clientId, clientSecret }`, with the Graph application permission `User.ReadWrite.All`).
