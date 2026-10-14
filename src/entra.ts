@@ -229,7 +229,14 @@ export function entraIdClient(target: Target): EntraIdClient {
     });
     if (live?.id) {
       if (live.onPremisesImmutableId !== user.externalId) throw new ScimError(`POST /users: the immutableId ${user.externalId} belongs to another Entra account (${holder})`, 409, false);
-      await update(holder, user);
+      try {
+        await update(holder, user);
+      } catch (e) {
+        // For seconds after a delete, Graph still reads the user as live but answers changes with
+        // 404 (found live): retried, and then found in the recycle bin and restored.
+        if (notFoundAtGraph(e)) throw new ScimError(`${user.userName}: Microsoft still shows the account, but it's on its way to the recycle bin; retrying`, null, true);
+        throw e;
+      }
       return holder;
     }
     const binned = await request("GET", `/directory/deletedItems/${encodeURIComponent(holder)}?$select=${SELECT}`).catch((e) => {

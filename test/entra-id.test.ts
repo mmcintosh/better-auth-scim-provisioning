@@ -82,6 +82,24 @@ describe("Entra ID", () => {
     expect(await h.jobs()).toEqual([]);
   });
 
+  it("back moments after a delete, while Graph still reads the account as live: retried, then restored from the bin", async () => {
+    const h = await createHost({ targets: [{ ...E, deprovision: "delete" }], graphDeleteLag: 2 });
+    const u = await h.user("Ada Lovelace");
+    const id = atGraph(h)[0]!.id;
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: false, name: "Ada Byron" });
+    await h.settle();
+    expect(await h.jobs()).toEqual([expect.objectContaining({ userId: u.id, failed: false, lastError: expect.stringContaining("on its way to the recycle bin") })]);
+    for (let i = 0; i < 5 && (await h.jobs()).length; i++) {
+      h.db.prepare('UPDATE "scimProvisioningJob" SET "nextAttemptAt" = 0').run();
+      await h.auth.api.scimProvisioningRun({ body: {} });
+      await h.settle();
+    }
+    expect(await h.jobs()).toEqual([]);
+    expect(atGraph(h)).toEqual([expect.objectContaining({ id, userPrincipalName: u.email, displayName: "Ada Byron", accountEnabled: true })]);
+  });
+
   it("back after delete under a new email, but someone else has the old userPrincipalName now: the restore is refused, and the job fails with Graph's reason", async () => {
     const h = await createHost({ targets: [{ ...E, deprovision: "delete" }] });
     const u = await h.user("Ada Lovelace");

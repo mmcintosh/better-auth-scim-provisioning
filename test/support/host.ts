@@ -31,13 +31,13 @@ export function schemaOptions(database?: unknown) {
   };
 }
 
-export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; onFailure?: ScimProvisioningOptions["onFailure"]; registry?: TargetRegistryOptions; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number; googleHoldNew?: string; graphLag?: number; userFields?: Record<string, { type: "string" | "number"; required?: boolean }> } = {}) {
+export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; onFailure?: ScimProvisioningOptions["onFailure"]; registry?: TargetRegistryOptions; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number; googleHoldNew?: string; graphLag?: number; graphDeleteLag?: number; userFields?: Record<string, { type: "string" | "number"; required?: boolean }> } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
   const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}), ...(s.membersOnRequest ? { membersOnRequest: true } : {}), ...(s.indexPaged ? { indexPaged: true } : {}) })]));
   // A Google Workspace target gets a mock Directory API instead (one per host).
   const google = specs.some((s) => s.type === "google-workspace") ? await mockGoogle({ lag: o.googleLag, renameLag: o.googleRenameLag, groupLag: o.googleGroupLag, groupReadLag: o.googleGroupReadLag, groupScope: o.googleGroupScope, membersPageSize: o.googleMembersPageSize, holdNew: o.googleHoldNew }) : undefined;
   // An Entra ID target gets a mock Microsoft Graph (one per host).
-  const graph = specs.some((s) => s.type === "entra-id") ? mockGraph({ lag: o.graphLag }) : undefined;
+  const graph = specs.some((s) => s.type === "entra-id") ? mockGraph({ lag: o.graphLag, deleteLag: o.graphDeleteLag }) : undefined;
   const webhook = specs.some((s) => s.type === "webhook") ? mockWebhook() : undefined;
   const pending = new Set<Promise<unknown>>();
   const db = new DatabaseSync(":memory:");

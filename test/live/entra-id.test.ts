@@ -60,7 +60,16 @@ describe.skipIf(!configured)("live Microsoft Entra ID", () => {
     }
     return last;
   };
-  const managerOf = async (id: string) => (await graph("GET", `/users/${id}/manager?$select=id`)).json?.id ?? null;
+  /** The user's manager's id, once a read gives `want` (replicas lag here too). */
+  const managerOf = async (id: string, want: string | null) => {
+    let last: string | null = null;
+    for (let i = 0; i < 20; i++) {
+      last = (await graph("GET", `/users/${id}/manager?$select=id`)).json?.id ?? null;
+      if (last === want) return last;
+      await sleep(3000);
+    }
+    return last;
+  };
 
   const setup = async (target: Record<string, unknown>, userFields?: Record<string, { type: "string" }>) => {
     const auth = betterAuth({
@@ -186,15 +195,15 @@ describe.skipIf(!configured)("live Microsoft Entra ID", () => {
     const id = (await h.remoteOf(u.id))!;
     const bossId = (await h.remoteOf(boss.id))!;
     const r = await read(id, (x) => x?.department === "Engines");
-    console.log("3 enterprise", JSON.stringify(r), "manager", await managerOf(id));
+    console.log("3 enterprise", JSON.stringify(r));
     expect(r).toMatchObject({ employeeId: "E-1", department: "Engines", companyName: "Acme", employeeOrgData: { costCenter: "CC9", division: "R&D" } });
-    expect(await managerOf(id)).toBe(bossId);
+    expect(await managerOf(id, bossId)).toBe(bossId);
 
     await h.ctx.internalAdapter.updateUser(u.id, { division: null, department: null, managerId: null });
     await h.settle();
     expect(await h.jobs()).toEqual([]);
     expect(await read(id, (x) => x?.department === null)).toMatchObject({ department: null, employeeOrgData: { costCenter: "CC9", division: null } });
-    expect(await managerOf(id)).toBeNull();
+    expect(await managerOf(id, null)).toBeNull();
   });
 
   it.skipIf(!federated)("a federated domain: created with the immutableId and no password", async () => {

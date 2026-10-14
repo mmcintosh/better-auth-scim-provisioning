@@ -8,6 +8,8 @@
 // `User_<id>`), a deleted user kept in the bin under `<id without hyphens><old UPN>` until
 // restored (back under its UPN) or purged, a POST without a body answered 411, and "not found" as
 // Graph's JSON error. Anything else gets a plain 404.
+// `deleteLag`: as found live, a user deleted moments ago still reads as live by id (GET 200) though
+// changes to it 404, for the next `deleteLag` reads.
 // `lag`: as found live, a user created moments ago isn't there by id or userPrincipalName yet
 // (GET, PATCH and DELETE 404) though the immutableId lookup finds it, for the next `lag` requests
 // by id or userPrincipalName.
@@ -31,7 +33,7 @@ export interface GraphStoredUser {
   binnedUpn?: string;
 }
 
-export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">; lag?: number | undefined } = {}) {
+export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">; lag?: number | undefined; deleteLag?: number | undefined } = {}) {
   const domains = o.domains ?? { "example.com": "Federated", "managed.example": "Managed" };
   const tenantId = "29b0bd5f-aad2-40d4-aa21-576bdbffac40";
   const clientId = "11111111-2222-3333-4444-555555555555";
@@ -43,6 +45,8 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
   const tokens = new Set<string>();
   const settling = new Map<string, number>();
   const revoked: string[] = [];
+  /** Users deleted moments ago that still read as live (by id), for this many more reads. */
+  const ghosts = new Map<string, number>();
   const requests: { method: string; path: string; body?: unknown }[] = [];
   const tokenRequests: { body: URLSearchParams }[] = [];
   let next = 1;
@@ -172,6 +176,11 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
     if (userPath) {
       const m = userPath;
       const key = m[1]!;
+      const ghost = bin.get(key);
+      if (ghost && !m[2] && method === "GET" && (ghosts.get(key) ?? 0) > 0) {
+        ghosts.set(key, (ghosts.get(key) ?? 0) - 1);
+        return json(200, select({ ...ghost, userPrincipalName: ghost.binnedUpn ?? ghost.userPrincipalName }, q));
+      }
       const user = users.get(key) ?? byUpn(key);
       if (!user || hidden(user.id)) return notFound(key);
       if (m[2] === "/revokeSignInSessions" && method === "POST") {
@@ -203,6 +212,7 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
         user.binnedUpn = user.userPrincipalName;
         user.userPrincipalName = `${user.id.replace(/-/g, "")}${user.userPrincipalName}`;
         bin.set(user.id, user);
+        if (o.deleteLag) ghosts.set(user.id, o.deleteLag);
         return new Response(null, { status: 204 });
       }
     }
