@@ -30,6 +30,8 @@ describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, ()
   const stamp = Date.now().toString(36);
   const email = (n: string, d = domain) => `scim-live-${stamp}-${n}@${d}`;
   const pending = new Set<Promise<unknown>>();
+  /** Every Entra account the plugin linked, for the cleanup: a lookup by name lags (the last user made was missed). */
+  const made = new Set<string>();
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   let token = "";
 
@@ -107,7 +109,11 @@ describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, ()
         await auth.api.scimProvisioningRun({ body: {} });
       }
     };
-    const remoteOf = async (userId: string) => (await ctx.adapter.findMany<Record<string, any>>({ model: "scimProvisioningLink" })).find((l) => l.userId === userId)?.remoteId as string | undefined;
+    const remoteOf = async (userId: string) => {
+      const links = await ctx.adapter.findMany<Record<string, any>>({ model: "scimProvisioningLink" });
+      for (const l of links) if (l.remoteId) made.add(l.remoteId);
+      return links.find((l) => l.userId === userId)?.remoteId as string | undefined;
+    };
     const user = (email: string, name: string) => ctx.internalAdapter.createUser({ email, name, emailVerified: true }, { method: "admin" });
     return { ctx, jobs, settle, remoteOf, user };
   };
@@ -115,12 +121,13 @@ describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, ()
   afterAll(async () => {
     // Everything named with this run's stamp, live or in the bin: deleted, then purged.
     const prefix = `scim-live-${stamp}-`;
-    const live = (await graph("GET", `/users?$filter=${encodeURIComponent(`startswith(userPrincipalName,'${prefix}')`)}&$select=id`)).json?.value ?? [];
-    for (const u of live) await graph("DELETE", `/users/${u.id}`);
+    const named = (await graph("GET", `/users?$filter=${encodeURIComponent(`startswith(userPrincipalName,'${prefix}')`)}&$select=id`)).json?.value ?? [];
+    const live = [...new Set([...made, ...named.map((u: { id: string }) => u.id)])];
+    for (const id of live) await graph("DELETE", `/users/${id}`);
     await sleep(20_000);
     let purged = 0;
     for (let round = 0; round < 3; round++) {
-      const binned = ((await graph("GET", "/directory/deletedItems/microsoft.graph.user?$select=id,userPrincipalName&$top=999")).json?.value ?? []).filter((u: { userPrincipalName: string }) => u.userPrincipalName.includes(prefix));
+      const binned = ((await graph("GET", "/directory/deletedItems/microsoft.graph.user?$select=id,userPrincipalName&$top=999")).json?.value ?? []).filter((u: { id: string; userPrincipalName: string }) => u.userPrincipalName.includes(prefix) || made.has(u.id));
       for (const u of binned) if ((await graph("DELETE", `/directory/deletedItems/${u.id}`)).status === 204) purged++;
       if (!binned.length) break;
       await sleep(10_000);
