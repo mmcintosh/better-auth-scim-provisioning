@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed
+
+- **Jobs are indexed by target.** A target's scheduled runs, its status counts and removing a target read its jobs by `targetId`, which scanned the whole table. New installs get the index from the migration; `npx auth migrate` doesn't add it to an existing table, so add it by hand if you like: `CREATE INDEX "scimProvisioningJob_targetId_idx" ON "scimProvisioningJob" ("targetId");` (the Workers example's `0004` migration does). No column changes.
+
 ## [1.3.0] - 2026-10-14
 
 Microsoft Entra ID (Microsoft 365) as a target: users through Microsoft Graph, linked for federated sign-in through better-auth-saml-idp, verified live.

@@ -370,7 +370,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       [JOB_MODEL]: {
         fields: {
           key: { type: "string", required: true, unique: true },
-          targetId: { type: "string", required: true },
+          /** Indexed (1.4): a target's runs, its status counts and removing a target scanned every job. */
+          targetId: { type: "string", required: true, index: true },
           userId: { type: "string", required: true, index: true },
           version: { type: "number", required: true },
           attempts: { type: "number", required: true },
