@@ -95,6 +95,7 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   // Read only: the test user isn't sent the extension, which an app that doesn't know it could
   // refuse, taking every later result with it. Many apps have neither endpoint; then nothing is
   // known, and whether to set `enterprise` is a question for the app's docs.
+  // A ListResponse's Resources (RFC 7644 §4), or a bare array, which some apps answer with instead.
   const listed = (json: Record<string, unknown> | null): unknown[] => (Array.isArray(json) ? json : Array.isArray(json?.Resources) ? (json.Resources as unknown[]) : []);
   const ENTERPRISE = "Enterprise User extension";
   const notListed = (where: string) => `not listed by ${where}: set \`enterprise\` only if the app's docs say it's accepted`;
@@ -117,7 +118,9 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
       // Some apps answer only for one schema by its id (a URN's colons are fine in a path).
       const one = await call("GET", `/Schemas/${SCIM_ENTERPRISE_USER_SCHEMA}`);
       const has = one.status === 200 && one.json?.id === SCIM_ENTERPRISE_USER_SCHEMA;
-      note("enterprise-user", ENTERPRISE, has ? true : null, has ? "served at /Schemas/<its id>" : "can't tell: the app has no /ResourceTypes or /Schemas; its docs say whether `enterprise` is accepted");
+      // What each answered: a 404 (most apps), a 401 (a token without that scope), or a 200 that listed nothing useful.
+      const saw = (r: { status: number; json: Record<string, unknown> | null; error?: string }, what: string, without: string) => (r.status === 200 ? `${what} answered without ${without}` : `${what} ${why(r)}`);
+      note("enterprise-user", ENTERPRISE, has ? true : null, has ? "served at /Schemas/<its id>" : `can't tell: ${saw(types, "/ResourceTypes", "a User type")}, ${saw(schemas, "/Schemas", "any schema")}; the app's docs say whether \`enterprise\` is accepted`);
     }
   }
 

@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createAuth, type Env } from "../../examples/workers/src/auth";
 import { mockScim } from "../support/mock-scim";
 import { mockWebhook } from "../support/mock-webhook";
+import { scimProvisioning } from "../../src";
 
 const example = (path: string) => fileURLToPath(new URL(`../../examples/workers/${path}`, import.meta.url));
 const MIGRATIONS = example("migrations");
@@ -45,6 +46,21 @@ const statements = () =>
     .map((sql) => sql.replace(/^--.*$/gm, "").trim())
     .filter(Boolean);
 
+/**
+ * The indexes the plugin's schema declares that the example's migrations don't create. Better
+ * Auth's migrator never adds an index to an existing table, so the check below can't see a
+ * missing one (the 0004 migration, say).
+ */
+function missingIndexes() {
+  const db = new DatabaseSync(":memory:");
+  for (const sql of statements()) db.exec(sql);
+  const have = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map((r) => r.name));
+  const schema = scimProvisioning({ targets: [], registry: {} }).schema as Record<string, { fields: Record<string, { index?: boolean }> }>;
+  return Object.entries(schema)
+    .flatMap(([model, s]) => Object.entries(s.fields).filter(([, f]) => f.index).map(([field]) => `${model}_${field}_idx`))
+    .filter((name) => !have.has(name));
+}
+
 /** What Better Auth's migrator would still do after the example's migrations: nothing, if they're current. */
 async function missingSql() {
   const db = new DatabaseSync(":memory:");
@@ -74,6 +90,7 @@ async function verifiedUser(email: string, name: string) {
 
 beforeAll(async () => {
   expect(await missingSql(), "examples/workers/migrations/ are behind the plugin's schema: add a migration with the SQL shown").toBe("");
+  expect(missingIndexes(), "examples/workers/migrations/ lack an index the plugin's schema declares: add a migration creating it").toEqual([]);
 
   // Bundled for workerd as Wrangler does it; the package itself from this repository's source.
   const bundle = await build({

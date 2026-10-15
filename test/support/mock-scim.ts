@@ -41,10 +41,11 @@ export type Fault = { status: number; retryAfter?: string; detail?: string } | {
  */
 /**
  * `discovery`: serve /ResourceTypes and/or /Schemas (RFC 7644 §4), and whether they list the
- * Enterprise User extension. Neither by default, as many apps.
+ * Enterprise User extension. Neither by default, as many apps. `noUserType`: /ResourceTypes
+ * without a User type; `bare`: /Schemas as a bare array; `schemaById`: only /Schemas/<id>.
  */
 /** `noTotal`: the users list leaves out totalResults (apps do), so paging goes by full pages. With `like: "aws"`, the users list pages by cursor. */
-export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; noTotal?: boolean; discovery?: { resourceTypes?: boolean; schemas?: boolean; enterprise?: boolean } } = {}) {
+export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; noTotal?: boolean; discovery?: { resourceTypes?: boolean; schemas?: boolean; enterprise?: boolean; noUserType?: boolean; bare?: boolean; schemaById?: boolean } } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
   const groups = new Map<string, StoredGroup>();
@@ -99,11 +100,13 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     const list = (resources: unknown[]) => reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults: resources.length, Resources: resources });
     if (path === "/ResourceTypes" && method === "GET" && o.discovery?.resourceTypes) {
       const schemaExtensions = o.discovery.enterprise ? [{ schema: ENTERPRISE, required: false }] : [];
-      return list([{ id: "User", name: "User", endpoint: "/Users", schema: USER, schemaExtensions }, { id: "Group", name: "Group", endpoint: "/Groups", schema: GROUP }]);
+      return list([...(o.discovery.noUserType ? [] : [{ id: "User", name: "User", endpoint: "/Users", schema: USER, schemaExtensions }]), { id: "Group", name: "Group", endpoint: "/Groups", schema: GROUP }]);
     }
     if (path === "/Schemas" && method === "GET" && o.discovery?.schemas) {
-      return list([{ id: USER, name: "User" }, { id: GROUP, name: "Group" }, ...(o.discovery.enterprise ? [{ id: ENTERPRISE, name: "EnterpriseUser" }] : [])]);
+      const all = [{ id: USER, name: "User" }, { id: GROUP, name: "Group" }, ...(o.discovery.enterprise ? [{ id: ENTERPRISE, name: "EnterpriseUser" }] : [])];
+      return o.discovery.bare ? reply(200, all) : list(all);
     }
+    if (path === `/Schemas/${ENTERPRISE}` && method === "GET" && o.discovery?.schemaById && o.discovery.enterprise) return reply(200, { id: ENTERPRISE, name: "EnterpriseUser" });
 
     const g = /^\/Groups(?:\/([^/?]+))?$/.exec(path);
     if (g) return group(url, method, g[1] ? decodeURIComponent(g[1]) : undefined, body);
