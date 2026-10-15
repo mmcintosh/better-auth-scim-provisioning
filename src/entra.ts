@@ -186,21 +186,23 @@ export function entraIdClient(target: Target, owns?: AttributeFields | null): En
   }
 
   /**
-   * The attributes a target reads (`attributes`), where Graph keeps them: the title as `jobTitle`,
-   * the work phone as `businessPhones`, the mobile as `mobilePhone`, and the work address's parts
-   * as `streetAddress`, `city`, `state`, `postalCode` and `country`. Only what the target names is
-   * sent, and one without a value is cleared.
+   * The attributes a target reads (`attributes`), and any a `mapUser` sets, where Graph keeps
+   * them: the title as `jobTitle`, the work phone as `businessPhones`, the mobile as
+   * `mobilePhone`, and the work address's parts as `streetAddress`, `city`, `state`, `postalCode`
+   * and `country` (Graph has one address; other types a mapUser sends have nowhere to go). Only
+   * what's ours is sent, and one without a value is cleared.
    */
   function details(user: ScimUser): Record<string, unknown> {
-    if (!owns) return {};
     const body: Record<string, unknown> = {};
-    const phone = (type: string) => user.phoneNumbers?.find((p) => p.type === type)?.value ?? null;
-    if (owns.title) body.jobTitle = user.title ?? null;
-    if (owns.phone) body.businessPhones = phone("work") ? [phone("work")] : [];
-    if (owns.mobile) body.mobilePhone = phone("mobile");
-    const address = user.addresses?.find((a) => a.type === "work") ?? user.addresses?.[0];
+    const phones = (user.phoneNumbers ?? []).map((p) => ({ ...p, type: p.type ?? "work" }));
+    const phone = (type: string) => phones.find((p) => p.type === type)?.value ?? null;
+    const types = new Set(phones.map((p) => p.type));
+    if (owns?.title || Object.hasOwn(user, "title")) body.jobTitle = user.title ?? null;
+    if (owns?.phone || types.has("work")) body.businessPhones = phone("work") ? [phone("work")] : [];
+    if (owns?.mobile || types.has("mobile")) body.mobilePhone = phone("mobile");
+    const address = user.addresses?.find((a) => !a.type || a.type === "work");
     const theirs = { streetAddress: "streetAddress", locality: "city", region: "state", postalCode: "postalCode", country: "country" } as const;
-    for (const part of ADDRESS_PARTS) if (owns[part]) body[theirs[part]] = address?.[part] ?? null;
+    for (const part of ADDRESS_PARTS) if (owns?.[part] || address?.[part] !== undefined) body[theirs[part]] = address?.[part] ?? null;
     return body;
   }
 

@@ -222,9 +222,10 @@ scimProvisioning({
 - **What's sent:** `title`; `phoneNumbers` with the work number (type `work`) and the mobile (type `mobile`), the first of them primary; and one `addresses` entry of type `work` with the parts that have a value.
 - **An empty field clears the attribute at the app**: a PUT leaves it out, and a PATCH (`update: "patch"`) removes it by path, `title`, `phoneNumbers` or `addresses` as a whole: once the target names a phone or an address part, the phone list and the address list at the app are the plugin's.
 - **Entra ID** keeps these as `jobTitle`, `businessPhones` (the work number), `mobilePhone`, and `streetAddress`, `city`, `state`, `postalCode` and `country`.
-- **Google Workspace** keeps the title in the user's primary organization (its other fields, such as a department set by an admin or by `enterprise`, kept), the phones in `phones` (only the work and mobile entries are the plugin's; an admin's other numbers stay) and the address in `addresses` (the work entry's named parts; its other parts and other addresses stay). Only the attributes the target reads are touched.
+- **Google Workspace** keeps the title in the user's primary organization (its other fields, such as a department set by an admin or by `enterprise`, kept), the phones in `phones` (the work and mobile entries are the plugin's; an admin's other numbers stay) and the address in `addresses` (the work entry's named parts; its other parts and other addresses stay). Only the attributes the target reads are touched. Google allows one primary phone and one primary address: when the plugin sends one, an admin's entry loses its primary flag.
 - **Webhooks** get the same object as SCIM.
-- A `mapUser` that sets one of these itself takes precedence for that attribute.
+- A `mapUser` that sets one of these itself takes precedence for that attribute, at Google Workspace and Entra ID too: a phone list it sends replaces the phones of the types it holds (Entra keeps only the work and mobile numbers), and only a work address has a place at Entra.
+- The apps' own limits apply: Graph refuses a title over 128 characters, say, with a 400 that fails that user's job (with Graph's message) until their next change or a reconcile.
 - **Organizations' own targets** may read only the fields you allow: by default the attribute names; `registry.attributeFields` sets the list (`[]` turns it off). Never list a field you wouldn't show their administrators.
 
 ### Enterprise User attributes

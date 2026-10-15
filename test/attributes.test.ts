@@ -196,3 +196,108 @@ describe("attributes", () => {
     await expect(create({ title: "title" })).resolves.toBeTruthy();
   });
 });
+
+describe("attributes: Google and Entra edges", () => {
+  const gUser = (h: Awaited<ReturnType<typeof createHost>>, email: string) => () => [...h.google.users.values()].find((u) => u.primaryEmail === email) as any;
+
+  it("Google Workspace: one primary per list; an admin's primary entry yields to ours", async () => {
+    const h = await createHost({ targets: [{ id: "gw", type: "google-workspace", attributes: { mobile: "mobile", locality: "locality" } }], userFields: FIELDS });
+    const pri = await h.user("Pri Mary");
+    const g = gUser(h, pri.email);
+    Object.assign(g(), { phones: [{ type: "work", value: "+1 admin", primary: true }], addresses: [{ type: "home", locality: "Leeds", primary: true }] });
+    await h.ctx.internalAdapter.updateUser(pri.id, { mobile: "+1 555 0100", locality: "London" });
+    await h.settle();
+    expect(g().phones).toEqual([{ type: "work", value: "+1 admin" }, { value: "+1 555 0100", type: "mobile", primary: true }]);
+    expect(g().addresses).toEqual([{ type: "home", locality: "Leeds" }, { locality: "London", type: "work", primary: true }]);
+  });
+
+  it("a mapUser's own title, phones (by type) and addresses (by type) reach Google; the work address stays the work one", async () => {
+    const mapUser = (u: { email: string; id: string }) => ({
+      schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"], userName: u.email, externalId: u.id, active: true, name: { givenName: "F", familyName: "G" },
+      title: "From mapUser", phoneNumbers: [{ value: "+1 other", type: "other" }], addresses: [{ type: "home", locality: "Leeds" }],
+    });
+    const h = await createHost({ targets: [{ id: "gw", type: "google-workspace", attributes: { phone: "phone" }, mapUser }], userFields: FIELDS });
+    const fay = await h.user("Fay Wray");
+    const g = gUser(h, fay.email);
+    Object.assign(g(), { organizations: [{ primary: true, department: "Sales" }], phones: [{ type: "work", value: "+1 admin" }, { type: "mobile", value: "+1 admin mobile" }], addresses: [{ type: "work", streetAddress: "1 Admin St" }] });
+    await h.ctx.internalAdapter.updateUser(fay.id, { phone: "+1 ignored: the mapUser's list wins" });
+    await h.settle();
+    expect(g().organizations).toEqual([{ department: "Sales", title: "From mapUser", primary: true }]);
+    // The mapUser's list holds the "other" type; "work" is the target's (named) and it sent none: cleared. The admin's mobile stays.
+    expect(g().phones).toEqual([{ type: "mobile", value: "+1 admin mobile" }, { value: "+1 other", type: "other" }]);
+    // The home address is sent as its own type; the admin's work address is left alone (no part named, none sent).
+    expect(g().addresses).toEqual([{ type: "work", streetAddress: "1 Admin St" }, { type: "home", locality: "Leeds" }]);
+  });
+
+  it("Entra ID: a mapUser's title and phones (by type) are sent; a home address has nowhere to go", async () => {
+    const mapUser = (u: { email: string; id: string }) => ({
+      schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"], userName: u.email, externalId: u.id, active: true, name: { givenName: "F", familyName: "G" },
+      title: "From mapUser", phoneNumbers: [{ value: "+1 mobile", type: "mobile" }], addresses: [{ type: "home", locality: "Leeds" }],
+    });
+    const h = await createHost({ targets: [{ id: "entra", type: "entra-id", attributes: { phone: "phone" }, mapUser }], userFields: FIELDS });
+    const li = await h.user("Li Wei");
+    const at = () => [...h.graph.users.values()].find((u) => u.userPrincipalName === li.email)!;
+    Object.assign(at(), { city: "Admin City" });
+    await h.ctx.internalAdapter.updateUser(li.id, { phone: "+1 ignored" });
+    await h.settle();
+    expect(at()).toMatchObject({ jobTitle: "From mapUser", businessPhones: [], mobilePhone: "+1 mobile", city: "Admin City" });
+  });
+
+  it("a map naming only mobile: SCIM gets it as the primary number; Google keeps an admin's work number; Entra leaves businessPhones alone", async () => {
+    const { h, set, remote } = await setup({ attributes: { mobile: "mobile" } });
+    const mo = await h.user("Mo Bile");
+    await set(mo.id, { mobile: "+1 555 0100", phone: "+1 ignored" });
+    expect(remote(mo.email).phoneNumbers).toEqual([{ value: "+1 555 0100", type: "mobile", primary: true }]);
+    const g = await createHost({ targets: [{ id: "gw", type: "google-workspace", attributes: { mobile: "mobile" } }], userFields: FIELDS });
+    const gu = await g.user("Go Ogle");
+    Object.assign(gUser(g, gu.email)(), { phones: [{ type: "work", value: "+1 admin" }] });
+    await g.ctx.internalAdapter.updateUser(gu.id, { mobile: "+1 555 0100" });
+    await g.settle();
+    expect(gUser(g, gu.email)().phones).toEqual([{ type: "work", value: "+1 admin" }, { value: "+1 555 0100", type: "mobile", primary: true }]);
+    const e = await createHost({ targets: [{ id: "entra", type: "entra-id", attributes: { mobile: "mobile" } }], userFields: FIELDS });
+    const eu = await e.user("En Tra");
+    const at = () => [...e.graph.users.values()].find((u) => u.userPrincipalName === eu.email)!;
+    Object.assign(at(), { businessPhones: ["+1 admin"] });
+    await e.ctx.internalAdapter.updateUser(eu.id, { mobile: "+1 555 0100" });
+    await e.settle();
+    expect(at()).toMatchObject({ businessPhones: ["+1 admin"], mobilePhone: "+1 555 0100" });
+  });
+
+  it("attributes and enterprise together: Google's primary organization carries both; Entra's user has both", async () => {
+    const fields = { ...FIELDS, department: { type: "string" }, costCenter: { type: "string" } } as const;
+    const g = await createHost({ targets: [{ id: "gw", type: "google-workspace", attributes: true, enterprise: true }], userFields: fields });
+    const jo = await g.user("Jo Both");
+    await g.ctx.internalAdapter.updateUser(jo.id, { title: "Analyst", department: "Engines", costCenter: "CC9" });
+    await g.settle();
+    expect(gUser(g, jo.email)().organizations).toEqual([{ department: "Engines", costCenter: "CC9", title: "Analyst", primary: true }]);
+    await g.ctx.internalAdapter.updateUser(jo.id, { title: null });
+    await g.settle();
+    expect(gUser(g, jo.email)().organizations).toEqual([{ department: "Engines", costCenter: "CC9", primary: true }]);
+    const e = await createHost({ targets: [{ id: "entra", type: "entra-id", attributes: true, enterprise: true }], userFields: fields });
+    const li = await e.user("Li Both");
+    await e.ctx.internalAdapter.updateUser(li.id, { title: "Analyst", department: "Engines", costCenter: "CC9" });
+    await e.settle();
+    expect([...e.graph.users.values()].find((u) => u.userPrincipalName === li.email)).toMatchObject({ jobTitle: "Analyst", department: "Engines", employeeOrgData: { costCenter: "CC9" } });
+  });
+
+  it("a Google create sends the values a new user already has", async () => {
+    const h = await createHost({ targets: [{ id: "gw", type: "google-workspace", attributes: true }], userFields: FIELDS });
+    await h.ctx.internalAdapter.createUser({ email: "new@example.com", name: "New User", emailVerified: true, ...ADA } as never, { method: "admin" });
+    await h.settle();
+    const create = [...h.google.requests].reverse().find((r) => r.method === "POST" && r.path === "/users")?.body as Record<string, unknown>;
+    expect(create).toMatchObject({ primaryEmail: "new@example.com", organizations: [{ title: "Analyst", primary: true }], phones: [WORK_PHONE, MOBILE], addresses: [{ ...ADDRESS }] });
+  });
+
+  it("PATCH: a mapUser-set title goes as it is while an empty phone list is removed by path", async () => {
+    const { h, set, remote, lastBody } = await setup({
+      update: "patch", patch: true,
+      mapUser: (u: { email: string; id: string }) => ({ schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"], userName: u.email, externalId: u.id, active: true, name: { givenName: "F", familyName: "G" }, title: "From mapUser" }),
+    });
+    const pat = await h.user("Pat Ch");
+    await set(pat.id, { locality: "London" });
+    const ops = lastBody("PATCH")?.Operations as { op: string; path?: string; value?: Record<string, unknown> }[];
+    expect(ops.find((o) => o.op === "replace")?.value).toMatchObject({ title: "From mapUser", addresses: [{ type: "work", primary: true, locality: "London" }] });
+    expect(ops.filter((o) => o.op === "remove").map((o) => o.path)).toEqual(["phoneNumbers"]);
+    expect(remote(pat.email)).toMatchObject({ title: "From mapUser" });
+  });
+});

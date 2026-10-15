@@ -166,15 +166,19 @@ export function googleWorkspaceClient(target: Target, owns?: AttributeFields | n
   }
 
   /**
-   * The attributes a target reads (`attributes`), where Google keeps them, merged into what the
-   * user has now: the title in the primary organization (its other fields kept), the work and
-   * mobile phones (an admin's other numbers kept), and the work address, its named parts set or
-   * removed (its other parts, and other addresses, kept). Only what the target names is touched.
+   * The attributes a target reads (`attributes`), and any a `mapUser` sets, where Google keeps
+   * them, merged into what the user has now: the title in the primary organization (its other
+   * fields kept); the phones by type (the work and mobile numbers the target reads, and any type a
+   * mapUser sends; an admin's other numbers kept); the addresses by type too, the work one with
+   * its named parts set or removed and its other parts kept. Google allows one primary entry per
+   * list: when ours is primary, a kept entry's flag goes. Only what's ours is touched.
    */
   function details(user: ScimUser, now: GoogleUser | null, organizations: GoogleOrganization[] | undefined): Partial<Pick<GoogleUser, "organizations" | "phones" | "addresses">> {
-    if (!owns) return {};
+    const sent = { title: Object.hasOwn(user, "title"), phones: Object.hasOwn(user, "phoneNumbers"), addresses: Object.hasOwn(user, "addresses") };
     const out: Partial<Pick<GoogleUser, "organizations" | "phones" | "addresses">> = {};
-    if (owns.title) {
+    /** Kept entries lose their primary flag when ours carries it. */
+    const unprimary = <T extends { primary?: boolean | undefined }>(entries: T[], oursPrimary: boolean) => (oursPrimary ? entries.map(({ primary: _, ...e }) => e as T) : entries);
+    if (owns?.title || sent.title) {
       const orgs = organizations ?? now?.organizations ?? [];
       const primary: GoogleOrganization = { ...(orgs.find((o) => o.primary) ?? {}) };
       if (user.title) primary.title = user.title;
@@ -182,22 +186,29 @@ export function googleWorkspaceClient(target: Target, owns?: AttributeFields | n
       const { primary: _, ...rest } = primary;
       out.organizations = [...orgs.filter((o) => !o.primary), ...(Object.keys(rest).length ? [{ ...rest, primary: true }] : [])];
     }
-    if (owns.phone || owns.mobile) {
-      const ours = [...(owns.phone ? ["work"] : []), ...(owns.mobile ? ["mobile"] : [])];
-      const sent = (user.phoneNumbers ?? []).filter((p) => ours.includes(p.type ?? ""));
-      out.phones = [...(now?.phones ?? []).filter((p) => !ours.includes(p.type ?? "")), ...sent.map((p) => ({ value: p.value, type: p.type as string, ...(p.primary ? { primary: true } : {}) }))];
+    if (owns?.phone || owns?.mobile || sent.phones) {
+      const list = (user.phoneNumbers ?? []).map((p) => ({ value: p.value, type: p.type ?? "work", ...(p.primary ? { primary: true } : {}) }));
+      const ours = new Set([...(owns?.phone ? ["work"] : []), ...(owns?.mobile ? ["mobile"] : []), ...list.map((p) => p.type)]);
+      const kept = (now?.phones ?? []).filter((p) => !ours.has(p.type ?? ""));
+      out.phones = [...unprimary(kept, list.some((p) => p.primary)), ...list];
     }
-    const parts = ADDRESS_PARTS.filter((a) => owns[a]);
-    if (parts.length) {
-      const sent = user.addresses?.find((a) => a.type === "work") ?? user.addresses?.[0];
-      const work: Record<string, unknown> = { ...((now?.addresses ?? []).find((a) => a.type === "work") ?? {}) };
+    const addresses = (user.addresses ?? []).map((a) => ({ ...a, type: a.type ?? "work" }));
+    const work = addresses.find((a) => a.type === "work");
+    const parts = ADDRESS_PARTS.filter((part) => owns?.[part] || (work && work[part] !== undefined));
+    if (parts.length || sent.addresses) {
+      const ours = new Set([...(parts.length ? ["work"] : []), ...addresses.map((a) => a.type)]);
+      const kept = (now?.addresses ?? []).filter((a) => !ours.has(a.type ?? ""));
+      // Other types a mapUser sends go as they are; the work entry keeps its parts we don't name.
+      const others = addresses.filter((a) => a.type !== "work").map((a) => Object.fromEntries(Object.entries(a).filter(([, v]) => v !== undefined)));
+      const merged: Record<string, unknown> = { ...((now?.addresses ?? []).find((a) => a.type === "work") ?? {}) };
       for (const part of parts) {
-        const v = sent?.[part];
-        if (v) work[part] = v;
-        else delete work[part];
+        const v = work?.[part];
+        if (v) merged[part] = v;
+        else delete merged[part];
       }
-      const { type: _t, primary: _p, ...rest } = work;
-      out.addresses = [...(now?.addresses ?? []).filter((a) => a.type !== "work"), ...(Object.keys(rest).length ? [{ ...rest, type: "work", primary: true }] : [])];
+      const { type: _t, primary: _p, ...rest } = merged;
+      const workEntry = ours.has("work") && Object.keys(rest).length ? [{ ...rest, type: "work", primary: true }] : [];
+      out.addresses = [...unprimary(kept, workEntry.length > 0 || others.some((a) => a.primary)), ...others, ...workEntry];
     }
     return out;
   }
