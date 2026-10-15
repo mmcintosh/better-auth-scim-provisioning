@@ -1,7 +1,8 @@
-# Weekly run against Better Auth's latest and next tags, including versions outside the peer
-# range, so a new release that breaks the plugin is known before users find it. Failures open an
-# issue; they never block PRs. The `next` dist-tag can be stale (0.8.7-beta.5 in 2026-09), so
-# the job skips any tag older than the peer range's minimum.
+# Weekly run against Better Auth's latest, beta and next tags, including versions outside the
+# peer range, so a new release that breaks the plugin is known before users find it: a new minor's
+# betas (1.8.0-beta.0 came out 2026-10-15, under `beta`) are tested while they're betas. Failures
+# open an issue; they never block PRs. A pre-release tag can be stale (`next` was 0.8.7-beta.5 in
+# 2026-09), so the job skips any tag older than the peer range's minimum.
 name: Upstream canary
 on:
   schedule: [{ cron: "0 6 * * 1" }]
@@ -12,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tag: [latest, next]
+        tag: [latest, beta, next]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
