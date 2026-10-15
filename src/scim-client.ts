@@ -280,11 +280,22 @@ export function scimClient(endpoint: ScimEndpoint) {
      * startIndex, whichever it pages by. Asked for by cursor and index alike, as group members are.
      */
     async listUsers(cursor: string | null, count: number): Promise<{ users: ListedUser[]; next: string | null }> {
-      const startIndex = cursor?.startsWith("i:") ? Number(cursor.slice(2)) : 1;
-      const c = cursor?.startsWith("c:") ? cursor.slice(2) : "";
+      // Cursors are ours: "c:<the app's cursor>", or "i:<startIndex>:<the previous page's last id>".
+      let startIndex = 1;
+      let c = "";
+      let lastId = "";
+      const byIndex = cursor === null ? null : /^i:([1-9]\d*):([\s\S]*)$/.exec(cursor);
+      if (byIndex) {
+        startIndex = Number(byIndex[1]);
+        lastId = byIndex[2] as string;
+      } else if (cursor !== null) {
+        if (!/^c:.+/.test(cursor)) throw new ScimError("unknown cursor: pass the `next` of a previous page", null, false);
+        c = cursor.slice(2);
+      }
       const { json } = await request("GET", `/Users?count=${count}&cursor=${encodeURIComponent(c)}&startIndex=${startIndex}`);
       const list = json as { Resources?: unknown; nextCursor?: unknown; totalResults?: unknown } | null;
-      if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number")) throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, true);
+      // No job retries a listing: a page that isn't a list is said so, not waited for.
+      if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number")) throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, false);
       const resources = Array.isArray(list.Resources) ? (list.Resources as { id?: unknown; userName?: unknown; externalId?: unknown; active?: unknown }[]) : [];
       const users: ListedUser[] = [];
       for (const r of resources) {
@@ -292,8 +303,14 @@ export function scimClient(endpoint: ScimEndpoint) {
         users.push({ id: r.id, userName: typeof r.userName === "string" ? r.userName : "", externalId: typeof r.externalId === "string" && r.externalId ? r.externalId : null, ...(typeof r.active === "boolean" ? { active: r.active } : {}) });
       }
       if (typeof list.nextCursor === "string" && list.nextCursor) return { users, next: `c:${list.nextCursor}` };
-      const total = typeof list.totalResults === "number" ? list.totalResults : 0;
-      return { users, next: resources.length > 0 && startIndex - 1 + resources.length < total ? `i:${startIndex + resources.length}` : null };
+      // Paging by the app's cursor: no next cursor is the end.
+      if (c) return { users, next: null };
+      // By index. An app that ignores startIndex gives the page before again: dropped, and the end.
+      if (lastId && resources.some((r) => r.id === lastId)) return { users: [], next: null };
+      // More while totalResults says so; without it (apps leave it out), while the page is full.
+      const total = typeof list.totalResults === "number" ? list.totalResults : null;
+      const more = resources.length > 0 && (total === null ? resources.length >= count : startIndex - 1 + resources.length < total);
+      return { users, next: more ? `i:${startIndex + resources.length}:${users.at(-1)?.id ?? lastId}` : null };
     },
     async create(user: ScimUser): Promise<string> {
       return idOf((await request("POST", "/Users", onTheWire(user))).json, "POST /Users");

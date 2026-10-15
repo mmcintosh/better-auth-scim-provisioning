@@ -46,7 +46,8 @@ export interface GraphStoredUser {
   binnedUpn?: string;
 }
 
-export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">; lag?: number | undefined; deleteLag?: number | undefined } = {}) {
+/** `nextLinkBase`: where a list's nextLink points (the real Graph points at itself, whatever the client calls); default this mock's own url. */
+export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">; lag?: number | undefined; deleteLag?: number | undefined; nextLinkBase?: string | undefined } = {}) {
   const domains = o.domains ?? { "example.com": "Federated", "managed.example": "Managed" };
   const tenantId = "00000000-0000-4000-8000-000000000001";
   const clientId = "11111111-2222-3333-4444-555555555555";
@@ -147,7 +148,7 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
       const top = Math.min(Number(q.get("$top") ?? 100), 999);
       const skip = Number(q.get("$skiptoken") ?? 0);
       const page = all.slice(skip, skip + top).map((x) => select(x, q));
-      return json(200, { "@odata.context": `${url}/$metadata#users`, value: page, ...(skip + top < all.length ? { "@odata.nextLink": `${url}/users?$select=${q.get("$select") ?? ""}&$top=${top}&$skiptoken=${skip + top}` } : {}) });
+      return json(200, { "@odata.context": `${url}/$metadata#users`, value: page, ...(skip + top < all.length ? { "@odata.nextLink": `${o.nextLinkBase ?? url}/users?$select=${q.get("$select") ?? ""}&$top=${top}&$skiptoken=${skip + top}` } : {}) });
     }
     if (path === "/users" && method === "GET") {
       const filter = (q.get("$filter") ?? "").match(/^(userPrincipalName|onPremisesImmutableId) eq '((?:[^']|'')*)'$/);

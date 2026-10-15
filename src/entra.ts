@@ -307,13 +307,21 @@ export function entraIdClient(target: Target, owns?: AttributeFields | null): En
       if (cursor !== null && !cursor.startsWith("/users?")) throw new ScimError("unknown cursor: pass the `next` of a previous page", null, false);
       const page = await request("GET", cursor ?? `/users?$select=${SELECT}&$top=${Math.min(Math.max(1, count), 999)}`);
       if (!page || !Array.isArray(page.value)) throw new ScimError("GET /users: not a Graph list (check the target's url)", null, true);
-      const users = page.value.filter((u): u is GraphUser & { id: string } => !!u.id).map((u) => ({ id: u.id, userName: u.userPrincipalName ?? "", externalId: u.onPremisesImmutableId || null, active: u.accountEnabled !== false }));
+      const users = page.value.filter((u): u is GraphUser & { id: string } => !!u.id).map((u) => ({ id: u.id, userName: u.userPrincipalName ?? "", externalId: u.onPremisesImmutableId || null, ...(typeof u.accountEnabled === "boolean" ? { active: u.accountEnabled } : {}) }));
       const link = page["@odata.nextLink"];
       let next: string | null = null;
       if (typeof link === "string" && link) {
-        const u = new URL(link);
-        const basePath = new URL(base).pathname;
-        next = `${u.pathname.startsWith(basePath) ? u.pathname.slice(basePath.length) : u.pathname}${u.search}`;
+        // Graph's link is absolute, to Graph itself, whatever `url` is (a proxy's): only its /users
+        // query is kept, and sent to `url` again.
+        let u: URL;
+        try {
+          u = new URL(link);
+        } catch {
+          throw new ScimError("GET /users: the next page's link isn't a URL", null, false);
+        }
+        const at = u.pathname.lastIndexOf("/users");
+        if (at < 0 || u.pathname.slice(at) !== "/users") throw new ScimError("GET /users: the next page's link isn't a /users page", null, false);
+        next = `/users${u.search}`;
       }
       return { users, next };
     },

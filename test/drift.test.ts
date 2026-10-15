@@ -21,6 +21,7 @@ async function allDrift(h: Host, targetId: string, limit: number) {
     scanned += page.scanned;
     next = page.next;
     pages++;
+    if (pages > 50) throw new Error("drift never ends");
   } while (next);
   return { items, scanned, pages };
 }
@@ -140,5 +141,120 @@ describe("drift", () => {
     expect(await drift(hook.id, owner.headers)).toEqual({ ok: null, problem: expect.stringContaining("webhook") });
     const { target: wrong } = await create({ name: "wrong", url: "https://app.example.com/scim/v2" }, { token: "wrong" });
     expect(await drift(wrong.id, owner.headers)).toEqual({ ok: false, problem: "the credentials were refused", status: 401 });
+  });
+});
+
+describe("drift: paging and the edges", () => {
+  it("SCIM apps that page by cursor (AWS-style), and ones that leave out totalResults", async () => {
+    const h = await createHost({ targets: [{ id: "aws", like: "aws" }, { id: "nototal", noTotal: true }] });
+    for (let i = 0; i < 5; i++) await h.user(`User ${i}`);
+    const first = await h.auth.api.scimProvisioningDrift({ body: { targetId: "aws", limit: 2 } });
+    expect(first.next).toMatch(/^c:/);
+    const aws = await allDrift(h, "aws", 2);
+    expect([aws.scanned, aws.pages, aws.items]).toEqual([5, 3, []]);
+    // A cursor app whose directory fits one page: no next cursor and no totalResults, and the app
+    // ignores startIndex. The page asked for next is the same one again: dropped, and the end.
+    const one = await createHost({ targets: [{ id: "aws", like: "aws" }] });
+    await one.user("Only One");
+    await one.user("Only Two");
+    expect(await allDrift(one, "aws", 2)).toMatchObject({ scanned: 2, pages: 2, items: [] });
+    // Without totalResults: full pages mean more, a short page is the last.
+    const nt = await allDrift(h, "nototal", 2);
+    expect([nt.scanned, nt.pages, nt.items]).toEqual([5, 3, []]);
+  });
+
+  it("a cursor it didn't hand out is refused, never sent", async () => {
+    const h = await createHost({ targets: [{ id: "app" }] });
+    const before = h.app.requests.length;
+    for (const after of ["i:abc", "i:-5", "i:0:x", "i:3", "whatever", "c:"]) await expect(h.auth.api.scimProvisioningDrift({ body: { targetId: "app", after } })).rejects.toThrow(/unknown cursor/);
+    expect(h.app.requests.length).toBe(before);
+  });
+
+  it("a pending create is a mismatch, not 'no link'; a second account for a linked user is said so", async () => {
+    const h = await createHost({ targets: [{ id: "app" }] });
+    const ada = await h.user("Ada Lovelace");
+    const bo = await h.user("Bo Bell");
+    // Ada's create is pending (its reply was lost): the link has no remoteId yet.
+    await h.ctx.adapter.updateMany({ model: "scimProvisioningLink", where: [{ field: "userId", value: ada.id }], update: { remoteId: "" } });
+    // Bo has a second account at the app carrying his externalId.
+    h.app.users.set("bo2", { id: "bo2", userName: "bo.bell@example.com", externalId: bo.id, active: true });
+    const { items } = await allDrift(h, "app", 10);
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userName: ada.email, userId: ada.id, finding: "mismatch", detail: expect.stringContaining("pending") }),
+        expect.objectContaining({ userName: "bo.bell@example.com", userId: bo.id, finding: "unlinked", detail: expect.stringContaining("another one") }),
+      ]),
+    );
+    expect(items).toHaveLength(2);
+  });
+
+  it("an organization's target: only its members count as users here", async () => {
+    const h = await createHost({ targets: [{ id: "app" }] });
+    const org = await h.ctx.adapter.create<Record<string, unknown>, { id: string }>({ model: "organization", data: { name: "Acme", slug: "acme", createdAt: new Date() } });
+    const { outbox, staticTargets } = await import("../src/outbox");
+    const target = { id: "acme", type: "scim" as const, url: h.app.url, token: h.app.token, fetch: h.app.fetch, organizationId: org.id };
+    const box = outbox({ targets: [target] }, h.ctx.adapter as never, { warn() {}, error() {} }, staticTargets([target]));
+    // Both are at the app (through "app"), with their externalIds; only one is a member.
+    const member = await h.user("Mem Ber");
+    const outsider = await h.user("Out Sider");
+    await h.ctx.adapter.create({ model: "member", data: { userId: member.id, organizationId: org.id, role: "member", createdAt: new Date() } });
+    const { items } = await box.drift(target, null, 10);
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userName: member.email, finding: "unlinked", userId: member.id }),
+        expect.objectContaining({ userName: outsider.email, finding: "unmanaged", userId: null, detail: expect.stringContaining("nobody this target provisions") }),
+      ]),
+    );
+    expect(items).toHaveLength(2);
+  });
+
+  it("Entra: Graph's next-page link points at Graph itself, not at a proxy url; only its /users query is kept; a bad link is a plain error", async () => {
+    const h = await createHost({ targets: [{ id: "entra", type: "entra-id" }], graphNextLinkBase: "https://graph.microsoft.com/v1.0" });
+    await h.user("Ada Lovelace");
+    await h.user("Bo Bell");
+    const page = await h.auth.api.scimProvisioningDrift({ body: { targetId: "entra", limit: 1 } });
+    expect(page.next).toMatch(/^\/users\?/);
+    expect((await allDrift(h, "entra", 1)).pages).toBe(2);
+    const bad = await createHost({ targets: [{ id: "entra", type: "entra-id" }], graphNextLinkBase: "not a url" });
+    await bad.user("Ada Lovelace");
+    await bad.user("Bo Bell");
+    await expect(bad.auth.api.scimProvisioningDrift({ body: { targetId: "entra", limit: 1 } })).rejects.toThrow(/next page's link/);
+  });
+
+  it("an account whose state the app doesn't say isn't a mismatch; an archived Workspace account counts as inactive", async () => {
+    const h = await createHost({ targets: [{ id: "entra", type: "entra-id" }] });
+    await h.user("Ada Lovelace");
+    [...h.graph.users.values()][0]!.accountEnabled = null as never;
+    expect((await allDrift(h, "entra", 10)).items).toEqual([]);
+    const g = await createHost({ targets: [{ id: "gw", type: "google-workspace" }] });
+    const bo = await g.user("Bo Bell");
+    Object.assign([...g.google.users.values()][0]!, { archived: true });
+    expect((await allDrift(g, "gw", 10)).items).toEqual([expect.objectContaining({ userName: bo.email, finding: "mismatch", active: false })]);
+  });
+
+  it("stored targets: a disabled one is still listed (read only); one whose credentials can't be read is refused before any request, and its placeholder keeps the registry's fetch", async () => {
+    const remote = mockScim();
+    const h = await createHost({ targets: [], registry: { fetch: remote.fetch } });
+    const up = await h.auth.api.signUpEmail({ body: { email: "olive@example.com", password: "correct-horse-battery", name: "olive" } });
+    await h.ctx.internalAdapter.updateUser(up.user.id, { emailVerified: true });
+    await h.settle();
+    const res = await h.auth.api.signInEmail({ body: { email: "olive@example.com", password: "correct-horse-battery" }, asResponse: true });
+    const headers = new Headers({ cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") });
+    const acme = (await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers }))!;
+    const { target } = await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, settings: { name: "app", url: "https://app.example.com/scim/v2" }, credentials: { token: remote.token } } as never, headers });
+    await h.settle();
+    const drift = () => h.auth.api.scimProvisioningTargetDrift({ body: { id: target.id } as never, headers }) as Promise<{ ok: boolean | null; problem?: string; scanned?: number }>;
+    await h.auth.api.scimProvisioningUpdateTarget({ body: { id: target.id, enabled: false } as never, headers });
+    // The owner was provisioned when the target was made: listed, and no drift.
+    expect(await drift()).toMatchObject({ ok: true, scanned: 1, items: [] });
+    await h.ctx.adapter.updateMany({ model: "scimProvisioningTarget", where: [{ field: "targetId", value: target.id }], update: { sealed: "garbage" } });
+    const before = remote.requests.length;
+    expect(await drift()).toEqual({ ok: false, problem: expect.stringContaining("can't be read") });
+    await expect(h.auth.api.scimProvisioningDrift({ body: { targetId: target.id } })).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("can't be read") });
+    expect(remote.requests.length).toBe(before);
+    // The placeholder the registry builds for it carries the registry's fetch: nothing it ever sends can leave the guard.
+    const { registrySource } = await import("../src/registry");
+    const source = registrySource([], h.ctx.adapter as never, h.ctx.secretConfig, { fetch: remote.fetch }, { error() {} });
+    expect((await source.get(target.id))?.fetch).toBe(remote.fetch);
   });
 });

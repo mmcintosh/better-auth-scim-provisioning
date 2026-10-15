@@ -23,6 +23,8 @@ type GoogleOrganization = { primary?: boolean; name?: string; department?: strin
 
 interface GoogleUser {
   suspended?: boolean;
+  /** Archived (an Archived User licence): can't sign in, like a suspended one. */
+  archived?: boolean;
   /** Why it's suspended: "ADMIN" (an admin, or us through the API), or Google's own holds ("WEB_LOGIN_REQUIRED", "ABUSE"…). */
   suspensionReason?: string;
   id?: string;
@@ -380,7 +382,7 @@ export function googleWorkspaceClient(target: Target, owns?: AttributeFields | n
     /** A page of the Workspace's users (the admin's customer, every domain), for drift detection. */
     async listUsers(cursor: string | null, count: number) {
       const page = await request("GET", `/users?customer=my_customer&orderBy=email&maxResults=${Math.min(Math.max(1, count), 500)}${cursor ? `&pageToken=${encodeURIComponent(cursor)}` : ""}`);
-      const users = (page?.users ?? []).filter((u): u is GoogleUser & { id: string; primaryEmail: string } => !!u.id && !!u.primaryEmail).map((u) => ({ id: u.id, userName: u.primaryEmail, externalId: oursIn(u), active: u.suspended !== true }));
+      const users = (page?.users ?? []).filter((u): u is GoogleUser & { id: string; primaryEmail: string } => !!u.id && !!u.primaryEmail).map((u) => ({ id: u.id, userName: u.primaryEmail, externalId: oursIn(u), active: !(u.suspended === true || u.archived === true) }));
       return { users, next: page?.nextPageToken || null };
     },
     replace: update,

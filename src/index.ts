@@ -5,7 +5,7 @@ import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
-import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
+import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, pauseReason, staticTargets, type TargetSource } from "./outbox";
 import { attributesOption, enterpriseOption, missingAttributeFields, missingEnterpriseFields } from "./mapping";
 import { registrySource, secretText, TARGET_MODEL } from "./registry";
 import { registryEndpoints } from "./registry-endpoints";
@@ -603,6 +603,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               drift: async (targetId, after, limit) => {
                 const target = await s.source.get(targetId);
                 if (!target) throw new APIError("NOT_FOUND", { message: `[scim] no target ${targetId}` });
+                if (pauseReason(target) === "unreadable") throw new APIError("BAD_REQUEST", { message: "[scim] its stored credentials can't be read (was the secret changed?): give them again" });
                 return s.box.drift(target, after, limit);
               },
             };
@@ -693,7 +694,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
        * null): accounts nobody here manages (made by hand, or by another tool), ours without a
        * link here, and linked ones that differ (deactivated or renamed at the app, or still active
        * though the user was deleted here). Reported, never changed. A webhook receiver can't be
-       * listed.
+       * listed; a disabled stored target still is (it's read only), one whose credentials can't
+       * be read isn't.
        */
       scimProvisioningDrift: createAuthEndpoint.serverOnly(
         { method: "POST", body: z.strictObject({ targetId: z.string().min(1), after: z.string().optional(), limit: z.number().int().min(1).max(1000).optional() }) },
@@ -703,6 +705,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           const target = await s.source.get(ctx.body.targetId);
           if (!target) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${ctx.body.targetId}` });
           if (target.type === "webhook") throw new APIError("BAD_REQUEST", { message: "[scim] a webhook receiver can't be listed, so it has no drift to report" });
+          if (pauseReason(target) === "unreadable") throw new APIError("BAD_REQUEST", { message: `[scim] target ${target.id}: its stored credentials can't be read (was the secret changed?): give them again` });
           return ctx.json(await s.box.drift(target, ctx.body.after ?? null, ctx.body.limit ?? 100));
         },
       ),

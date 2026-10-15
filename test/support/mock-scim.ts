@@ -43,7 +43,8 @@ export type Fault = { status: number; retryAfter?: string; detail?: string } | {
  * `discovery`: serve /ResourceTypes and/or /Schemas (RFC 7644 §4), and whether they list the
  * Enterprise User extension. Neither by default, as many apps.
  */
-export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; discovery?: { resourceTypes?: boolean; schemas?: boolean; enterprise?: boolean } } = {}) {
+/** `noTotal`: the users list leaves out totalResults (apps do), so paging goes by full pages. With `like: "aws"`, the users list pages by cursor. */
+export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; noTotal?: boolean; discovery?: { resourceTypes?: boolean; schemas?: boolean; enterprise?: boolean } } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
   const groups = new Map<string, StoredGroup>();
@@ -134,11 +135,19 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
       const f = /^userName eq "(.*)"$/.exec(url.searchParams.get("filter") ?? "");
       const want = f ? (JSON.parse(`"${f[1]}"`) as string).toLowerCase() : null;
       const hits = [...users.values()].filter((u) => want === null || u.userName.toLowerCase() === want).map(view);
-      // Paged by startIndex and count when asked (RFC 7644 §3.4.2.4); all of it otherwise.
       const count = Number(url.searchParams.get("count") || 0);
+      if (o.like === "aws") {
+        // As AWS pages (found live for group members): by cursor, and only when the request carries `cursor=`, even empty; no totalResults.
+        const start = Number(url.searchParams.get("cursor") || 0);
+        const size = count || hits.length;
+        const page = hits.slice(start, start + size);
+        const cursored = url.searchParams.has("cursor");
+        return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], itemsPerPage: page.length, ...(cursored && start + size < hits.length ? { nextCursor: String(start + size) } : {}), Resources: page });
+      }
+      // Paged by startIndex and count when asked (RFC 7644 §3.4.2.4); all of it otherwise.
       const start = Math.max(1, Number(url.searchParams.get("startIndex") || 1));
       const page = count ? hits.slice(start - 1, start - 1 + count) : hits;
-      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults: hits.length, startIndex: start, itemsPerPage: page.length, Resources: page });
+      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], ...(o.noTotal ? {} : { totalResults: hits.length }), startIndex: start, itemsPerPage: page.length, Resources: page });
     }
     if (method === "POST" && !id) {
       const u = body as Partial<StoredUser>;

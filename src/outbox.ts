@@ -182,6 +182,8 @@ export const markPaused = <T extends Target>(t: T, why: "disabled" | "unreadable
   return t;
 };
 export const isPaused = (t: Target) => pausedTargets.has(t);
+/** Why a target is paused, if it is: disabled by its organization, or its stored credentials can't be read. */
+export const pauseReason = (t: Target) => pausedTargets.get(t);
 
 /**
  * Where the targets come from, looked up when they're used: the ones in code, and (with a
@@ -1289,11 +1291,23 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     }
     // The users here that matter: the linked ones, and those an unlinked account's externalId names.
     const wanted = [...new Set([...[...byRemote.values()].map((l) => l.userId), ...page.users.filter((u) => !byRemote.has(u.id) && u.externalId).map((u) => u.externalId as string)])];
-    const here = new Set<string>();
+    const exists = new Set<string>();
     for (let i = 0; i < wanted.length; i += IN_BATCH) {
       const batch = wanted.slice(i, i + IN_BATCH);
       const found = (await adapter.findMany({ model: "user", where: [{ field: "id", value: batch, operator: "in" }], limit: batch.length })) as { id: string }[];
-      for (const u of found) if (batch.includes(u.id)) here.add(u.id);
+      for (const u of found) if (batch.includes(u.id)) exists.add(u.id);
+    }
+    // An organization's target provisions its members only: an account for anyone else is nobody's
+    // here, and the answer mustn't say whether the id is a user elsewhere on the host.
+    let provisions = exists;
+    if (target.organizationId) {
+      provisions = new Set<string>();
+      const ids = [...exists];
+      for (let i = 0; i < ids.length; i += IN_BATCH) {
+        const batch = ids.slice(i, i + IN_BATCH);
+        const rows = (await adapter.findMany({ model: "member", where: [{ field: "organizationId", value: target.organizationId }, { field: "userId", value: batch, operator: "in" }], limit: batch.length })) as { userId: string; organizationId: string }[];
+        for (const m of rows) if (m.organizationId === target.organizationId && batch.includes(m.userId)) provisions.add(m.userId);
+      }
     }
     const items: { remoteId: string; userName: string; externalId: string | null; active: boolean | null; userId: string | null; finding: "unmanaged" | "unlinked" | "mismatch"; detail: string }[] = [];
     for (const u of page.users) {
@@ -1301,14 +1315,21 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const account = { remoteId: u.id, userName: u.userName, externalId: u.externalId, active: u.active ?? null };
       if (link) {
         const problems: string[] = [];
-        if (link.active && !here.has(link.userId)) problems.push("the user was deleted here, and the account is still active");
-        if (u.active !== undefined && u.active !== link.active) problems.push(u.active ? "active at the app, deactivated here" : "deactivated at the app, active here");
+        if (link.active && !exists.has(link.userId)) {
+          // Deleted here, and the deprovisioning didn't get through: say what the app shows, not our record.
+          problems.push(u.active === false ? "the user was deleted here and the account is deactivated at the app, though our record still says active" : u.active === true ? "the user was deleted here, and the account is still active" : "the user was deleted here, and the account is still there (our record says active)");
+        } else if (u.active !== undefined && u.active !== link.active) problems.push(u.active ? "active at the app, deactivated here" : "deactivated at the app, active here");
         if (u.userName.toLowerCase() !== link.userName.toLowerCase()) problems.push(`renamed at the app (we sent ${link.userName})`);
         if (problems.length) items.push({ ...account, userId: link.userId, finding: "mismatch", detail: `${problems.join("; ")}: a reconcile, or queueing the user, sends our state again` });
-      } else if (u.externalId && here.has(u.externalId)) {
-        items.push({ ...account, userId: u.externalId, finding: "unlinked", detail: "has our externalId for a user here, but no link: if its userName is still the user's address, queueing the user takes it over; otherwise resolve it at the app" });
+      } else if (u.externalId && provisions.has(u.externalId)) {
+        // Ours by externalId, but not the account the user's link names: a create whose reply was
+        // lost (the link is pending), a second account, or a lost link.
+        const own = await findLink(keyOf(target.id, u.externalId));
+        if (own && !own.remoteId) items.push({ ...account, userId: u.externalId, finding: "mismatch", detail: "a create of ours for this user is pending (its reply was lost): the next delivery settles it" });
+        else if (own) items.push({ ...account, userId: u.externalId, finding: "unlinked", detail: `has our externalId for a user whose account here is another one (${own.remoteId}): resolve it at the app` });
+        else items.push({ ...account, userId: u.externalId, finding: "unlinked", detail: "has our externalId for a user here, but no link: if its userName is still the user's address, queueing the user takes it over; otherwise resolve it at the app" });
       } else {
-        items.push({ ...account, userId: null, finding: "unmanaged", detail: u.externalId ? `its externalId (${u.externalId}) is no user here: made by another tool, or for a user since deleted` : "no externalId and no link here: made by hand, or by another tool" });
+        items.push({ ...account, userId: null, finding: "unmanaged", detail: u.externalId ? `its externalId (${u.externalId}) is nobody this target provisions: made by another tool, or for a user since deleted (at an organization's target, no longer a member)` : "no externalId and no link here: made by hand, or by another tool" });
       }
     }
     return { items, scanned: page.users.length, next: page.next };

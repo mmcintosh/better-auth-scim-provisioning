@@ -350,7 +350,8 @@ export function registrySource(code: Target[], adapter: Adapter, key: SealKey, o
       // they go once it's given new credentials or the right secret is back.
       log.error(`[scim] stored target ${row.targetId}: ${(e as Error).message}; paused until it's fixed`);
       const type = settings?.type ?? "scim";
-      target = markPaused(assemble(row, settings ?? { url: "https://unreadable.invalid" }, UNREADABLE[type] as StoredCredentials), "unreadable");
+      // With the registry's fetch too: nothing this placeholder ever sends may leave the guard.
+      target = markPaused(assemble(row, settings ?? { url: "https://unreadable.invalid" }, UNREADABLE[type] as StoredCredentials, fetchFor), "unreadable");
     }
     built.set(row.targetId, { stamp, target });
     if (built.size > 1000) built.delete(built.keys().next().value as string);

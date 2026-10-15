@@ -136,7 +136,11 @@ async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptio
 /** What a check found, in broad terms only: never the app's own words, which would make this a way to read internal services. */
 function checkResult(e: unknown): { ok: false; problem: string; status?: number } {
   const status = e instanceof ScimError ? e.status : null;
-  if (status === null) return { ok: false, problem: e instanceof ScimError ? "no answer (the host can't be reached, or didn't answer in time)" : "the request couldn't be made" };
+  if (status === null) {
+    if (!(e instanceof ScimError)) return { ok: false, problem: "the request couldn't be made" };
+    // Retried errors are the app not answering; the rest are an answer that couldn't be used.
+    return { ok: false, problem: e.retryable ? "no answer (the host can't be reached, or didn't answer in time)" : "the app's answer couldn't be used: check the URL, or pass a `next` this route handed out" };
+  }
   const problem =
     status === 401 || status === 403
       ? "the credentials were refused"
@@ -421,6 +425,8 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const actor = await actorOf(ctx, host.options);
         const row = await rowFor(ctx, actor, ctx.body.id);
         if (row.type === "webhook") return ctx.json({ ok: null, problem: "a webhook receiver can't be listed, so it has no drift to report" });
+        // As the check route: a target whose credentials can't be read sends nothing.
+        if (!(await readable(ctx, row))) return ctx.json({ ok: false, problem: "its stored credentials can't be read (was the secret changed?): give them again" });
         try {
           return ctx.json({ ok: true, ...(await instance(ctx).drift(row.targetId, ctx.body.after ?? null, ctx.body.limit ?? 100)) });
         } catch (e) {
