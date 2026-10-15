@@ -588,6 +588,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           options: options.registry,
           codeIds: options.targets.map((t) => t.id),
           targetProblems,
+          userFields: () => userFields,
           instance: (ctx) => {
             const s = stateOf(ctx.context);
             if (!s) return undefined;

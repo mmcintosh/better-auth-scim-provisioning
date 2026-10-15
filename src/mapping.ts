@@ -53,13 +53,21 @@ export const enterpriseOption = z.union([
 /** The user fields organizations' stored targets may read for `enterprise`, unless the host lists others (`registry.enterpriseFields`). */
 export const DEFAULT_STORED_ENTERPRISE_FIELDS: readonly string[] = [...ENTERPRISE_VALUES, "managerId"];
 
-/** Fields an `enterprise` option reads that aren't allowed: a stored target may read only the host's allowlist, never a hidden or sensitive column. */
-export function enterpriseFieldProblems(option: boolean | EnterpriseFields | undefined, allowed: readonly string[]): string[] {
-  const fields = enterpriseFields(option);
+/**
+ * Fields an option reads that aren't allowed: a stored target may read only the host's allowlist,
+ * never a hidden or sensitive column. `true` is resolved against the user model's fields first
+ * (`known`), so it reads only what the users have, and a narrowed allowlist covering those passes.
+ */
+function fieldProblems(option: "enterprise" | "attributes", fields: EnterpriseFields | AttributeFields | null, allowed: readonly string[]): string[] {
   if (!fields) return [];
   const bad = [...new Set(Object.values(fields).filter((f): f is string => !!f && !allowed.includes(f)))];
-  return bad.length ? [`settings.enterprise: reads ${bad.join(", ")}, which the host doesn't allow organizations' targets to read (registry.enterpriseFields: ${allowed.join(", ") || "none"})`] : [];
+  const list = option === "enterprise" ? "enterpriseFields" : "attributeFields";
+  return bad.length ? [`settings.${option}: reads ${bad.join(", ")}, which the host doesn't allow organizations' targets to read (registry.${list}: ${allowed.join(", ") || "none"})`] : [];
 }
+export const enterpriseFieldProblems = (option: boolean | EnterpriseFields | undefined, allowed: readonly string[], known?: ReadonlySet<string>) => fieldProblems("enterprise", enterpriseFields(option, known), allowed);
+
+/** Fields an explicit map names that the user model doesn't have. */
+const missingFields = (option: boolean | EnterpriseFields | AttributeFields | undefined, known: ReadonlySet<string>): string[] => (!option || option === true ? [] : Object.values(option).filter((f): f is string => !!f && !known.has(f)));
 
 /**
  * The fields a target's `enterprise` option reads, or null without it. `true` is each attribute
@@ -74,11 +82,7 @@ export function enterpriseFields(option: boolean | EnterpriseFields | undefined,
   return Object.keys(fields).length ? fields : null;
 }
 
-/** Fields an explicit `enterprise` map names that the user model doesn't have. */
-export function missingEnterpriseFields(option: boolean | EnterpriseFields | undefined, known: ReadonlySet<string>): string[] {
-  if (!option || option === true) return [];
-  return Object.values(option).filter((f): f is string => !!f && !known.has(f));
-}
+export const missingEnterpriseFields = (option: boolean | EnterpriseFields | undefined, known: ReadonlySet<string>) => missingFields(option, known);
 
 /** A field's value as an attribute: text, or a number written out; anything else (empty, null, an object) is no value. */
 const textOf = (v: unknown): string | undefined => {
@@ -105,13 +109,8 @@ export const attributesOption = z.union([
 /** The user fields organizations' stored targets may read for `attributes`, unless the host lists others (`registry.attributeFields`). */
 export const DEFAULT_STORED_ATTRIBUTE_FIELDS: readonly string[] = [...ATTRIBUTE_NAMES];
 
-/** Fields an `attributes` option reads that aren't allowed: a stored target may read only the host's allowlist. */
-export function attributeFieldProblems(option: boolean | AttributeFields | undefined, allowed: readonly string[]): string[] {
-  const fields = attributeFields(option);
-  if (!fields) return [];
-  const bad = [...new Set(Object.values(fields).filter((f): f is string => !!f && !allowed.includes(f)))];
-  return bad.length ? [`settings.attributes: reads ${bad.join(", ")}, which the host doesn't allow organizations' targets to read (registry.attributeFields: ${allowed.join(", ") || "none"})`] : [];
-}
+/** As enterpriseFieldProblems, for `attributes`. */
+export const attributeFieldProblems = (option: boolean | AttributeFields | undefined, allowed: readonly string[], known?: ReadonlySet<string>) => fieldProblems("attributes", attributeFields(option, known), allowed);
 
 /**
  * The fields a target's `attributes` option reads, or null without it. `true` is each attribute
@@ -125,11 +124,7 @@ export function attributeFields(option: boolean | AttributeFields | undefined, k
   return Object.keys(fields).length ? fields : null;
 }
 
-/** Fields an explicit `attributes` map names that the user model doesn't have. */
-export function missingAttributeFields(option: boolean | AttributeFields | undefined, known: ReadonlySet<string>): string[] {
-  if (!option || option === true) return [];
-  return Object.values(option).filter((f): f is string => !!f && !known.has(f));
-}
+export const missingAttributeFields = (option: boolean | AttributeFields | undefined, known: ReadonlySet<string>) => missingFields(option, known);
 
 /**
  * The attributes a target reads, put on the user about to be sent: `title`, `phoneNumbers` (the

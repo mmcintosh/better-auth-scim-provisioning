@@ -270,8 +270,8 @@ export function assemble(row: Pick<TargetRow, "targetId" | "organizationId">, se
  * What's wrong with a stored target's settings and credentials, beyond their shapes: the
  * credentials its type takes, and URLs that are https and public (`allowHosts` aside).
  */
-export function storedProblems(settings: StoredSettings, credentials: StoredCredentials, allowHosts: readonly string[] = [], enterpriseAllowed: readonly string[] = DEFAULT_STORED_ENTERPRISE_FIELDS, attributesAllowed: readonly string[] = DEFAULT_STORED_ATTRIBUTE_FIELDS): string[] {
-  const issues: string[] = [...enterpriseFieldProblems(settings.enterprise, enterpriseAllowed), ...attributeFieldProblems(settings.attributes, attributesAllowed)];
+export function storedProblems(settings: StoredSettings, credentials: StoredCredentials, allowHosts: readonly string[] = [], enterpriseAllowed: readonly string[] = DEFAULT_STORED_ENTERPRISE_FIELDS, attributesAllowed: readonly string[] = DEFAULT_STORED_ATTRIBUTE_FIELDS, userFields?: ReadonlySet<string>): string[] {
+  const issues: string[] = [...enterpriseFieldProblems(settings.enterprise, enterpriseAllowed, userFields), ...attributeFieldProblems(settings.attributes, attributesAllowed, userFields)];
   const type = settings.type ?? "scim";
   const kind = credentialsKind(credentials);
   const takes = { scim: ["bearer", "basic", "header", "oauth2"], webhook: ["webhook-secret"], "google-workspace": ["google-service-account"] }[type];
@@ -328,9 +328,9 @@ export function registrySource(code: Target[], adapter: Adapter, key: SealKey, o
       settings = storedSettingsSchema.parse(JSON.parse(row.config));
       // Checked again when used: a row written outside the API, or a host that narrowed the list since.
       const fieldProblems = [
-        ...enterpriseFieldProblems(settings.enterprise, options.enterpriseFields ?? DEFAULT_STORED_ENTERPRISE_FIELDS),
+        ...enterpriseFieldProblems(settings.enterprise, options.enterpriseFields ?? DEFAULT_STORED_ENTERPRISE_FIELDS, userFields),
         ...(userFields ? missingEnterpriseFields(settings.enterprise, userFields).map((f) => `settings.enterprise: the users have no field ${f}`) : []),
-        ...attributeFieldProblems(settings.attributes, options.attributeFields ?? DEFAULT_STORED_ATTRIBUTE_FIELDS),
+        ...attributeFieldProblems(settings.attributes, options.attributeFields ?? DEFAULT_STORED_ATTRIBUTE_FIELDS, userFields),
         ...(userFields ? missingAttributeFields(settings.attributes, userFields).map((f) => `settings.attributes: the users have no field ${f}`) : []),
       ];
       if (fieldProblems.length) throw new Error(fieldProblems.join("; "));

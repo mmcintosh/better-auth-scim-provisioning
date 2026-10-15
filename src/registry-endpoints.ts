@@ -40,6 +40,8 @@ export interface RegistryHost {
   codeIds: string[];
   /** Problems with a whole target, as the plugin's option checks see them. */
   targetProblems(target: Target): string[];
+  /** The user model's fields, set at init: what `enterprise: true` and `attributes: true` resolve to. */
+  userFields(): ReadonlySet<string>;
   /** This instance's outbox, for a target's organization. */
   instance(ctx: GenericEndpointContext):
     | {
@@ -207,7 +209,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
       ...(credentials.success ? [] : ["credentials: give token, auth, secret or privateKey (see the docs for each type), within their size limits"]),
     ];
     if (settings.success && credentials.success) {
-      issues.push(...storedProblems(settings.data, credentials.data, host.options?.allowHosts, host.options?.enterpriseFields, host.options?.attributeFields));
+      issues.push(...storedProblems(settings.data, credentials.data, host.options?.allowHosts, host.options?.enterpriseFields, host.options?.attributeFields, host.userFields()));
       if (!issues.length) {
         // A profile refuses what its app can't do (githubEnterprise: deprovision "delete") by throwing.
         let whole: Target | null = null;

@@ -226,7 +226,7 @@ scimProvisioning({
 - **Webhooks** get the same object as SCIM.
 - A `mapUser` that sets one of these itself takes precedence for that attribute, at Google Workspace and Entra ID too: a phone list it sends replaces the phones of the types it holds (Entra keeps only the work and mobile numbers), and only a work address has a place at Entra.
 - The apps' own limits apply: Graph refuses a title over 128 characters, say, with a 400 that fails that user's job (with Graph's message) until their next change or a reconcile.
-- **Organizations' own targets** may read only the fields you allow: by default the attribute names; `registry.attributeFields` sets the list (`[]` turns it off). Never list a field you wouldn't show their administrators.
+- **Organizations' own targets** may read only the fields you allow: by default the attribute names; `registry.attributeFields` sets the list (`[]` turns it off). `true` reads the fields your users have, so a narrowed list that covers those is enough. Never list a field you wouldn't show their administrators.
 
 ### Enterprise User attributes
 
