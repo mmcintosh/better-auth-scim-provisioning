@@ -134,7 +134,11 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
       const f = /^userName eq "(.*)"$/.exec(url.searchParams.get("filter") ?? "");
       const want = f ? (JSON.parse(`"${f[1]}"`) as string).toLowerCase() : null;
       const hits = [...users.values()].filter((u) => want === null || u.userName.toLowerCase() === want).map(view);
-      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults: hits.length, Resources: hits });
+      // Paged by startIndex and count when asked (RFC 7644 §3.4.2.4); all of it otherwise.
+      const count = Number(url.searchParams.get("count") || 0);
+      const start = Math.max(1, Number(url.searchParams.get("startIndex") || 1));
+      const page = count ? hits.slice(start - 1, start - 1 + count) : hits;
+      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults: hits.length, startIndex: start, itemsPerPage: page.length, Resources: page });
     }
     if (method === "POST" && !id) {
       const u = body as Partial<StoredUser>;

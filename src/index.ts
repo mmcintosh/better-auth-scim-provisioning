@@ -600,6 +600,11 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               },
               failures: async (targetId) =>
                 (await s.box.failures({ targetId, limit: 20 })).items.map((f) => ({ kind: f.kind, subjectId: f.subjectId, failed: f.failed, status: f.lastStatus, nextAttemptAt: f.nextAttemptAt })),
+              drift: async (targetId, after, limit) => {
+                const target = await s.source.get(targetId);
+                if (!target) throw new APIError("NOT_FOUND", { message: `[scim] no target ${targetId}` });
+                return s.box.drift(target, after, limit);
+              },
             };
           },
         },
@@ -680,6 +685,25 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           const targetId = ctx.body?.targetId;
           if (targetId !== undefined && !(await s.source.get(targetId))) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           return ctx.json(await s.box.failures({ targetId, after: ctx.body?.after, limit: ctx.body?.limit ?? 100 }));
+        },
+      ),
+      /**
+       * Drift: what's at the app that isn't as we'd have it, a page of the app's own list at a time
+       * (`limit`, 100 by default, within what the app pages by; then `after: next` until it's
+       * null): accounts nobody here manages (made by hand, or by another tool), ours without a
+       * link here, and linked ones that differ (deactivated or renamed at the app, or still active
+       * though the user was deleted here). Reported, never changed. A webhook receiver can't be
+       * listed.
+       */
+      scimProvisioningDrift: createAuthEndpoint.serverOnly(
+        { method: "POST", body: z.strictObject({ targetId: z.string().min(1), after: z.string().optional(), limit: z.number().int().min(1).max(1000).optional() }) },
+        async (ctx) => {
+          const s = stateOf(ctx.context);
+          if (!s) throw new Error("[scim] not initialised");
+          const target = await s.source.get(ctx.body.targetId);
+          if (!target) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${ctx.body.targetId}` });
+          if (target.type === "webhook") throw new APIError("BAD_REQUEST", { message: "[scim] a webhook receiver can't be listed, so it has no drift to report" });
+          return ctx.json(await s.box.drift(target, ctx.body.after ?? null, ctx.body.limit ?? 100));
         },
       ),
       /** Deliver what's due (retries included). Call it from a scheduled job, e.g. every minute. */

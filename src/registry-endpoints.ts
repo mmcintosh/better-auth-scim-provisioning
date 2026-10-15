@@ -46,6 +46,7 @@ export interface RegistryHost {
         resync(targetId: string, o: { resume: boolean }): Promise<void>;
         status(targetId: string): Promise<{ queued: number; waiting: number; stuck: number; failed: number; accounts: number; groups: number }>;
         failures(targetId: string): Promise<{ kind: string; subjectId: string; failed: boolean; status: number | null; nextAttemptAt: string }[]>;
+        drift(targetId: string, after: string | null, limit: number): Promise<{ items: unknown[]; scanned: number; next: string | null }>;
       }
     | undefined;
 }
@@ -405,6 +406,27 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const row = await rowFor(ctx, actor, ctx.body.id);
         const i = instance(ctx);
         return ctx.json({ ...(await i.status(row.targetId)), failures: await i.failures(row.targetId) });
+      },
+    ),
+
+    /**
+     * Drift: a page of what's at the app that isn't as we'd have it (see `scimProvisioningDrift`):
+     * accounts nobody manages, ours without a link, and linked ones that differ. Read only, and
+     * the app's accounts are the organization's own to see. A failure is said in broad terms.
+     */
+    scimProvisioningTargetDrift: createAuthEndpoint(
+      "/scim-provisioning/targets/drift",
+      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100), after: z.string().max(4096).optional(), limit: z.number().int().min(1).max(1000).optional() }) },
+      async (ctx) => {
+        const actor = await actorOf(ctx, host.options);
+        const row = await rowFor(ctx, actor, ctx.body.id);
+        if (row.type === "webhook") return ctx.json({ ok: null, problem: "a webhook receiver can't be listed, so it has no drift to report" });
+        try {
+          return ctx.json({ ok: true, ...(await instance(ctx).drift(row.targetId, ctx.body.after ?? null, ctx.body.limit ?? 100)) });
+        } catch (e) {
+          if (e instanceof APIError) throw e;
+          return ctx.json(checkResult(e));
+        }
       },
     ),
   };

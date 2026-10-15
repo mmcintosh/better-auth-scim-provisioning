@@ -19,8 +19,9 @@ interface GraphUser {
   onPremisesImmutableId?: string | null;
   accountEnabled?: boolean;
   employeeOrgData?: { costCenter?: string | null; division?: string | null } | null;
-  /** A list's page. */
+  /** A list's page, and where the next one is. */
   value?: GraphUser[];
+  "@odata.nextLink"?: string;
 }
 
 /** Graph's error, with what it conflicted on (`ObjectConflict`) and the object holding it. */
@@ -298,6 +299,24 @@ export function entraIdClient(target: Target, owns?: AttributeFields | null): En
   return {
     findByUserName: async (userName: string) => found(await findBy("userPrincipalName", userName)),
     findByExternalId: async (externalId: string) => found(await findBy("onPremisesImmutableId", externalId)),
+    /**
+     * A page of the tenant's users, for drift detection. The cursor is Graph's nextLink, kept as a
+     * path on this Graph (so a proxy's `url` still applies), and only ever a /users one.
+     */
+    async listUsers(cursor: string | null, count: number) {
+      if (cursor !== null && !cursor.startsWith("/users?")) throw new ScimError("unknown cursor: pass the `next` of a previous page", null, false);
+      const page = await request("GET", cursor ?? `/users?$select=${SELECT}&$top=${Math.min(Math.max(1, count), 999)}`);
+      if (!page || !Array.isArray(page.value)) throw new ScimError("GET /users: not a Graph list (check the target's url)", null, true);
+      const users = page.value.filter((u): u is GraphUser & { id: string } => !!u.id).map((u) => ({ id: u.id, userName: u.userPrincipalName ?? "", externalId: u.onPremisesImmutableId || null, active: u.accountEnabled !== false }));
+      const link = page["@odata.nextLink"];
+      let next: string | null = null;
+      if (typeof link === "string" && link) {
+        const u = new URL(link);
+        const basePath = new URL(base).pathname;
+        next = `${u.pathname.startsWith(basePath) ? u.pathname.slice(basePath.length) : u.pathname}${u.search}`;
+      }
+      return { users, next };
+    },
     async enabled(id: string) {
       try {
         return (await request("GET", `${path(id)}?$select=accountEnabled`))?.accountEnabled !== false;

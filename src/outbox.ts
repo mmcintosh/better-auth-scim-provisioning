@@ -1270,10 +1270,54 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     );
   }
 
+  /**
+   * Drift: a page of the app's own list of accounts against our records. Each account that isn't
+   * as we'd have it is reported with a finding: `unmanaged` (no link here, and not our
+   * externalId: made by hand, or by another tool), `unlinked` (our externalId for a user here, but
+   * no link: a lost one, or made before this plugin), or `mismatch` (linked, but deactivated or
+   * renamed at the app, or still active though the user was deleted here). Reported, never
+   * changed: a reconcile, or queueing the user, is what sends our state again.
+   */
+  async function drift(target: Target, after: string | null, limit: number) {
+    const page = await clientFor(target).listUsers(after, limit);
+    const byRemote = new Map<string, Link>();
+    const remoteIds = page.users.map((u) => u.id);
+    for (let i = 0; i < remoteIds.length; i += IN_BATCH) {
+      const batch = remoteIds.slice(i, i + IN_BATCH);
+      const links = (await adapter.findMany({ model: LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "remoteId", value: batch, operator: "in" }], limit: batch.length })) as Link[];
+      for (const l of links) if (l.targetId === target.id && batch.includes(l.remoteId)) byRemote.set(l.remoteId, l);
+    }
+    // The users here that matter: the linked ones, and those an unlinked account's externalId names.
+    const wanted = [...new Set([...[...byRemote.values()].map((l) => l.userId), ...page.users.filter((u) => !byRemote.has(u.id) && u.externalId).map((u) => u.externalId as string)])];
+    const here = new Set<string>();
+    for (let i = 0; i < wanted.length; i += IN_BATCH) {
+      const batch = wanted.slice(i, i + IN_BATCH);
+      const found = (await adapter.findMany({ model: "user", where: [{ field: "id", value: batch, operator: "in" }], limit: batch.length })) as { id: string }[];
+      for (const u of found) if (batch.includes(u.id)) here.add(u.id);
+    }
+    const items: { remoteId: string; userName: string; externalId: string | null; active: boolean | null; userId: string | null; finding: "unmanaged" | "unlinked" | "mismatch"; detail: string }[] = [];
+    for (const u of page.users) {
+      const link = byRemote.get(u.id);
+      const account = { remoteId: u.id, userName: u.userName, externalId: u.externalId, active: u.active ?? null };
+      if (link) {
+        const problems: string[] = [];
+        if (link.active && !here.has(link.userId)) problems.push("the user was deleted here, and the account is still active");
+        if (u.active !== undefined && u.active !== link.active) problems.push(u.active ? "active at the app, deactivated here" : "deactivated at the app, active here");
+        if (u.userName.toLowerCase() !== link.userName.toLowerCase()) problems.push(`renamed at the app (we sent ${link.userName})`);
+        if (problems.length) items.push({ ...account, userId: link.userId, finding: "mismatch", detail: `${problems.join("; ")}: a reconcile, or queueing the user, sends our state again` });
+      } else if (u.externalId && here.has(u.externalId)) {
+        items.push({ ...account, userId: u.externalId, finding: "unlinked", detail: "has our externalId for a user here, but no link: if its userName is still the user's address, queueing the user takes it over; otherwise resolve it at the app" });
+      } else {
+        items.push({ ...account, userId: null, finding: "unmanaged", detail: u.externalId ? `its externalId (${u.externalId}) is no user here: made by another tool, or for a user since deleted` : "no externalId and no link here: made by hand, or by another tool" });
+      }
+    }
+    return { items, scanned: page.users.length, next: page.next };
+  }
+
   /** A resumed (or fixed) target: its waiting and failed jobs are due now. */
   async function resume(targetId: string): Promise<number> {
     return adapter.updateMany({ model: JOB_MODEL, where: [{ field: "targetId", value: targetId }], update: { nextAttemptAt: new Date(), failed: false } });
   }
 
-  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures };
+  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift };
 }

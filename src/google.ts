@@ -38,6 +38,8 @@ interface GoogleUser {
   description?: string;
   /** A page of a group's members. */
   members?: { id?: string; type?: string }[];
+  /** A page of the Workspace's users. */
+  users?: GoogleUser[];
   nextPageToken?: string;
 }
 
@@ -374,6 +376,12 @@ export function googleWorkspaceClient(target: Target, owns?: AttributeFields | n
       }
       if (!created?.id) throw new ScimError("POST /users: the response has no id", null, false);
       return created.id;
+    },
+    /** A page of the Workspace's users (the admin's customer, every domain), for drift detection. */
+    async listUsers(cursor: string | null, count: number) {
+      const page = await request("GET", `/users?customer=my_customer&orderBy=email&maxResults=${Math.min(Math.max(1, count), 500)}${cursor ? `&pageToken=${encodeURIComponent(cursor)}` : ""}`);
+      const users = (page?.users ?? []).filter((u): u is GoogleUser & { id: string; primaryEmail: string } => !!u.id && !!u.primaryEmail).map((u) => ({ id: u.id, userName: u.primaryEmail, externalId: oursIn(u), active: u.suspended !== true }));
+      return { users, next: page?.nextPageToken || null };
     },
     replace: update,
     patch: (id: string, user: ScimUser) => update(id, user),

@@ -31,6 +31,7 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 - 🏢 **Organizations' own targets**: with `registry`, each organization connects its own SCIM app, Google Workspace or webhook at runtime, through an API its owners and admins use, with credentials encrypted and never shown again, and only its own members sent there.
 - 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
 - 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports, the Enterprise User extension included.
+- 🔍 **Drift detection**: `scimProvisioningDrift` reads an app's own list of accounts and reports the ones nobody manages, ours without a link, and linked ones that differ, page by page, changing nothing.
 - 📈 **You can see it**: `scimProvisioningStatus` counts what's queued, stuck and failed at each target (or shows one user's state), `onFailure` tells you when a delivery gives up or keeps failing, and failures are logged with the app's own message.
 - ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger; the whole suite on Node.js 22 and 24, and the database suite on SQLite, D1, PostgreSQL, MySQL and MongoDB, with Drizzle and Prisma too ([which combinations](#databases-and-runtimes)).
 - 📦 **Supply chain**: SHA-pinned actions, CodeQL, dependency review, OpenSSF Scorecard, and a release workflow that publishes with npm provenance and an SBOM.
@@ -160,7 +161,12 @@ const { user } = await auth.api.scimProvisioningStatus({ body: { userId } });
 const { targets: [app] } = await auth.api.scimProvisioningStatus({ body: { targetId: "app" } });
 // Which jobs failed or are stuck, with the app's last error; then { after: next } for more.
 const { items, next } = await auth.api.scimProvisioningFailures({ body: { limit: 100 } });
+// Drift: what's at the app that isn't as we'd have it, a page of the app's own list at a time
+// ({ limit }, 100 by default; then { after: next } until it's null). Reported, never changed.
+const { items: drift, scanned, next: more } = await auth.api.scimProvisioningDrift({ body: { targetId: "app", limit: 100 } });
 ```
+
+`scimProvisioningDrift` reads the app's own list and reports each account that isn't as we'd have it, with a `finding`: `unmanaged` (no link here and not our externalId: made by hand, or by another tool; at Google Workspace and Entra ID that's every account the plugin didn't make, the whole directory being listed), `unlinked` (our externalId for a user here, but no link: queue the user, and the next delivery takes the account over if its userName is still the user's address), or `mismatch` (deactivated or renamed at the app, or still active though the user was deleted here: a reconcile, or queueing the user, sends our state again). Each item carries the account's `remoteId`, `userName`, `externalId`, `active`, the `userId` here when known, and a `detail`. It changes nothing. A webhook receiver can't be listed.
 
 In `scimProvisioningFailures` items and `onFailure`, `kind` is what was being delivered: `user`, or a group: `group` (an organization's own group), `team` or `role` (and, in failures only, `resync`: queueing an organization for its own target, page by page). `subjectId` is the user's, organization's or team's id, and for a role group `"<organization id>:<role>"`.
 
@@ -565,10 +571,11 @@ GET  /scim-provisioning/targets?organizationId=…&limit=…&offset=…  // list
 POST /scim-provisioning/targets/update  { id, settings?, credentials?, enabled? }
 POST /scim-provisioning/targets/check   { id }   // try the URL and credentials, changing nothing
 POST /scim-provisioning/targets/status  { id }   // queued, waiting, stuck, failed; the latest failures' status
+POST /scim-provisioning/targets/drift   { id, after?, limit? }   // what's at the app that isn't as we'd have it (see Watching it); read only
 POST /scim-provisioning/targets/delete  { id }
 ```
 
-On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget`, `…TargetStatus` and `…DeleteTarget`, with the user's headers.
+On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget`, `…TargetStatus`, `…TargetDrift` and `…DeleteTarget`, with the user's headers.
 
 - **Settings** are the target options that are data: `type`, `url`, `profile` (by name: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`), `update`, `compat`, `groups`, `teamGroups`, `roleGroups`, `adopt`, `deprovision`, `requireVerifiedEmail`, `enterprise`, `attributes`, `timeoutMs` (at most 30 s), and for Google Workspace `google: { clientEmail, adminEmail, orgUnitPath?, groupDomain? }`; plus a `name` for people. Functions (`mapUser`, `include`, the group name functions) and `organizationId` can't be stored: the organization is always the owner.
 - **Credentials** are one of `{ token }`, `{ auth: { type: "basic" | "header" | "oauth2", … } }` (as in [Targets](#targets)), `{ secret }` for a webhook and `{ privateKey }` for Google Workspace. They're encrypted with Better Auth's secret, tied to the target, its organization and where it sends, and never shown: a target shows only their `kind`, and a webhook URL only its origin (Slack's and Azure's carry secrets in the path or query). They never go anywhere new either: changing a target's URL (or Google's `clientEmail` or `adminEmail`) needs the credentials given again, and a URL changed in the database rather than through the API doesn't get them (the target pauses). Two changes to one target at once can't mix: the second is refused (409) and is made again on what the first left. When you rotate Better Auth's secret (`secrets`), stored credentials are sealed again with the new one as they're used; keep the old secret until every target has been used once. If the secret changes without rotation, they can't be read: those targets pause (logged), and their deliveries are tried again every 15 minutes, so they go once the right secret is back or new credentials are given.

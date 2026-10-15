@@ -176,6 +176,14 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
       const { password: _, ...view } = stored;
       return json(200, view);
     }
+    if (method === "GET" && !key) {
+      // The customer's users, a page at a time (users.list).
+      const all = [...users.values()];
+      const size = Math.min(Number(u.searchParams.get("maxResults") ?? 100), 500);
+      const start = Number(u.searchParams.get("pageToken") ?? 0);
+      const page = all.slice(start, start + size).map(({ password: _, ...view }) => view);
+      return json(200, { kind: "admin#directory#users", ...(page.length ? { users: page } : {}), ...(start + size < all.length ? { nextPageToken: String(start + size) } : {}) });
+    }
     const existing = key ? find(key) : undefined;
     if (!existing) return gerror(404, "Resource Not Found: userKey");
     const left = key === existing.id ? (settling.get(existing.id) ?? 0) : 0;

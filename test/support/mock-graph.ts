@@ -141,6 +141,14 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
     const deletedItem = path.match(/^\/directory\/deletedItems\/([^/]+)(\/restore)?$/);
     const userPath = path.match(/^\/users\/([^/]+)(\/manager\/\$ref|\/revokeSignInSessions)?$/);
 
+    if (path === "/users" && method === "GET" && !q.get("$filter")) {
+      // The tenant's users, a page at a time ($top), the next page named by a nextLink.
+      const all = [...users.values()];
+      const top = Math.min(Number(q.get("$top") ?? 100), 999);
+      const skip = Number(q.get("$skiptoken") ?? 0);
+      const page = all.slice(skip, skip + top).map((x) => select(x, q));
+      return json(200, { "@odata.context": `${url}/$metadata#users`, value: page, ...(skip + top < all.length ? { "@odata.nextLink": `${url}/users?$select=${q.get("$select") ?? ""}&$top=${top}&$skiptoken=${skip + top}` } : {}) });
+    }
     if (path === "/users" && method === "GET") {
       const filter = (q.get("$filter") ?? "").match(/^(userPrincipalName|onPremisesImmutableId) eq '((?:[^']|'')*)'$/);
       if (!filter) return gerror(400, "Request_UnsupportedQuery", "Unsupported query.");
