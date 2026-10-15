@@ -10,6 +10,7 @@ it("reports what a limited app supports, and leaves nothing behind", async () =>
   const ok = Object.fromEntries(results.map((r) => [r.name, r.ok]));
   expect(ok).toEqual({
     ServiceProviderConfig: null,
+    "Enterprise User extension": null,
     "create a user": true,
     "keeps externalId": true,
     "find by userName": true,
@@ -34,4 +35,22 @@ it("an app that ignores externalId is reported", async () => {
   const app = mockScim({ keepsExternalId: false });
   const results = await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch });
   expect(results.find((r) => r.name === "keeps externalId")).toMatchObject({ ok: false, detail: expect.stringContaining("our own links") });
+});
+
+it("says whether the app advertises the Enterprise User extension, by its ResourceTypes or its Schemas; neither, and it can't tell", async () => {
+  const result = async (discovery: NonNullable<Parameters<typeof mockScim>[0]>["discovery"]) => {
+    const app = mockScim(discovery ? { discovery } : {});
+    const r = (await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch })).find((x) => x.id === "enterprise-user")!;
+    expect(app.users.size).toBe(0);
+    return [r.ok, r.detail] as const;
+  };
+  expect(await result({ resourceTypes: true, enterprise: true })).toEqual([true, "listed by /ResourceTypes"]);
+  expect(await result({ resourceTypes: true, enterprise: false })).toEqual([false, expect.stringContaining("not listed by /ResourceTypes")]);
+  expect(await result({ schemas: true, enterprise: true })).toEqual([true, "listed by /Schemas"]);
+  expect(await result({ schemas: true, enterprise: false })).toEqual([false, expect.stringContaining("not listed by /Schemas")]);
+  expect(await result(undefined)).toEqual([null, expect.stringContaining("can't tell")]);
+  // The result comes before the test user's, so a failed create still ends the list.
+  const app = mockScim({ discovery: { resourceTypes: true, enterprise: true } });
+  const ids = (await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch })).map((r) => r.id);
+  expect(ids.slice(0, 3)).toEqual(["service-provider-config", "enterprise-user", "create"]);
 });

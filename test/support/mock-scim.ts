@@ -39,7 +39,11 @@ export type Fault = { status: number; retryAfter?: string; detail?: string } | {
  * (`attributes=members`), as apps may do. `indexPaged`: users in a group are listed with
  * `Users?filter=groups.value eq "…"`, pageSize at a time, by startIndex and totalResults (no cursor).
  */
-export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean } = {}) {
+/**
+ * `discovery`: serve /ResourceTypes and/or /Schemas (RFC 7644 §4), and whether they list the
+ * Enterprise User extension. Neither by default, as many apps.
+ */
+export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; discovery?: { resourceTypes?: boolean; schemas?: boolean; enterprise?: boolean } } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
   const groups = new Map<string, StoredGroup>();
@@ -88,6 +92,17 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
   async function answer(url: URL, method: string, path: string, body: Record<string, unknown> | undefined, init: RequestInit | undefined): Promise<Response> {
     if (body && o.keepsExternalId === false) delete body.externalId;
     if ((init?.headers as Record<string, string> | undefined)?.authorization !== `Bearer ${token}`) return error(401, "bad token");
+
+    const USER = "urn:ietf:params:scim:schemas:core:2.0:User";
+    const GROUP = "urn:ietf:params:scim:schemas:core:2.0:Group";
+    const list = (resources: unknown[]) => reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults: resources.length, Resources: resources });
+    if (path === "/ResourceTypes" && method === "GET" && o.discovery?.resourceTypes) {
+      const schemaExtensions = o.discovery.enterprise ? [{ schema: ENTERPRISE, required: false }] : [];
+      return list([{ id: "User", name: "User", endpoint: "/Users", schema: USER, schemaExtensions }, { id: "Group", name: "Group", endpoint: "/Groups", schema: GROUP }]);
+    }
+    if (path === "/Schemas" && method === "GET" && o.discovery?.schemas) {
+      return list([{ id: USER, name: "User" }, { id: GROUP, name: "Group" }, ...(o.discovery.enterprise ? [{ id: ENTERPRISE, name: "EnterpriseUser" }] : [])]);
+    }
 
     const g = /^\/Groups(?:\/([^/?]+))?$/.exec(path);
     if (g) return group(url, method, g[1] ? decodeURIComponent(g[1]) : undefined, body);

@@ -30,7 +30,7 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 - 🔑 **Every sign-in method apps use**: bearer tokens, Basic, an API-key header, OAuth 2.0 client credentials, and Google service accounts with domain-wide delegation.
 - 🏢 **Organizations' own targets**: with `registry`, each organization connects its own SCIM app, Google Workspace or webhook at runtime, through an API its owners and admins use, with credentials encrypted and never shown again, and only its own members sent there.
 - 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
-- 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports.
+- 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports, the Enterprise User extension included.
 - 📈 **You can see it**: `scimProvisioningStatus` counts what's queued, stuck and failed at each target (or shows one user's state), `onFailure` tells you when a delivery gives up or keeps failing, and failures are logged with the app's own message.
 - ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger; the whole suite on Node.js 22 and 24, and the database suite on SQLite, D1, PostgreSQL, MySQL and MongoDB, with Drizzle and Prisma too ([which combinations](#databases-and-runtimes)).
 - 📦 **Supply chain**: SHA-pinned actions, CodeQL, dependency review, OpenSSF Scorecard, and a release workflow that publishes with npm provenance and an SBOM.
@@ -472,7 +472,7 @@ A user's `externalId` is their id at the receiver. If a `mapUser` changes it for
 
 ### Check an app first
 
-`check` asks an app what its SCIM supports: its ServiceProviderConfig, then a throwaway user taken through create, find, replace, both PATCH forms, deactivate and delete (removed at the end):
+`check` asks an app what its SCIM supports: its ServiceProviderConfig, whether it advertises the Enterprise User extension (through `/ResourceTypes` or `/Schemas`; many apps have neither, and then it can't tell), then a throwaway user taken through create, find, replace, both PATCH forms, deactivate and delete (removed at the end):
 
 ```sh
 SCIM_TOKEN=… npx better-auth-scim-provisioning check --url https://example.com/scim/v2 --user-name check@your-domain.com
@@ -480,6 +480,7 @@ SCIM_TOKEN=… npx better-auth-scim-provisioning check --url https://example.com
 
 ```
 ✓ ServiceProviderConfig: patch true, filter true, bulk false, etag false, sort false; auth: oauthbearertoken
+✓ Enterprise User extension: listed by /ResourceTypes
 ✓ create a user: 201, id 4bb3b660-…
 ✓ keeps externalId
 ✓ find by userName

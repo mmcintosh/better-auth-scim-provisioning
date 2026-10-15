@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+
+- **`check` reports the Enterprise User extension**: a new result, `enterprise-user`, says whether the app advertises it (its `/ResourceTypes` User type's extensions, or its `/Schemas`), so you know before setting `enterprise`. An app with neither endpoint gets "can't tell". Read-only: the test user isn't sent the extension. `checkScimTarget` returns it too, before the test user's results; code that switches over `CheckId` should handle a value it doesn't know, as [versioning](docs/versioning.md) says.
+
 ### Changed
 
 - **Jobs are indexed by target.** A target's scheduled runs, its status counts and removing a target read its jobs by `targetId`, which scanned the whole table. New installs get the index from the migration; `npx auth migrate` doesn't add it to an existing table, so add it by hand if you like: `CREATE INDEX "scimProvisioningJob_targetId_idx" ON "scimProvisioningJob" ("targetId");` (the Workers example's `0004` migration does). No column changes.
