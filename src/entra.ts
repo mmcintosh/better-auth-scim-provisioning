@@ -5,8 +5,7 @@
 // a user provisioned here signs in through your SAML identity provider at once (tested live). Users
 // only, for now: groups aren't supported yet.
 import { credentials } from "./credentials";
-import { ADDRESS_PARTS } from "./mapping";
-import { fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
+import { ADDRESS_PARTS, fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
 import type { AttributeFields, Target } from "./types";
 
 export const GRAPH_URL = "https://graph.microsoft.com/v1.0";

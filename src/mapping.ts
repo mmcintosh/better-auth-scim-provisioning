@@ -1,5 +1,5 @@
 import * as z from "zod";
-import { SCIM_USER_SCHEMA, type ScimEnterpriseUser, type ScimUser } from "./scim-client";
+import { ADDRESS_PARTS, SCIM_USER_SCHEMA, type ScimEnterpriseUser, type ScimUser } from "./scim-client";
 import type { AttributeFields, EnterpriseFields, ProvisionedUser } from "./types";
 
 /**
@@ -95,8 +95,6 @@ const textOf = (v: unknown): string | undefined => {
 /** The attributes `attributes` can send, each read from a user field of that name by default. */
 export const ATTRIBUTE_NAMES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country"] as const;
 export type AttributeName = (typeof ATTRIBUTE_NAMES)[number];
-/** The parts of the work address, as SCIM names them. */
-export const ADDRESS_PARTS = ["streetAddress", "locality", "region", "postalCode", "country"] as const;
 
 /** `attributes`: true, or which user field holds each attribute. Data only, so stored targets can have it too. */
 export const attributesOption = z.union([

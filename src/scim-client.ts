@@ -63,6 +63,9 @@ export interface ListedUser {
   active?: boolean | undefined;
 }
 
+/** The parts of an address (RFC 7643 §4.1.2) that `attributes` reads and the connectors map. */
+export const ADDRESS_PARTS = ["streetAddress", "locality", "region", "postalCode", "country"] as const;
+
 /** One of a user's addresses (RFC 7643 §4.1.2). */
 export interface ScimAddress {
   type?: string | undefined;

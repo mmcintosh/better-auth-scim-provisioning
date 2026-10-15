@@ -472,3 +472,23 @@ describe("Entra ID", () => {
     expect(t({ type: "entra-id", url: "https://graph.microsoft.us/v1.0", entra: { ...entra, tokenUrl: "https://login.microsoftonline.us/x/oauth2/v2.0/token" } })).not.toThrow();
   });
 });
+
+it("restored from the bin with the attributes the user has now: the reclaim carries them", async () => {
+  const h = await createHost({ targets: [{ ...E, deprovision: "delete", attributes: true }], userFields: { title: { type: "string" }, mobile: { type: "string" } } });
+  const u = await h.user("Ada Lovelace");
+  await h.ctx.internalAdapter.updateUser(u.id, { title: "Analyst", mobile: "+44 7700 900001" });
+  await h.settle();
+  const id = atGraph(h)[0]!.id;
+  expect(atGraph(h)[0]).toMatchObject({ jobTitle: "Analyst", mobilePhone: "+44 7700 900001" });
+  await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+  await h.settle();
+  await drain(h);
+  expect(h.graph.bin.has(id)).toBe(true);
+  // Back, with a new title and no mobile: the restore's update sends both, like any other.
+  await h.ctx.internalAdapter.updateUser(u.id, { banned: false, title: "Senior Analyst", mobile: null });
+  await h.settle();
+  expect(h.graph.bin.size).toBe(0);
+  expect(atGraph(h)).toEqual([expect.objectContaining({ id, accountEnabled: true, jobTitle: "Senior Analyst", mobilePhone: null })]);
+  await drain(h);
+  expect(await h.jobs()).toEqual([]);
+});

@@ -5,8 +5,7 @@
 // each with an email address derived from its externalId (so a rename never changes it), marked
 // ours in its description, with members added and removed one at a time.
 import { credentials } from "./credentials";
-import { ADDRESS_PARTS } from "./mapping";
-import { fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimGroup, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
+import { ADDRESS_PARTS, fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimGroup, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
 import type { AttributeFields, Target } from "./types";
 
 export const GOOGLE_DIRECTORY_URL = "https://admin.googleapis.com/admin/directory/v1";
