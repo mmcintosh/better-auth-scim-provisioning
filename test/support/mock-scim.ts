@@ -167,6 +167,11 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
           if (ext) delete ext[op.path.slice(ENTERPRISE.length + 1)];
           continue;
         }
+        // A remove of a whole top-level attribute ("title", "phoneNumbers").
+        if (op.op.toLowerCase() === "remove" && o.patch && op.path && /^[A-Za-z]+$/.test(op.path)) {
+          delete (existing as unknown as Record<string, unknown>)[op.path];
+          continue;
+        }
         if (op.op.toLowerCase() !== "replace") continue;
         const value = op.value as Record<string, unknown> | undefined;
         if (!o.patch) {

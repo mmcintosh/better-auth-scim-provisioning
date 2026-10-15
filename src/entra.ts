@@ -5,8 +5,9 @@
 // a user provisioned here signs in through your SAML identity provider at once (tested live). Users
 // only, for now: groups aren't supported yet.
 import { credentials } from "./credentials";
+import { ADDRESS_PARTS } from "./mapping";
 import { fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
-import type { Target } from "./types";
+import type { AttributeFields, Target } from "./types";
 
 export const GRAPH_URL = "https://graph.microsoft.com/v1.0";
 /** What a user is read with: enough to tell whose it is, and to merge the org data into. */
@@ -65,7 +66,8 @@ export function mailNickname(userName: string): string {
 /** Entra wants 8 to 256 characters of three kinds; nobody ever uses it (they sign in through the IdP, or reset it). */
 const throwaway = () => `${btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24))))}Aa1!`;
 
-export function entraIdClient(target: Target): EntraIdClient {
+/** `owns`: the attributes the target reads (`attributes`, resolved), so only those are sent, and cleared when empty. */
+export function entraIdClient(target: Target, owns?: AttributeFields | null): EntraIdClient {
   const entra = target.entra;
   if (!entra) throw new Error(`[scim] target ${target.id}: type "entra-id" needs entra`);
   const base = trimSlashes(target.url ?? GRAPH_URL);
@@ -182,6 +184,25 @@ export function entraIdClient(target: Target): EntraIdClient {
     return named("manager") ? { body, manager: e.manager?.value ?? null } : { body };
   }
 
+  /**
+   * The attributes a target reads (`attributes`), where Graph keeps them: the title as `jobTitle`,
+   * the work phone as `businessPhones`, the mobile as `mobilePhone`, and the work address's parts
+   * as `streetAddress`, `city`, `state`, `postalCode` and `country`. Only what the target names is
+   * sent, and one without a value is cleared.
+   */
+  function details(user: ScimUser): Record<string, unknown> {
+    if (!owns) return {};
+    const body: Record<string, unknown> = {};
+    const phone = (type: string) => user.phoneNumbers?.find((p) => p.type === type)?.value ?? null;
+    if (owns.title) body.jobTitle = user.title ?? null;
+    if (owns.phone) body.businessPhones = phone("work") ? [phone("work")] : [];
+    if (owns.mobile) body.mobilePhone = phone("mobile");
+    const address = user.addresses?.find((a) => a.type === "work") ?? user.addresses?.[0];
+    const theirs = { streetAddress: "streetAddress", locality: "city", region: "state", postalCode: "postalCode", country: "country" } as const;
+    for (const part of ADDRESS_PARTS) if (owns[part]) body[theirs[part]] = address?.[part] ?? null;
+    return body;
+  }
+
   async function setManager(id: string, manager: string | null | undefined) {
     if (manager === undefined) return;
     if (manager) {
@@ -213,7 +234,7 @@ export function entraIdClient(target: Target): EntraIdClient {
   async function update(id: string, user: ScimUser, o: { reactivate?: boolean } = {}) {
     const { user: now, lagging } = await current(id, user.externalId);
     const { body: extra, manager } = enterprise(user, now);
-    const body: Record<string, unknown> = { ...names(user), userPrincipalName: user.userName, ...extra };
+    const body: Record<string, unknown> = { ...names(user), userPrincipalName: user.userName, ...extra, ...details(user) };
     if (!now.onPremisesImmutableId && user.externalId) body.onPremisesImmutableId = user.externalId;
     if (!user.active || o.reactivate) body.accountEnabled = user.active;
     try {
@@ -287,7 +308,8 @@ export function entraIdClient(target: Target): EntraIdClient {
     },
     async create(user: ScimUser) {
       const { body: extra, manager } = enterprise(user, null);
-      const set = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined));
+      // Nothing to set is left out of a create: no nulls, no empty lists.
+      const set = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined && !(Array.isArray(v) && !v.length)));
       const body = {
         accountEnabled: user.active,
         ...set(names(user)),
@@ -296,6 +318,7 @@ export function entraIdClient(target: Target): EntraIdClient {
         ...(user.externalId ? { onPremisesImmutableId: user.externalId } : {}),
         ...set(extra),
         ...(extra.employeeOrgData ? { employeeOrgData: set(extra.employeeOrgData as Record<string, unknown>) } : {}),
+        ...set(details(user)),
       };
       let created: GraphUser | null;
       try {

@@ -8,12 +8,12 @@
 //
 // A link is written before an account is created at the app (remoteId empty: "pending"), so an
 // account whose create reply was lost can still be found, and undone, later.
-import { defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, enterpriseValues, isBanned } from "./mapping";
+import { attributeFields, defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, enterpriseValues, isBanned, withAttributes } from "./mapping";
 import { type EntraIdClient, entraIdClient } from "./entra";
 import { googleWorkspaceClient } from "./google";
 import { webhookClient } from "./webhook";
 import { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, type ScimEnterpriseUser, ScimError, type ScimUser, scimClient } from "./scim-client";
-import type { DeliveryFailure, ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
+import type { AttributeFields, DeliveryFailure, ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
 
 export const JOB_MODEL = "scimProvisioningJob";
 export const LINK_MODEL = "scimProvisioningLink";
@@ -156,13 +156,17 @@ export type Outcome = "done" | "retry" | "failed" | "busy";
 
 const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
 
-/** The client for a target: SCIM, or Google Workspace's Directory API or Microsoft Graph behind the same operations. */
-/** `change` names the change being delivered (its job and version), for webhook event ids. */
-export const clientFor = (target: Target, change?: string) =>
+/**
+ * The client for a target: SCIM, or Google Workspace's Directory API or Microsoft Graph behind the
+ * same operations. `change` names the change being delivered (its job and version), for webhook
+ * event ids; `owns` the attributes the target reads (`attributes`, resolved), which Google and
+ * Graph need to know what's theirs to clear.
+ */
+export const clientFor = (target: Target, change?: string, owns?: AttributeFields | null) =>
   target.type === "google-workspace"
-    ? googleWorkspaceClient(target)
+    ? googleWorkspaceClient(target, owns)
     : target.type === "entra-id"
-      ? entraIdClient(target)
+      ? entraIdClient(target, owns)
       : target.type === "webhook"
       ? webhookClient(target, change)
       : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
@@ -209,6 +213,8 @@ export function staticTargets(list: Target[]): TargetSource {
 export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }, source: TargetSource = staticTargets(options.targets), userFields?: ReadonlySet<string>) {
   /** A target's Enterprise User fields, `true` resolved against the user model's fields. */
   const fieldsOf = (target: Target) => enterpriseFields(target.enterprise, userFields);
+  /** A target's `attributes` fields, likewise. */
+  const attributesOf = (target: Target) => attributeFields(target.attributes, userFields);
   const maxAttempts = options.retry?.maxAttempts ?? 8;
   const baseDelayMs = options.retry?.baseDelayMs ?? 30_000;
   const backoff = (attempts: number) => Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** Math.max(0, attempts - 1));
@@ -361,13 +367,15 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   async function deliverUser(target: Target, userId: string, change?: string): Promise<Date | null> {
-    const client = clientFor(target, change);
+    const client = clientFor(target, change, attributesOf(target));
     const user = (await adapter.findOne({ model: "user", where: [{ field: "id", value: userId }] })) as ProvisionedUser | null;
     const key = keyOf(target.id, userId);
     let link = await findLink(key);
 
     if (await wanted(target, user)) {
-      const { scim, clears } = await withEnterprise(target, user as ProvisionedUser, (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
+      const core = withAttributes(user as ProvisionedUser, attributesOf(target), (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
+      const { scim, clears: enterpriseClears } = await withEnterprise(target, user as ProvisionedUser, core.scim);
+      const clears = [...core.clears, ...enterpriseClears];
       const externalId = scim.externalId ?? null;
       // Back after the plugin deactivated them (a ban, a removal): only then is a Google suspension
       // (or a disabled Entra account) lifted, never an admin's own or one of Google's.

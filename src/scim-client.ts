@@ -47,8 +47,24 @@ export interface ScimUser {
   displayName?: string | undefined;
   emails?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
   active: boolean;
+  /** The job title, phone numbers and addresses (RFC 7643 §4.1): sent by `attributes`, or by a `mapUser`. */
+  title?: string | undefined;
+  phoneNumbers?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
+  addresses?: ScimAddress[] | undefined;
   /** The Enterprise User extension's attributes (with its URN in `schemas`). */
   "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"?: ScimEnterpriseUser | undefined;
+}
+
+/** One of a user's addresses (RFC 7643 §4.1.2). */
+export interface ScimAddress {
+  type?: string | undefined;
+  primary?: boolean | undefined;
+  formatted?: string | undefined;
+  streetAddress?: string | undefined;
+  locality?: string | undefined;
+  region?: string | undefined;
+  postalCode?: string | undefined;
+  country?: string | undefined;
 }
 
 /** The Enterprise User extension's attributes (RFC 7643 §4.3). `manager.value` is the manager's id at the app. */

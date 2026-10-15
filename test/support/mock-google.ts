@@ -168,7 +168,7 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
       if (!email || !name.givenName || !name.familyName || !body?.password) return gerror(400, "Invalid Input: missing required field");
       if (!domains.includes(email.split("@")[1] ?? "")) return gerror(400, "Domain not found.");
       if (taken(email) || findGroup(email)) return gerror(409, "Entity already exists.");
-      const stored: GoogleStoredUser = { id: `g${next++}`, primaryEmail: email, name, suspended: body.suspended === true, password: String(body.password), ...(body.externalIds ? { externalIds: body.externalIds as GoogleStoredUser["externalIds"] } : {}), ...(body.orgUnitPath ? { orgUnitPath: String(body.orgUnitPath) } : {}), ...(body.organizations ? { organizations: body.organizations } : {}), ...(body.relations ? { relations: body.relations } : {}) };
+      const stored: GoogleStoredUser = { id: `g${next++}`, primaryEmail: email, name, suspended: body.suspended === true, password: String(body.password), ...(body.externalIds ? { externalIds: body.externalIds as GoogleStoredUser["externalIds"] } : {}), ...(body.orgUnitPath ? { orgUnitPath: String(body.orgUnitPath) } : {}), ...(body.organizations ? { organizations: body.organizations } : {}), ...(body.relations ? { relations: body.relations } : {}), ...(body.phones ? { phones: body.phones } : {}), ...(body.addresses ? { addresses: body.addresses } : {}) };
       users.set(stored.id, stored);
       if (o.lag) settling.set(stored.id, o.lag);
       // Google's own hold on new accounts (WEB_LOGIN_REQUIRED, found live).
@@ -202,7 +202,7 @@ export async function mockGoogle(o: { domains?: string[]; admin?: string; lag?: 
       if (o.renameLag && typeof body?.primaryEmail === "string" && body.primaryEmail.toLowerCase() !== existing.primaryEmail.toLowerCase()) renaming.set(existing.id, o.renameLag);
       const held = (existing as { suspensionReason?: string }).suspensionReason;
       if (body?.suspended === false && existing.suspended && held && held !== "ADMIN") return gerror(412, "Cannot restore a user suspended for abuse.");
-      for (const k of ["primaryEmail", "suspended", "externalIds", "orgUnitPath", "organizations", "relations"] as const) if (body && k in body) (existing as unknown as Record<string, unknown>)[k] = body[k];
+      for (const k of ["primaryEmail", "suspended", "externalIds", "orgUnitPath", "organizations", "relations", "phones", "addresses"] as const) if (body && k in body) (existing as unknown as Record<string, unknown>)[k] = body[k];
       if (body?.suspended === true) (existing as { suspensionReason?: string }).suspensionReason = "ADMIN";
       const { password: _, ...view } = existing;
       return json(200, view);

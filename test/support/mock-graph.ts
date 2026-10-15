@@ -33,6 +33,14 @@ export interface GraphStoredUser {
   department?: string | null;
   companyName?: string | null;
   employeeOrgData?: { costCenter?: string | null; division?: string | null } | null;
+  jobTitle?: string | null;
+  businessPhones?: string[];
+  mobilePhone?: string | null;
+  streetAddress?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
   manager?: string;
   /** The UPN it had before it went into the bin. */
   binnedUpn?: string;
@@ -110,7 +118,7 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
       const holder = typeof body.onPremisesImmutableId === "string" ? immutableHolder(body.onPremisesImmutableId, u.id) : undefined;
       if (holder) return conflict("onPremisesImmutableId", holder.id);
     }
-    for (const k of ["userPrincipalName", "displayName", "givenName", "surname", "accountEnabled", "onPremisesImmutableId", "employeeId", "department", "companyName", "employeeOrgData", "mailNickname"] as const) {
+    for (const k of ["userPrincipalName", "displayName", "givenName", "surname", "accountEnabled", "onPremisesImmutableId", "employeeId", "department", "companyName", "employeeOrgData", "mailNickname", "jobTitle", "businessPhones", "mobilePhone", "streetAddress", "city", "state", "postalCode", "country"] as const) {
       if (k in body) (u as unknown as Record<string, unknown>)[k] = body[k];
     }
     if (typeof u.employeeId === "string" && u.employeeId.length > 16) return gerror(400, "Request_BadRequest", "Invalid value specified for property 'employeeId' of resource 'User'.");

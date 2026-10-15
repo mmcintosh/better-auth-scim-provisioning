@@ -22,6 +22,22 @@ export interface EnterpriseFields {
   manager?: string | undefined;
 }
 
+/** Which user field holds each of the attributes `attributes` sends (see TargetOptions.attributes). */
+export interface AttributeFields {
+  /** The job title: SCIM `title`; at Google Workspace the primary organization's title; at Entra ID `jobTitle`. */
+  title?: string | undefined;
+  /** The work phone number: SCIM `phoneNumbers`, type work; at Entra ID `businessPhones`. */
+  phone?: string | undefined;
+  /** The mobile phone number: type mobile; at Entra ID `mobilePhone`. */
+  mobile?: string | undefined;
+  /** The work address's parts: SCIM `addresses`, type work; at Entra ID `streetAddress`, `city`, `state`, `postalCode`, `country`. */
+  streetAddress?: string | undefined;
+  locality?: string | undefined;
+  region?: string | undefined;
+  postalCode?: string | undefined;
+  country?: string | undefined;
+}
+
 /** What every target has, whatever kind of app it is. */
 export interface TargetOptions {
   /** Stable id: jobs, links and logs use it. Letters, digits, - and _. */
@@ -63,6 +79,18 @@ export interface TargetOptions {
    * A `mapUser` that sets the extension itself takes precedence.
    */
   enterprise?: boolean | EnterpriseFields | undefined;
+  /**
+   * More of the user's details, read from fields of the user (`user.additionalFields`): the job
+   * title, the work and mobile phone numbers, and a work address (street, locality, region,
+   * postal code, country), sent as SCIM's `title`, `phoneNumbers` and `addresses`. `true` reads
+   * fields of the same names (`title`, `phone`, `mobile`, `streetAddress`, …) that the user model
+   * has; or name the fields (`{ title: "jobTitle", phone: "workPhone" }`), listing only those to
+   * send. An empty field clears that attribute at the app. At Entra ID they're `jobTitle`,
+   * `businessPhones`, `mobilePhone` and the address fields; at Google Workspace the primary
+   * organization's title, the phones and the work address, touching only what's named here. A
+   * `mapUser` that sets one of these itself takes precedence for that attribute.
+   */
+  attributes?: boolean | AttributeFields | undefined;
   /**
    * Organizations (Better Auth's organization plugin) as groups at the app, their provisioned
    * members as the group's members. Every organization (or only `organizationId`'s), or those a
@@ -309,6 +337,13 @@ export interface TargetRegistryOptions {
    * Never list a field you wouldn't show the organization's administrators. [] turns it off.
    */
   enterpriseFields?: string[] | undefined;
+  /**
+   * The user fields organizations' stored targets may read for `attributes`. Default: the
+   * attribute names (`title`, `phone`, `mobile`, `streetAddress`, `locality`, `region`,
+   * `postalCode`, `country`). Never list a field you wouldn't show the organization's
+   * administrators. [] turns it off.
+   */
+  attributeFields?: string[] | undefined;
   /**
    * The fetch stored targets use, to send them through an egress proxy, say. By default, the
    * global fetch behind a guard that checks every request's URL as it's made and refuses names

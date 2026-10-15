@@ -130,6 +130,8 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. An account that already exists at the app is still only taken over for a verified email. |
 | `adopt` | `true` (`false` for Google Workspace and Entra ID) | Take over an account made elsewhere when it's nobody's, active, and its userName is the user's verified email. It's then never deleted, only deactivated. |
 | `mapUser` | see below | `(user) => ScimUser`: what's sent. |
+| `enterprise` | | The Enterprise User extension, from user fields (see [Enterprise User attributes](#enterprise-user-attributes)). |
+| `attributes` | | More of the user's details from user fields: the title, phones and a work address (see [More attributes](#more-attributes)). |
 | `groups` | `false` | Organizations as groups at the app: `true`, or `(organization) => boolean` to choose which (see [Groups](#groups)). |
 | `groupName` | the organization's name | `(organization) => string`: the group's name. |
 | `teamGroups` | `false` | Teams as groups: `true`, or `(team, organization) => boolean`. |
@@ -196,6 +198,28 @@ By default the app gets:
 - **`active`**.
 
 Override it per target with `mapUser`, for example to take `userName` from an employee id. `defaultScimUser(user)` is exported to build on.
+
+### More attributes
+
+With `attributes`, a target also gets the user's job title, phone numbers and work address, read from fields of your users (`user.additionalFields`), as SCIM's `title`, `phoneNumbers` and `addresses`:
+
+```ts
+scimProvisioning({
+  targets: [
+    { id: "aws", url, token, attributes: true }, // fields named as the attributes
+    { id: "slack", url, token, attributes: { title: "jobTitle", phone: "workPhone", locality: "city" } }, // your own field names
+  ],
+});
+```
+
+- **`true`** reads `title`, `phone` (the work number), `mobile`, and the address's `streetAddress`, `locality`, `region`, `postalCode` and `country`, for those fields your users have. **A map** names your fields, and only those attributes are sent; a field it names that your users don't have stops the plugin at startup. A number is written out as text.
+- **What's sent:** `title`; `phoneNumbers` with the work number (type `work`) and the mobile (type `mobile`), the first of them primary; and one `addresses` entry of type `work` with the parts that have a value.
+- **An empty field clears the attribute at the app**: a PUT leaves it out, and a PATCH (`update: "patch"`) removes it by path, `title`, `phoneNumbers` or `addresses` as a whole: once the target names a phone or an address part, the phone list and the address list at the app are the plugin's.
+- **Entra ID** keeps these as `jobTitle`, `businessPhones` (the work number), `mobilePhone`, and `streetAddress`, `city`, `state`, `postalCode` and `country`.
+- **Google Workspace** keeps the title in the user's primary organization (its other fields, such as a department set by an admin or by `enterprise`, kept), the phones in `phones` (only the work and mobile entries are the plugin's; an admin's other numbers stay) and the address in `addresses` (the work entry's named parts; its other parts and other addresses stay). Only the attributes the target reads are touched.
+- **Webhooks** get the same object as SCIM.
+- A `mapUser` that sets one of these itself takes precedence for that attribute.
+- **Organizations' own targets** may read only the fields you allow: by default the attribute names; `registry.attributeFields` sets the list (`[]` turns it off). Never list a field you wouldn't show their administrators.
 
 ### Enterprise User attributes
 
@@ -365,6 +389,7 @@ Setting it up:
 How it maps:
 - the email (`userName`) becomes `primaryEmail`, which must be in one of the Workspace's domains;
 - the names map to `name`, and Google requires both;
+- with `attributes`, the title goes in the user's primary organization, the phones in `phones` and the work address in `addresses` (see [More attributes](#more-attributes));
 - deprovisioning suspends the user, or deletes them with `deprovision: "delete"`;
 - our user id is a custom entry in `externalIds`, and any other external ids an admin set are kept;
 - Google requires a password when a user is created, so a random one is set. Users sign in through your identity provider (with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) as Workspace's SAML identity provider), so it's never used.
@@ -408,6 +433,7 @@ Setting it up:
 
 How it maps:
 - the email (`userName`) becomes `userPrincipalName`, and its local part the `mailNickname`; the names map to `displayName`, `givenName` and `surname`;
+- with `attributes`, the title is `jobTitle`, the phones `businessPhones` and `mobilePhone`, and the address `streetAddress`, `city`, `state`, `postalCode` and `country` (see [More attributes](#more-attributes));
 - our user id is `onPremisesImmutableId`. Entra won't change it on a federated user, so it's set only when an account is created or taken over;
 - deprovisioning disables the account (`accountEnabled: false`) and revokes its sessions, so a signed-in user is out straight away rather than when their tokens expire;
 - with `deprovision: "delete"`, the user goes to Entra's recycle bin for 30 days and is never purged by the plugin. A user back within that time is restored: the same account, with its id and immutableId (verified live). What Microsoft 365 keeps of their mailbox and files meanwhile depends on its own retention;
@@ -544,7 +570,7 @@ POST /scim-provisioning/targets/delete  { id }
 
 On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget`, `…TargetStatus` and `…DeleteTarget`, with the user's headers.
 
-- **Settings** are the target options that are data: `type`, `url`, `profile` (by name: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`), `update`, `compat`, `groups`, `teamGroups`, `roleGroups`, `adopt`, `deprovision`, `requireVerifiedEmail`, `enterprise`, `timeoutMs` (at most 30 s), and for Google Workspace `google: { clientEmail, adminEmail, orgUnitPath?, groupDomain? }`; plus a `name` for people. Functions (`mapUser`, `include`, the group name functions) and `organizationId` can't be stored: the organization is always the owner.
+- **Settings** are the target options that are data: `type`, `url`, `profile` (by name: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`), `update`, `compat`, `groups`, `teamGroups`, `roleGroups`, `adopt`, `deprovision`, `requireVerifiedEmail`, `enterprise`, `attributes`, `timeoutMs` (at most 30 s), and for Google Workspace `google: { clientEmail, adminEmail, orgUnitPath?, groupDomain? }`; plus a `name` for people. Functions (`mapUser`, `include`, the group name functions) and `organizationId` can't be stored: the organization is always the owner.
 - **Credentials** are one of `{ token }`, `{ auth: { type: "basic" | "header" | "oauth2", … } }` (as in [Targets](#targets)), `{ secret }` for a webhook and `{ privateKey }` for Google Workspace. They're encrypted with Better Auth's secret, tied to the target, its organization and where it sends, and never shown: a target shows only their `kind`, and a webhook URL only its origin (Slack's and Azure's carry secrets in the path or query). They never go anywhere new either: changing a target's URL (or Google's `clientEmail` or `adminEmail`) needs the credentials given again, and a URL changed in the database rather than through the API doesn't get them (the target pauses). Two changes to one target at once can't mix: the second is refused (409) and is made again on what the first left. When you rotate Better Auth's secret (`secrets`), stored credentials are sealed again with the new one as they're used; keep the old secret until every target has been used once. If the secret changes without rotation, they can't be read: those targets pause (logged), and their deliveries are tried again every 15 minutes, so they go once the right secret is back or new credentials are given.
 - **Who may**: a signed-in user, their session re-read from the database (a stateless deployment's signed cookie is its own record), as the database has them now (not banned, not impersonating): a host administrator (`canManage`) for every organization, or an owner or admin (`organizationRoles`) of the target's organization. Creating, changing and deleting also need a fresh session (signed in within Better Auth's `session.freshAge`, a day by default), as a password change does. Someone else's target is a 404. Changes are logged at `warn`, Better Auth's default level, with the acting user.
 - **URLs** must be `https://` on the standard port and public, as your server calls them: no `localhost`, names without a dot, `.local`, `.internal`, `.lan`, `.home.arpa` and the like, and no private, loopback, link-local, shared, benchmarking, documentation or reserved address (IPv4 written as a number, or inside IPv6, included). Redirects are never followed. Each request is checked again by these rules as it's made (so a row allowed once, by an `allowHosts` entry since removed, say, reaches nothing inside), and the name is looked up (Node.js 22.3 and later, Bun, Deno) and refused if it resolves to a private address or doesn't resolve; on Workers, whose `fetch` can't reach private networks, the URL check is what applies. A name that changes what it resolves to between the check and the request can't be ruled out this way: if your server can reach internal services, route stored targets through an egress proxy with `registry.fetch` (which replaces the lookup). `allowHosts: ["scim.internal.example"]` makes exceptions, ports included. The check endpoint answers in broad terms ("the credentials were refused", "not found: check the URL"), never with the app's own words.

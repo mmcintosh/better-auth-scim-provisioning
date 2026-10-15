@@ -6,19 +6,19 @@ import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
 import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
-import { enterpriseOption, missingEnterpriseFields } from "./mapping";
+import { attributesOption, enterpriseOption, missingAttributeFields, missingEnterpriseFields } from "./mapping";
 import { registrySource, secretText, TARGET_MODEL } from "./registry";
 import { registryEndpoints } from "./registry-endpoints";
 import type { ScimProvisioningOptions, Target } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
 export { atlassian, awsIamIdentityCenter, cloudflareAccess, githubEnterprise, profiles, slack, slackUserName } from "./profiles";
-export { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, SCIM_USER_SCHEMA, ScimError, type ScimEnterpriseUser, type ScimGroup, type ScimUser } from "./scim-client";
+export { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, SCIM_USER_SCHEMA, type ScimAddress, ScimError, type ScimEnterpriseUser, type ScimGroup, type ScimUser } from "./scim-client";
 export type { ScimAuth } from "./credentials";
 export { type CheckId, type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SCHEMA_VERSION, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, WebhookSignatureError, webhookSignature } from "./webhook";
 export type { StoredTargetView } from "./registry-endpoints";
-export type { DeliveryFailure, EnterpriseFields, EntraIdTarget, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
+export type { AttributeFields, DeliveryFailure, EnterpriseFields, EntraIdTarget, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
 
 
 const targetSchema = z.strictObject({
@@ -69,6 +69,7 @@ const targetSchema = z.strictObject({
   organizationId: z.string().min(1).optional(),
   mapUser: z.function().optional(),
   enterprise: enterpriseOption.optional(),
+  attributes: attributesOption.optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
   update: z.enum(["put", "patch"]).optional(),
   compat: z
@@ -117,6 +118,7 @@ const optionsSchema = z.strictObject({
       maxTargetsPerOrganization: z.number().int().min(1).max(1000).optional(),
       allowHosts: z.array(z.string().min(1)).optional(),
       enterpriseFields: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field")).optional(),
+      attributeFields: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field")).optional(),
       fetch: z.function().optional(),
     })
     .optional(),
@@ -334,6 +336,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     if (target.teamGroups && !teamsEnabled) issues.push("settings.teamGroups: needs the organization plugin's teams");
     const missing = missingEnterpriseFields(target.enterprise, userFields);
     if (missing.length) issues.push(`settings.enterprise: reads ${missing.join(", ")}, which the host's users don't have`);
+    const missingAttributes = missingAttributeFields(target.attributes, userFields);
+    if (missingAttributes.length) issues.push(`settings.attributes: reads ${missingAttributes.join(", ")}, which the host's users don't have`);
     return issues;
   }
 
@@ -449,6 +453,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       for (const t of options.targets) {
         const missing = missingEnterpriseFields(t.enterprise, userFields);
         if (missing.length) throw new Error(`[scim] target ${t.id}: enterprise reads ${missing.join(", ")}, which the user model doesn't have; add them to user.additionalFields`);
+        const missingAttributes = missingAttributeFields(t.attributes, userFields);
+        if (missingAttributes.length) throw new Error(`[scim] target ${t.id}: attributes reads ${missingAttributes.join(", ")}, which the user model doesn't have; add them to user.additionalFields`);
       }
       if (options.registry && !org) throw new Error("[scim] registry needs Better Auth's organization plugin: every stored target belongs to an organization");
       const source = options.registry

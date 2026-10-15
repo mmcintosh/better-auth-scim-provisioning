@@ -5,8 +5,9 @@
 // each with an email address derived from its externalId (so a rename never changes it), marked
 // ours in its description, with members added and removed one at a time.
 import { credentials } from "./credentials";
+import { ADDRESS_PARTS } from "./mapping";
 import { fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimGroup, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
-import type { Target } from "./types";
+import type { AttributeFields, Target } from "./types";
 
 export const GOOGLE_DIRECTORY_URL = "https://admin.googleapis.com/admin/directory/v1";
 const SCOPE = "https://www.googleapis.com/auth/admin.directory.user";
@@ -29,6 +30,8 @@ interface GoogleUser {
   externalIds?: { value?: string; type?: string; customType?: string }[];
   organizations?: GoogleOrganization[];
   relations?: { value?: string; type?: string; customType?: string }[];
+  phones?: ({ value?: string; type?: string; primary?: boolean } & Record<string, unknown>)[];
+  addresses?: ({ type?: string; primary?: boolean } & Record<string, unknown>)[];
   /** Groups. */
   email?: string;
   name?: string | { givenName?: string; familyName?: string };
@@ -41,7 +44,8 @@ interface GoogleUser {
 /** The SCIM client's operations; `replace` also takes whether this is a reactivation (see update). */
 export type GoogleWorkspaceClient = Omit<ReturnType<typeof scimClient>, "replace"> & { replace(id: string, user: ScimUser, o?: { reactivate?: boolean }): Promise<void> };
 
-export function googleWorkspaceClient(target: Target): GoogleWorkspaceClient {
+/** `owns`: the attributes the target reads (`attributes`, resolved), so only those are touched at Google. */
+export function googleWorkspaceClient(target: Target, owns?: AttributeFields | null): GoogleWorkspaceClient {
   const google = target.google;
   if (!google) throw new Error(`[scim] target ${target.id}: type "google-workspace" needs google`);
   const base = trimSlashes(target.url ?? GOOGLE_DIRECTORY_URL);
@@ -157,6 +161,43 @@ export function googleWorkspaceClient(target: Target): GoogleWorkspaceClient {
     return out;
   }
 
+  /**
+   * The attributes a target reads (`attributes`), where Google keeps them, merged into what the
+   * user has now: the title in the primary organization (its other fields kept), the work and
+   * mobile phones (an admin's other numbers kept), and the work address, its named parts set or
+   * removed (its other parts, and other addresses, kept). Only what the target names is touched.
+   */
+  function details(user: ScimUser, now: GoogleUser | null, organizations: GoogleOrganization[] | undefined): Partial<Pick<GoogleUser, "organizations" | "phones" | "addresses">> {
+    if (!owns) return {};
+    const out: Partial<Pick<GoogleUser, "organizations" | "phones" | "addresses">> = {};
+    if (owns.title) {
+      const orgs = organizations ?? now?.organizations ?? [];
+      const primary: GoogleOrganization = { ...(orgs.find((o) => o.primary) ?? {}) };
+      if (user.title) primary.title = user.title;
+      else delete primary.title;
+      const { primary: _, ...rest } = primary;
+      out.organizations = [...orgs.filter((o) => !o.primary), ...(Object.keys(rest).length ? [{ ...rest, primary: true }] : [])];
+    }
+    if (owns.phone || owns.mobile) {
+      const ours = [...(owns.phone ? ["work"] : []), ...(owns.mobile ? ["mobile"] : [])];
+      const sent = (user.phoneNumbers ?? []).filter((p) => ours.includes(p.type ?? ""));
+      out.phones = [...(now?.phones ?? []).filter((p) => !ours.includes(p.type ?? "")), ...sent.map((p) => ({ value: p.value, type: p.type as string, ...(p.primary ? { primary: true } : {}) }))];
+    }
+    const parts = ADDRESS_PARTS.filter((a) => owns[a]);
+    if (parts.length) {
+      const sent = user.addresses?.find((a) => a.type === "work") ?? user.addresses?.[0];
+      const work: Record<string, unknown> = { ...((now?.addresses ?? []).find((a) => a.type === "work") ?? {}) };
+      for (const part of parts) {
+        const v = sent?.[part];
+        if (v) work[part] = v;
+        else delete work[part];
+      }
+      const { type: _t, primary: _p, ...rest } = work;
+      out.addresses = [...(now?.addresses ?? []).filter((a) => a.type !== "work"), ...(Object.keys(rest).length ? [{ ...rest, type: "work", primary: true }] : [])];
+    }
+    return out;
+  }
+
   /** Our entry in externalIds, and the employee number if the target sends it, keeping any others (an admin's own ids, say). */
   function externalIdsOf(now: GoogleUser | null, externalId: string | undefined, employeeNumber?: string | null) {
     const others = (now?.externalIds ?? []).filter((x) => !(x.type === OURS.type && x.customType === OURS.customType) && (employeeNumber === undefined || x.type !== "organization"));
@@ -192,7 +233,7 @@ export function googleWorkspaceClient(target: Target): GoogleWorkspaceClient {
   async function update(id: string, user: ScimUser, o: { reactivate?: boolean } = {}) {
     const now = await current(id, user.userName);
     const { employeeNumber, ...extra } = enterprise(user, now);
-    const body: Record<string, unknown> = { ...toGoogle(user), ...extra, externalIds: externalIdsOf(now, user.externalId, employeeNumber) };
+    const body: Record<string, unknown> = { ...toGoogle(user), ...extra, ...details(user, now, extra.organizations), externalIds: externalIdsOf(now, user.externalId, employeeNumber) };
     const googlesHold = !!(now?.suspended && now.suspensionReason && now.suspensionReason !== "ADMIN");
     if (user.active && (!o.reactivate || googlesHold)) delete body.suspended;
     await change(id, body, user.userName);
@@ -311,7 +352,9 @@ export function googleWorkspaceClient(target: Target): GoogleWorkspaceClient {
       try {
         const { employeeNumber, ...extra } = enterprise(user, null);
         const ids = externalIdsOf(null, user.externalId, employeeNumber);
-        created = await request("POST", "/users", { ...toGoogle(user), ...extra, password, ...(google?.orgUnitPath ? { orgUnitPath: google.orgUnitPath } : {}), ...(ids.length ? { externalIds: ids } : {}) });
+        // Nothing to send for an attribute is left out of a create (an empty list says nothing).
+        const more = Object.fromEntries(Object.entries({ ...extra, ...details(user, null, extra.organizations) }).filter(([, v]) => !(Array.isArray(v) && !v.length)));
+        created = await request("POST", "/users", { ...toGoogle(user), ...more, password, ...(google?.orgUnitPath ? { orgUnitPath: google.orgUnitPath } : {}), ...(ids.length ? { externalIds: ids } : {}) });
       } catch (e) {
         // Taken as another account's alias: that account is someone else's, and no retry changes it.
         // Not reported as a 409, which would send the outbox looking for an account to adopt.
