@@ -56,13 +56,15 @@ const note = (key, fingerprint, summary) => {
   const upper = /<\s*(\d+\.\d+\.\d+)/.exec(range)?.[1];
   const meta = await npm("better-auth");
   const latest = meta["dist-tags"].latest;
-  // The next tag can be stale (0.8.7-beta.5 in 2026-09): shown only when it's ahead of latest.
-  const next = meta["dist-tags"].next && lt(latest, meta["dist-tags"].next) ? meta["dist-tags"].next : "none newer";
+  // The pre-release tags (beta, next) can be stale (next was 0.8.7-beta.5 in 2026-09): shown only
+  // when ahead of latest. A new minor's beta is what the canary tests before the range is widened.
+  const ahead = (tag) => (meta["dist-tags"][tag] && lt(latest, meta["dist-tags"][tag]) ? meta["dist-tags"][tag] : null);
+  const pre = ["beta", "next"].map((tag) => [tag, ahead(tag)]).filter(([, v]) => v).map(([tag, v]) => `${tag}: ${v}`).join(", ");
   const outside = upper && !lt(latest, upper);
   const line = outside
     ? `- **Better Auth ${latest} is outside the peer range \`${range}\`.** Widen it in a minor release once the canary passes on ${latest}.`
-    : `- Better Auth ${latest} (next: ${next}) is inside the peer range \`${range}\`.`;
-  sections.push(`## Better Auth\n\n${note("better-auth", outside ? `outside:${latest}` : "inside", line)}`);
+    : `- Better Auth ${latest} is inside the peer range \`${range}\`${pre ? `; pre-releases ahead of it: ${pre} (the canary tests them; widen the range in a minor release once the final is out and passes)` : " (no pre-release ahead of it)"}.`;
+  sections.push(`## Better Auth\n\n${note("better-auth", outside ? `outside:${latest}` : `inside${pre ? `:${pre}` : ""}`, line)}`);
 }
 
 // Vendored builds: every vendor/*.tgz must be listed, so a new one can't go unwatched.
