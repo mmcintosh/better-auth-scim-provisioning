@@ -149,6 +149,9 @@ export function webhookClient(target: WebhookTarget, change?: string): ReturnTyp
   return {
     // A receiver has no lookup to ask: every user is new to us until we've sent them.
     findByUserName: async () => null,
+    listUsers: async () => {
+      throw new ScimError("a webhook receiver can't be listed", null, false);
+    },
     create: upsert,
     replace: async (_id: string, user: ScimUser) => void (await upsert(user)),
     patch: async (_id: string, user: ScimUser) => void (await upsert(user)),

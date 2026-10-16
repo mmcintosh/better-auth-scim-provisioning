@@ -47,8 +47,35 @@ export interface ScimUser {
   displayName?: string | undefined;
   emails?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
   active: boolean;
+  /** The job title, phone numbers and addresses (RFC 7643 §4.1): sent by `attributes`, or by a `mapUser`. */
+  title?: string | undefined;
+  phoneNumbers?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
+  addresses?: ScimAddress[] | undefined;
   /** The Enterprise User extension's attributes (with its URN in `schemas`). */
   "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"?: ScimEnterpriseUser | undefined;
+}
+
+/** A user as the app lists them (drift detection): `active` only when the app says. */
+export interface ListedUser {
+  id: string;
+  userName: string;
+  externalId: string | null;
+  active?: boolean | undefined;
+}
+
+/** The parts of an address (RFC 7643 §4.1.2) that `attributes` reads and the connectors map. */
+export const ADDRESS_PARTS = ["streetAddress", "locality", "region", "postalCode", "country"] as const;
+
+/** One of a user's addresses (RFC 7643 §4.1.2). */
+export interface ScimAddress {
+  type?: string | undefined;
+  primary?: boolean | undefined;
+  formatted?: string | undefined;
+  streetAddress?: string | undefined;
+  locality?: string | undefined;
+  region?: string | undefined;
+  postalCode?: string | undefined;
+  country?: string | undefined;
 }
 
 /** The Enterprise User extension's attributes (RFC 7643 §4.3). `manager.value` is the manager's id at the app. */
@@ -249,6 +276,44 @@ export function scimClient(endpoint: ScimEndpoint) {
       const hit = resources.find((r) => typeof r.userName === "string" && r.userName.toLowerCase() === userName.toLowerCase());
       // `active` only when the app says: absent is not "deactivated".
       return hit ? { id: idOf(hit, "GET /Users"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null, ...(typeof hit.active === "boolean" ? { active: hit.active } : {}) } : null;
+    },
+    /**
+     * A page of the app's users, for drift detection: at most `count` (apps cap it at their own
+     * page size), from `cursor` (null for the first page): the app's own cursor, or the next
+     * startIndex, whichever it pages by. Asked for by cursor and index alike, as group members are.
+     */
+    async listUsers(cursor: string | null, count: number): Promise<{ users: ListedUser[]; next: string | null }> {
+      // Cursors are ours: "c:<the app's cursor>", or "i:<startIndex>:<the previous page's last id>".
+      let startIndex = 1;
+      let c = "";
+      let lastId = "";
+      const byIndex = cursor === null ? null : /^i:([1-9]\d*):([\s\S]*)$/.exec(cursor);
+      if (byIndex) {
+        startIndex = Number(byIndex[1]);
+        lastId = byIndex[2] as string;
+      } else if (cursor !== null) {
+        if (!/^c:.+/.test(cursor)) throw new ScimError("unknown cursor: pass the `next` of a previous page", null, false);
+        c = cursor.slice(2);
+      }
+      const { json } = await request("GET", `/Users?count=${count}&cursor=${encodeURIComponent(c)}&startIndex=${startIndex}`);
+      const list = json as { Resources?: unknown; nextCursor?: unknown; totalResults?: unknown } | null;
+      // No job retries a listing: a page that isn't a list is said so, not waited for.
+      if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number")) throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, false);
+      const resources = Array.isArray(list.Resources) ? (list.Resources as { id?: unknown; userName?: unknown; externalId?: unknown; active?: unknown }[]) : [];
+      const users: ListedUser[] = [];
+      for (const r of resources) {
+        if (typeof r.id !== "string" || !r.id) continue;
+        users.push({ id: r.id, userName: typeof r.userName === "string" ? r.userName : "", externalId: typeof r.externalId === "string" && r.externalId ? r.externalId : null, ...(typeof r.active === "boolean" ? { active: r.active } : {}) });
+      }
+      if (typeof list.nextCursor === "string" && list.nextCursor) return { users, next: `c:${list.nextCursor}` };
+      // Paging by the app's cursor: no next cursor is the end.
+      if (c) return { users, next: null };
+      // By index. An app that ignores startIndex gives the page before again: dropped, and the end.
+      if (lastId && resources.some((r) => r.id === lastId)) return { users: [], next: null };
+      // More while totalResults says so; without it (apps leave it out), while the page is full.
+      const total = typeof list.totalResults === "number" ? list.totalResults : null;
+      const more = resources.length > 0 && (total === null ? resources.length >= count : startIndex - 1 + resources.length < total);
+      return { users, next: more ? `i:${startIndex + resources.length}:${users.at(-1)?.id ?? lastId}` : null };
     },
     async create(user: ScimUser): Promise<string> {
       return idOf((await request("POST", "/Users", onTheWire(user))).json, "POST /Users");

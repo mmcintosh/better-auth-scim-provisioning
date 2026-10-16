@@ -5,8 +5,8 @@
 // a user provisioned here signs in through your SAML identity provider at once (tested live). Users
 // only, for now: groups aren't supported yet.
 import { credentials } from "./credentials";
-import { fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
-import type { Target } from "./types";
+import { ADDRESS_PARTS, fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
+import type { AttributeFields, Target } from "./types";
 
 export const GRAPH_URL = "https://graph.microsoft.com/v1.0";
 /** What a user is read with: enough to tell whose it is, and to merge the org data into. */
@@ -18,8 +18,9 @@ interface GraphUser {
   onPremisesImmutableId?: string | null;
   accountEnabled?: boolean;
   employeeOrgData?: { costCenter?: string | null; division?: string | null } | null;
-  /** A list's page. */
+  /** A list's page, and where the next one is. */
   value?: GraphUser[];
+  "@odata.nextLink"?: string;
 }
 
 /** Graph's error, with what it conflicted on (`ObjectConflict`) and the object holding it. */
@@ -65,7 +66,8 @@ export function mailNickname(userName: string): string {
 /** Entra wants 8 to 256 characters of three kinds; nobody ever uses it (they sign in through the IdP, or reset it). */
 const throwaway = () => `${btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24))))}Aa1!`;
 
-export function entraIdClient(target: Target): EntraIdClient {
+/** `owns`: the attributes the target reads (`attributes`, resolved), so only those are sent, and cleared when empty. */
+export function entraIdClient(target: Target, owns?: AttributeFields | null): EntraIdClient {
   const entra = target.entra;
   if (!entra) throw new Error(`[scim] target ${target.id}: type "entra-id" needs entra`);
   const base = trimSlashes(target.url ?? GRAPH_URL);
@@ -182,6 +184,27 @@ export function entraIdClient(target: Target): EntraIdClient {
     return named("manager") ? { body, manager: e.manager?.value ?? null } : { body };
   }
 
+  /**
+   * The attributes a target reads (`attributes`), and any a `mapUser` sets, where Graph keeps
+   * them: the title as `jobTitle`, the work phone as `businessPhones`, the mobile as
+   * `mobilePhone`, and the work address's parts as `streetAddress`, `city`, `state`, `postalCode`
+   * and `country` (Graph has one address; other types a mapUser sends have nowhere to go). Only
+   * what's ours is sent, and one without a value is cleared.
+   */
+  function details(user: ScimUser): Record<string, unknown> {
+    const body: Record<string, unknown> = {};
+    const phones = (user.phoneNumbers ?? []).map((p) => ({ ...p, type: p.type ?? "work" }));
+    const phone = (type: string) => phones.find((p) => p.type === type)?.value ?? null;
+    const types = new Set(phones.map((p) => p.type));
+    if (owns?.title || Object.hasOwn(user, "title")) body.jobTitle = user.title ?? null;
+    if (owns?.phone || types.has("work")) body.businessPhones = phone("work") ? [phone("work")] : [];
+    if (owns?.mobile || types.has("mobile")) body.mobilePhone = phone("mobile");
+    const address = user.addresses?.find((a) => !a.type || a.type === "work");
+    const theirs = { streetAddress: "streetAddress", locality: "city", region: "state", postalCode: "postalCode", country: "country" } as const;
+    for (const part of ADDRESS_PARTS) if (owns?.[part] || address?.[part] !== undefined) body[theirs[part]] = address?.[part] ?? null;
+    return body;
+  }
+
   async function setManager(id: string, manager: string | null | undefined) {
     if (manager === undefined) return;
     if (manager) {
@@ -213,7 +236,7 @@ export function entraIdClient(target: Target): EntraIdClient {
   async function update(id: string, user: ScimUser, o: { reactivate?: boolean } = {}) {
     const { user: now, lagging } = await current(id, user.externalId);
     const { body: extra, manager } = enterprise(user, now);
-    const body: Record<string, unknown> = { ...names(user), userPrincipalName: user.userName, ...extra };
+    const body: Record<string, unknown> = { ...names(user), userPrincipalName: user.userName, ...extra, ...details(user) };
     if (!now.onPremisesImmutableId && user.externalId) body.onPremisesImmutableId = user.externalId;
     if (!user.active || o.reactivate) body.accountEnabled = user.active;
     try {
@@ -277,6 +300,32 @@ export function entraIdClient(target: Target): EntraIdClient {
   return {
     findByUserName: async (userName: string) => found(await findBy("userPrincipalName", userName)),
     findByExternalId: async (externalId: string) => found(await findBy("onPremisesImmutableId", externalId)),
+    /**
+     * A page of the tenant's users, for drift detection. The cursor is Graph's nextLink, kept as a
+     * path on this Graph (so a proxy's `url` still applies), and only ever a /users one.
+     */
+    async listUsers(cursor: string | null, count: number) {
+      if (cursor !== null && !cursor.startsWith("/users?")) throw new ScimError("unknown cursor: pass the `next` of a previous page", null, false);
+      const page = await request("GET", cursor ?? `/users?$select=${SELECT}&$top=${Math.min(Math.max(1, count), 999)}`);
+      if (!page || !Array.isArray(page.value)) throw new ScimError("GET /users: not a Graph list (check the target's url)", null, true);
+      const users = page.value.filter((u): u is GraphUser & { id: string } => !!u.id).map((u) => ({ id: u.id, userName: u.userPrincipalName ?? "", externalId: u.onPremisesImmutableId || null, ...(typeof u.accountEnabled === "boolean" ? { active: u.accountEnabled } : {}) }));
+      const link = page["@odata.nextLink"];
+      let next: string | null = null;
+      if (typeof link === "string" && link) {
+        // Graph's link is absolute, to Graph itself, whatever `url` is (a proxy's): only its /users
+        // query is kept, and sent to `url` again.
+        let u: URL;
+        try {
+          u = new URL(link);
+        } catch {
+          throw new ScimError("GET /users: the next page's link isn't a URL", null, false);
+        }
+        const at = u.pathname.lastIndexOf("/users");
+        if (at < 0 || u.pathname.slice(at) !== "/users") throw new ScimError("GET /users: the next page's link isn't a /users page", null, false);
+        next = `/users${u.search}`;
+      }
+      return { users, next };
+    },
     async enabled(id: string) {
       try {
         return (await request("GET", `${path(id)}?$select=accountEnabled`))?.accountEnabled !== false;
@@ -287,7 +336,8 @@ export function entraIdClient(target: Target): EntraIdClient {
     },
     async create(user: ScimUser) {
       const { body: extra, manager } = enterprise(user, null);
-      const set = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined));
+      // Nothing to set is left out of a create: no nulls, no empty lists.
+      const set = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined && !(Array.isArray(v) && !v.length)));
       const body = {
         accountEnabled: user.active,
         ...set(names(user)),
@@ -296,6 +346,7 @@ export function entraIdClient(target: Target): EntraIdClient {
         ...(user.externalId ? { onPremisesImmutableId: user.externalId } : {}),
         ...set(extra),
         ...(extra.employeeOrgData ? { employeeOrgData: set(extra.employeeOrgData as Record<string, unknown>) } : {}),
+        ...set(details(user)),
       };
       let created: GraphUser | null;
       try {

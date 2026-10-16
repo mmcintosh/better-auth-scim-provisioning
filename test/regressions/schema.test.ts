@@ -17,4 +17,6 @@ it("the schema is 1.0's", () => {
   // The new columns are optional: rows from before 1.0 have neither.
   expect(schema.scimProvisioningGroupLink?.fields.kind?.required).toBe(false);
   expect(schema.scimProvisioningGroupLink?.fields.subjectId?.required).toBe(false);
+  // 1.4: jobs are indexed by target (an index only: Better Auth doesn't check it, so no migration is forced).
+  expect(schema.scimProvisioningJob?.fields.targetId).toMatchObject({ index: true });
 });

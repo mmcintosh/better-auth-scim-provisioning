@@ -33,12 +33,21 @@ export interface GraphStoredUser {
   department?: string | null;
   companyName?: string | null;
   employeeOrgData?: { costCenter?: string | null; division?: string | null } | null;
+  jobTitle?: string | null;
+  businessPhones?: string[];
+  mobilePhone?: string | null;
+  streetAddress?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
   manager?: string;
   /** The UPN it had before it went into the bin. */
   binnedUpn?: string;
 }
 
-export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">; lag?: number | undefined; deleteLag?: number | undefined } = {}) {
+/** `nextLinkBase`: where a list's nextLink points (the real Graph points at itself, whatever the client calls); default this mock's own url. */
+export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">; lag?: number | undefined; deleteLag?: number | undefined; nextLinkBase?: string | undefined } = {}) {
   const domains = o.domains ?? { "example.com": "Federated", "managed.example": "Managed" };
   const tenantId = "00000000-0000-4000-8000-000000000001";
   const clientId = "11111111-2222-3333-4444-555555555555";
@@ -110,7 +119,7 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
       const holder = typeof body.onPremisesImmutableId === "string" ? immutableHolder(body.onPremisesImmutableId, u.id) : undefined;
       if (holder) return conflict("onPremisesImmutableId", holder.id);
     }
-    for (const k of ["userPrincipalName", "displayName", "givenName", "surname", "accountEnabled", "onPremisesImmutableId", "employeeId", "department", "companyName", "employeeOrgData", "mailNickname"] as const) {
+    for (const k of ["userPrincipalName", "displayName", "givenName", "surname", "accountEnabled", "onPremisesImmutableId", "employeeId", "department", "companyName", "employeeOrgData", "mailNickname", "jobTitle", "businessPhones", "mobilePhone", "streetAddress", "city", "state", "postalCode", "country"] as const) {
       if (k in body) (u as unknown as Record<string, unknown>)[k] = body[k];
     }
     if (typeof u.employeeId === "string" && u.employeeId.length > 16) return gerror(400, "Request_BadRequest", "Invalid value specified for property 'employeeId' of resource 'User'.");
@@ -133,6 +142,14 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
     const deletedItem = path.match(/^\/directory\/deletedItems\/([^/]+)(\/restore)?$/);
     const userPath = path.match(/^\/users\/([^/]+)(\/manager\/\$ref|\/revokeSignInSessions)?$/);
 
+    if (path === "/users" && method === "GET" && !q.get("$filter")) {
+      // The tenant's users, a page at a time ($top), the next page named by a nextLink.
+      const all = [...users.values()];
+      const top = Math.min(Number(q.get("$top") ?? 100), 999);
+      const skip = Number(q.get("$skiptoken") ?? 0);
+      const page = all.slice(skip, skip + top).map((x) => select(x, q));
+      return json(200, { "@odata.context": `${url}/$metadata#users`, value: page, ...(skip + top < all.length ? { "@odata.nextLink": `${o.nextLinkBase ?? url}/users?$select=${q.get("$select") ?? ""}&$top=${top}&$skiptoken=${skip + top}` } : {}) });
+    }
     if (path === "/users" && method === "GET") {
       const filter = (q.get("$filter") ?? "").match(/^(userPrincipalName|onPremisesImmutableId) eq '((?:[^']|'')*)'$/);
       if (!filter) return gerror(400, "Request_UnsupportedQuery", "Unsupported query.");

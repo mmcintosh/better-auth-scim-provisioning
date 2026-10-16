@@ -8,12 +8,12 @@
 //
 // A link is written before an account is created at the app (remoteId empty: "pending"), so an
 // account whose create reply was lost can still be found, and undone, later.
-import { defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, enterpriseValues, isBanned } from "./mapping";
+import { attributeFields, defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, enterpriseValues, isBanned, withAttributes } from "./mapping";
 import { type EntraIdClient, entraIdClient } from "./entra";
 import { googleWorkspaceClient } from "./google";
 import { webhookClient } from "./webhook";
 import { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, type ScimEnterpriseUser, ScimError, type ScimUser, scimClient } from "./scim-client";
-import type { DeliveryFailure, ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
+import type { AttributeFields, DeliveryFailure, ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
 
 export const JOB_MODEL = "scimProvisioningJob";
 export const LINK_MODEL = "scimProvisioningLink";
@@ -156,13 +156,17 @@ export type Outcome = "done" | "retry" | "failed" | "busy";
 
 const notFound = (e: unknown) => e instanceof ScimError && e.status === 404;
 
-/** The client for a target: SCIM, or Google Workspace's Directory API or Microsoft Graph behind the same operations. */
-/** `change` names the change being delivered (its job and version), for webhook event ids. */
-export const clientFor = (target: Target, change?: string) =>
+/**
+ * The client for a target: SCIM, or Google Workspace's Directory API or Microsoft Graph behind the
+ * same operations. `change` names the change being delivered (its job and version), for webhook
+ * event ids; `owns` the attributes the target reads (`attributes`, resolved), which Google and
+ * Graph need to know what's theirs to clear.
+ */
+export const clientFor = (target: Target, change?: string, owns?: AttributeFields | null) =>
   target.type === "google-workspace"
-    ? googleWorkspaceClient(target)
+    ? googleWorkspaceClient(target, owns)
     : target.type === "entra-id"
-      ? entraIdClient(target)
+      ? entraIdClient(target, owns)
       : target.type === "webhook"
       ? webhookClient(target, change)
       : scimClient({ url: target.url, token: target.token, auth: target.auth, timeoutMs: target.timeoutMs, fetch: target.fetch });
@@ -178,6 +182,8 @@ export const markPaused = <T extends Target>(t: T, why: "disabled" | "unreadable
   return t;
 };
 export const isPaused = (t: Target) => pausedTargets.has(t);
+/** Why a target is paused, if it is: disabled by its organization, or its stored credentials can't be read. */
+export const pauseReason = (t: Target) => pausedTargets.get(t);
 
 /**
  * Where the targets come from, looked up when they're used: the ones in code, and (with a
@@ -209,6 +215,8 @@ export function staticTargets(list: Target[]): TargetSource {
 export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: { warn(m: string): void; error(m: string): void }, source: TargetSource = staticTargets(options.targets), userFields?: ReadonlySet<string>) {
   /** A target's Enterprise User fields, `true` resolved against the user model's fields. */
   const fieldsOf = (target: Target) => enterpriseFields(target.enterprise, userFields);
+  /** A target's `attributes` fields, likewise. */
+  const attributesOf = (target: Target) => attributeFields(target.attributes, userFields);
   const maxAttempts = options.retry?.maxAttempts ?? 8;
   const baseDelayMs = options.retry?.baseDelayMs ?? 30_000;
   const backoff = (attempts: number) => Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** Math.max(0, attempts - 1));
@@ -361,13 +369,15 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   async function deliverUser(target: Target, userId: string, change?: string): Promise<Date | null> {
-    const client = clientFor(target, change);
+    const client = clientFor(target, change, attributesOf(target));
     const user = (await adapter.findOne({ model: "user", where: [{ field: "id", value: userId }] })) as ProvisionedUser | null;
     const key = keyOf(target.id, userId);
     let link = await findLink(key);
 
     if (await wanted(target, user)) {
-      const { scim, clears } = await withEnterprise(target, user as ProvisionedUser, (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
+      const core = withAttributes(user as ProvisionedUser, attributesOf(target), (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
+      const { scim, clears: enterpriseClears } = await withEnterprise(target, user as ProvisionedUser, core.scim);
+      const clears = [...core.clears, ...enterpriseClears];
       const externalId = scim.externalId ?? null;
       // Back after the plugin deactivated them (a ban, a removal): only then is a Google suspension
       // (or a disabled Entra account) lifted, never an admin's own or one of Google's.
@@ -1262,10 +1272,73 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     );
   }
 
+  /**
+   * Drift: a page of the app's own list of accounts against our records. Each account that isn't
+   * as we'd have it is reported with a finding: `unmanaged` (no link here, and not our
+   * externalId: made by hand, or by another tool), `unlinked` (our externalId for a user here, but
+   * no link: a lost one, or made before this plugin), or `mismatch` (linked, but deactivated or
+   * renamed at the app, or still active though the user was deleted here). Reported, never
+   * changed: a reconcile, or queueing the user, is what sends our state again.
+   */
+  async function drift(target: Target, after: string | null, limit: number) {
+    const page = await clientFor(target).listUsers(after, limit);
+    const byRemote = new Map<string, Link>();
+    const remoteIds = page.users.map((u) => u.id);
+    for (let i = 0; i < remoteIds.length; i += IN_BATCH) {
+      const batch = remoteIds.slice(i, i + IN_BATCH);
+      const links = (await adapter.findMany({ model: LINK_MODEL, where: [{ field: "targetId", value: target.id }, { field: "remoteId", value: batch, operator: "in" }], limit: batch.length })) as Link[];
+      for (const l of links) if (l.targetId === target.id && batch.includes(l.remoteId)) byRemote.set(l.remoteId, l);
+    }
+    // The users here that matter: the linked ones, and those an unlinked account's externalId names.
+    const wanted = [...new Set([...[...byRemote.values()].map((l) => l.userId), ...page.users.filter((u) => !byRemote.has(u.id) && u.externalId).map((u) => u.externalId as string)])];
+    const exists = new Set<string>();
+    for (let i = 0; i < wanted.length; i += IN_BATCH) {
+      const batch = wanted.slice(i, i + IN_BATCH);
+      const found = (await adapter.findMany({ model: "user", where: [{ field: "id", value: batch, operator: "in" }], limit: batch.length })) as { id: string }[];
+      for (const u of found) if (batch.includes(u.id)) exists.add(u.id);
+    }
+    // An organization's target provisions its members only: an account for anyone else is nobody's
+    // here, and the answer mustn't say whether the id is a user elsewhere on the host.
+    let provisions = exists;
+    if (target.organizationId) {
+      provisions = new Set<string>();
+      const ids = [...exists];
+      for (let i = 0; i < ids.length; i += IN_BATCH) {
+        const batch = ids.slice(i, i + IN_BATCH);
+        const rows = (await adapter.findMany({ model: "member", where: [{ field: "organizationId", value: target.organizationId }, { field: "userId", value: batch, operator: "in" }], limit: batch.length })) as { userId: string; organizationId: string }[];
+        for (const m of rows) if (m.organizationId === target.organizationId && batch.includes(m.userId)) provisions.add(m.userId);
+      }
+    }
+    const items: { remoteId: string; userName: string; externalId: string | null; active: boolean | null; userId: string | null; finding: "unmanaged" | "unlinked" | "mismatch"; detail: string }[] = [];
+    for (const u of page.users) {
+      const link = byRemote.get(u.id);
+      const account = { remoteId: u.id, userName: u.userName, externalId: u.externalId, active: u.active ?? null };
+      if (link) {
+        const problems: string[] = [];
+        if (link.active && !exists.has(link.userId)) {
+          // Deleted here, and the deprovisioning didn't get through: say what the app shows, not our record.
+          problems.push(u.active === false ? "the user was deleted here and the account is deactivated at the app, though our record still says active" : u.active === true ? "the user was deleted here, and the account is still active" : "the user was deleted here, and the account is still there (our record says active)");
+        } else if (u.active !== undefined && u.active !== link.active) problems.push(u.active ? "active at the app, deactivated here" : "deactivated at the app, active here");
+        if (u.userName.toLowerCase() !== link.userName.toLowerCase()) problems.push(`renamed at the app (we sent ${link.userName})`);
+        if (problems.length) items.push({ ...account, userId: link.userId, finding: "mismatch", detail: `${problems.join("; ")}: a reconcile, or queueing the user, sends our state again` });
+      } else if (u.externalId && provisions.has(u.externalId)) {
+        // Ours by externalId, but not the account the user's link names: a create whose reply was
+        // lost (the link is pending), a second account, or a lost link.
+        const own = await findLink(keyOf(target.id, u.externalId));
+        if (own && !own.remoteId) items.push({ ...account, userId: u.externalId, finding: "mismatch", detail: "a create of ours for this user is pending (its reply was lost): the next delivery settles it" });
+        else if (own) items.push({ ...account, userId: u.externalId, finding: "unlinked", detail: `has our externalId for a user whose account here is another one (${own.remoteId}): resolve it at the app` });
+        else items.push({ ...account, userId: u.externalId, finding: "unlinked", detail: "has our externalId for a user here, but no link: if its userName is still the user's address, queueing the user takes it over; otherwise resolve it at the app" });
+      } else {
+        items.push({ ...account, userId: null, finding: "unmanaged", detail: u.externalId ? `its externalId (${u.externalId}) is nobody this target provisions: made by another tool, or for a user since deleted (at an organization's target, no longer a member)` : "no externalId and no link here: made by hand, or by another tool" });
+      }
+    }
+    return { items, scanned: page.users.length, next: page.next };
+  }
+
   /** A resumed (or fixed) target: its waiting and failed jobs are due now. */
   async function resume(targetId: string): Promise<number> {
     return adapter.updateMany({ model: JOB_MODEL, where: [{ field: "targetId", value: targetId }], update: { nextAttemptAt: new Date(), failed: false } });
   }
 
-  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures };
+  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift };
 }

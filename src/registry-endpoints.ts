@@ -40,12 +40,15 @@ export interface RegistryHost {
   codeIds: string[];
   /** Problems with a whole target, as the plugin's option checks see them. */
   targetProblems(target: Target): string[];
+  /** The user model's fields, set at init: what `enterprise: true` and `attributes: true` resolve to. */
+  userFields(): ReadonlySet<string>;
   /** This instance's outbox, for a target's organization. */
   instance(ctx: GenericEndpointContext):
     | {
         resync(targetId: string, o: { resume: boolean }): Promise<void>;
         status(targetId: string): Promise<{ queued: number; waiting: number; stuck: number; failed: number; accounts: number; groups: number }>;
         failures(targetId: string): Promise<{ kind: string; subjectId: string; failed: boolean; status: number | null; nextAttemptAt: string }[]>;
+        drift(targetId: string, after: string | null, limit: number): Promise<{ items: unknown[]; scanned: number; next: string | null }>;
       }
     | undefined;
 }
@@ -135,7 +138,11 @@ async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptio
 /** What a check found, in broad terms only: never the app's own words, which would make this a way to read internal services. */
 function checkResult(e: unknown): { ok: false; problem: string; status?: number } {
   const status = e instanceof ScimError ? e.status : null;
-  if (status === null) return { ok: false, problem: e instanceof ScimError ? "no answer (the host can't be reached, or didn't answer in time)" : "the request couldn't be made" };
+  if (status === null) {
+    if (!(e instanceof ScimError)) return { ok: false, problem: "the request couldn't be made" };
+    // Retried errors are the app not answering; the rest are an answer that couldn't be used.
+    return { ok: false, problem: e.retryable ? "no answer (the host can't be reached, or didn't answer in time)" : "the app's answer couldn't be used: check the URL, or pass a `next` this route handed out" };
+  }
   const problem =
     status === 401 || status === 403
       ? "the credentials were refused"
@@ -202,7 +209,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
       ...(credentials.success ? [] : ["credentials: give token, auth, secret or privateKey (see the docs for each type), within their size limits"]),
     ];
     if (settings.success && credentials.success) {
-      issues.push(...storedProblems(settings.data, credentials.data, host.options?.allowHosts, host.options?.enterpriseFields));
+      issues.push(...storedProblems(settings.data, credentials.data, host.options?.allowHosts, host.options?.enterpriseFields, host.options?.attributeFields, host.userFields()));
       if (!issues.length) {
         // A profile refuses what its app can't do (githubEnterprise: deprovision "delete") by throwing.
         let whole: Target | null = null;
@@ -405,6 +412,29 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const row = await rowFor(ctx, actor, ctx.body.id);
         const i = instance(ctx);
         return ctx.json({ ...(await i.status(row.targetId)), failures: await i.failures(row.targetId) });
+      },
+    ),
+
+    /**
+     * Drift: a page of what's at the app that isn't as we'd have it (see `scimProvisioningDrift`):
+     * accounts nobody manages, ours without a link, and linked ones that differ. Read only, and
+     * the app's accounts are the organization's own to see. A failure is said in broad terms.
+     */
+    scimProvisioningTargetDrift: createAuthEndpoint(
+      "/scim-provisioning/targets/drift",
+      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100), after: z.string().max(4096).optional(), limit: z.number().int().min(1).max(1000).optional() }) },
+      async (ctx) => {
+        const actor = await actorOf(ctx, host.options);
+        const row = await rowFor(ctx, actor, ctx.body.id);
+        if (row.type === "webhook") return ctx.json({ ok: null, problem: "a webhook receiver can't be listed, so it has no drift to report" });
+        // As the check route: a target whose credentials can't be read sends nothing.
+        if (!(await readable(ctx, row))) return ctx.json({ ok: false, problem: "its stored credentials can't be read (was the secret changed?): give them again" });
+        try {
+          return ctx.json({ ok: true, ...(await instance(ctx).drift(row.targetId, ctx.body.after ?? null, ctx.body.limit ?? 100)) });
+        } catch (e) {
+          if (e instanceof APIError) throw e;
+          return ctx.json(checkResult(e));
+        }
       },
     ),
   };

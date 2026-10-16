@@ -5,7 +5,7 @@
 import { parseEnvelope, symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
 import * as z from "zod";
 import { type Adapter, IN_BATCH, markPaused, type TargetSource } from "./outbox";
-import { DEFAULT_STORED_ENTERPRISE_FIELDS, enterpriseFieldProblems, enterpriseOption, missingEnterpriseFields } from "./mapping";
+import { attributeFieldProblems, attributesOption, DEFAULT_STORED_ATTRIBUTE_FIELDS, DEFAULT_STORED_ENTERPRISE_FIELDS, enterpriseFieldProblems, enterpriseOption, missingAttributeFields, missingEnterpriseFields } from "./mapping";
 import { profiles } from "./profiles";
 import type { ScimTarget, Target, TargetRegistryOptions } from "./types";
 
@@ -60,6 +60,7 @@ export const storedSettingsSchema = z.strictObject({
   deprovision: z.enum(["deactivate", "delete"]).optional(),
   requireVerifiedEmail: z.boolean().optional(),
   enterprise: enterpriseOption.optional(),
+  attributes: attributesOption.optional(),
   // At most 30 s: the deliveries share the scheduled run with every other organization's.
   timeoutMs: z.number().int().min(100).max(30_000).optional(),
   google: z.strictObject({ clientEmail: z.string().min(1), adminEmail: z.string().min(1), orgUnitPath: z.string().startsWith("/").optional(), groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/).optional() }).optional(),
@@ -269,8 +270,8 @@ export function assemble(row: Pick<TargetRow, "targetId" | "organizationId">, se
  * What's wrong with a stored target's settings and credentials, beyond their shapes: the
  * credentials its type takes, and URLs that are https and public (`allowHosts` aside).
  */
-export function storedProblems(settings: StoredSettings, credentials: StoredCredentials, allowHosts: readonly string[] = [], enterpriseAllowed: readonly string[] = DEFAULT_STORED_ENTERPRISE_FIELDS): string[] {
-  const issues: string[] = [...enterpriseFieldProblems(settings.enterprise, enterpriseAllowed)];
+export function storedProblems(settings: StoredSettings, credentials: StoredCredentials, allowHosts: readonly string[] = [], enterpriseAllowed: readonly string[] = DEFAULT_STORED_ENTERPRISE_FIELDS, attributesAllowed: readonly string[] = DEFAULT_STORED_ATTRIBUTE_FIELDS, userFields?: ReadonlySet<string>): string[] {
+  const issues: string[] = [...enterpriseFieldProblems(settings.enterprise, enterpriseAllowed, userFields), ...attributeFieldProblems(settings.attributes, attributesAllowed, userFields)];
   const type = settings.type ?? "scim";
   const kind = credentialsKind(credentials);
   const takes = { scim: ["bearer", "basic", "header", "oauth2"], webhook: ["webhook-secret"], "google-workspace": ["google-service-account"] }[type];
@@ -327,8 +328,10 @@ export function registrySource(code: Target[], adapter: Adapter, key: SealKey, o
       settings = storedSettingsSchema.parse(JSON.parse(row.config));
       // Checked again when used: a row written outside the API, or a host that narrowed the list since.
       const fieldProblems = [
-        ...enterpriseFieldProblems(settings.enterprise, options.enterpriseFields ?? DEFAULT_STORED_ENTERPRISE_FIELDS),
+        ...enterpriseFieldProblems(settings.enterprise, options.enterpriseFields ?? DEFAULT_STORED_ENTERPRISE_FIELDS, userFields),
         ...(userFields ? missingEnterpriseFields(settings.enterprise, userFields).map((f) => `settings.enterprise: the users have no field ${f}`) : []),
+        ...attributeFieldProblems(settings.attributes, options.attributeFields ?? DEFAULT_STORED_ATTRIBUTE_FIELDS, userFields),
+        ...(userFields ? missingAttributeFields(settings.attributes, userFields).map((f) => `settings.attributes: the users have no field ${f}`) : []),
       ];
       if (fieldProblems.length) throw new Error(fieldProblems.join("; "));
       const credentials = await unseal(key, row);
@@ -347,7 +350,8 @@ export function registrySource(code: Target[], adapter: Adapter, key: SealKey, o
       // they go once it's given new credentials or the right secret is back.
       log.error(`[scim] stored target ${row.targetId}: ${(e as Error).message}; paused until it's fixed`);
       const type = settings?.type ?? "scim";
-      target = markPaused(assemble(row, settings ?? { url: "https://unreadable.invalid" }, UNREADABLE[type] as StoredCredentials), "unreadable");
+      // With the registry's fetch too: nothing this placeholder ever sends may leave the guard.
+      target = markPaused(assemble(row, settings ?? { url: "https://unreadable.invalid" }, UNREADABLE[type] as StoredCredentials, fetchFor), "unreadable");
     }
     built.set(row.targetId, { stamp, target });
     if (built.size > 1000) built.delete(built.keys().next().value as string);

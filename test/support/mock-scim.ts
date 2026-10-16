@@ -39,7 +39,13 @@ export type Fault = { status: number; retryAfter?: string; detail?: string } | {
  * (`attributes=members`), as apps may do. `indexPaged`: users in a group are listed with
  * `Users?filter=groups.value eq "…"`, pageSize at a time, by startIndex and totalResults (no cursor).
  */
-export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean } = {}) {
+/**
+ * `discovery`: serve /ResourceTypes and/or /Schemas (RFC 7644 §4), and whether they list the
+ * Enterprise User extension. Neither by default, as many apps. `noUserType`: /ResourceTypes
+ * without a User type; `bare`: /Schemas as a bare array; `schemaById`: only /Schemas/<id>.
+ */
+/** `noTotal`: the users list leaves out totalResults (apps do), so paging goes by full pages. With `like: "aws"`, the users list pages by cursor. */
+export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; noTotal?: boolean; discovery?: { resourceTypes?: boolean; schemas?: boolean; enterprise?: boolean; noUserType?: boolean; bare?: boolean; schemaById?: boolean } } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
   const groups = new Map<string, StoredGroup>();
@@ -89,6 +95,19 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
     if (body && o.keepsExternalId === false) delete body.externalId;
     if ((init?.headers as Record<string, string> | undefined)?.authorization !== `Bearer ${token}`) return error(401, "bad token");
 
+    const USER = "urn:ietf:params:scim:schemas:core:2.0:User";
+    const GROUP = "urn:ietf:params:scim:schemas:core:2.0:Group";
+    const list = (resources: unknown[]) => reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults: resources.length, Resources: resources });
+    if (path === "/ResourceTypes" && method === "GET" && o.discovery?.resourceTypes) {
+      const schemaExtensions = o.discovery.enterprise ? [{ schema: ENTERPRISE, required: false }] : [];
+      return list([...(o.discovery.noUserType ? [] : [{ id: "User", name: "User", endpoint: "/Users", schema: USER, schemaExtensions }]), { id: "Group", name: "Group", endpoint: "/Groups", schema: GROUP }]);
+    }
+    if (path === "/Schemas" && method === "GET" && o.discovery?.schemas) {
+      const all = [{ id: USER, name: "User" }, { id: GROUP, name: "Group" }, ...(o.discovery.enterprise ? [{ id: ENTERPRISE, name: "EnterpriseUser" }] : [])];
+      return o.discovery.bare ? reply(200, all) : list(all);
+    }
+    if (path === `/Schemas/${ENTERPRISE}` && method === "GET" && o.discovery?.schemaById && o.discovery.enterprise) return reply(200, { id: ENTERPRISE, name: "EnterpriseUser" });
+
     const g = /^\/Groups(?:\/([^/?]+))?$/.exec(path);
     if (g) return group(url, method, g[1] ? decodeURIComponent(g[1]) : undefined, body);
 
@@ -119,7 +138,19 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
       const f = /^userName eq "(.*)"$/.exec(url.searchParams.get("filter") ?? "");
       const want = f ? (JSON.parse(`"${f[1]}"`) as string).toLowerCase() : null;
       const hits = [...users.values()].filter((u) => want === null || u.userName.toLowerCase() === want).map(view);
-      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults: hits.length, Resources: hits });
+      const count = Number(url.searchParams.get("count") || 0);
+      if (o.like === "aws") {
+        // As AWS pages (found live for group members): by cursor, and only when the request carries `cursor=`, even empty; no totalResults.
+        const start = Number(url.searchParams.get("cursor") || 0);
+        const size = count || hits.length;
+        const page = hits.slice(start, start + size);
+        const cursored = url.searchParams.has("cursor");
+        return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], itemsPerPage: page.length, ...(cursored && start + size < hits.length ? { nextCursor: String(start + size) } : {}), Resources: page });
+      }
+      // Paged by startIndex and count when asked (RFC 7644 §3.4.2.4); all of it otherwise.
+      const start = Math.max(1, Number(url.searchParams.get("startIndex") || 1));
+      const page = count ? hits.slice(start - 1, start - 1 + count) : hits;
+      return reply(200, { schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], ...(o.noTotal ? {} : { totalResults: hits.length }), startIndex: start, itemsPerPage: page.length, Resources: page });
     }
     if (method === "POST" && !id) {
       const u = body as Partial<StoredUser>;
@@ -150,6 +181,11 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
         if (op.op.toLowerCase() === "remove" && o.patch && op.path?.startsWith(`${ENTERPRISE}:`)) {
           const ext = (existing as unknown as Record<string, Record<string, unknown> | undefined>)[ENTERPRISE];
           if (ext) delete ext[op.path.slice(ENTERPRISE.length + 1)];
+          continue;
+        }
+        // A remove of a whole top-level attribute ("title", "phoneNumbers").
+        if (op.op.toLowerCase() === "remove" && o.patch && op.path && /^[A-Za-z]+$/.test(op.path)) {
+          delete (existing as unknown as Record<string, unknown>)[op.path];
           continue;
         }
         if (op.op.toLowerCase() !== "replace") continue;

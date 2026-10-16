@@ -5,20 +5,20 @@ import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
-import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, staticTargets, type TargetSource } from "./outbox";
-import { enterpriseOption, missingEnterpriseFields } from "./mapping";
+import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, pauseReason, staticTargets, type TargetSource } from "./outbox";
+import { attributesOption, enterpriseOption, missingAttributeFields, missingEnterpriseFields } from "./mapping";
 import { registrySource, secretText, TARGET_MODEL } from "./registry";
 import { registryEndpoints } from "./registry-endpoints";
 import type { ScimProvisioningOptions, Target } from "./types";
 
 export { defaultScimUser, splitName } from "./mapping";
 export { atlassian, awsIamIdentityCenter, cloudflareAccess, githubEnterprise, profiles, slack, slackUserName } from "./profiles";
-export { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, SCIM_USER_SCHEMA, ScimError, type ScimEnterpriseUser, type ScimGroup, type ScimUser } from "./scim-client";
+export { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, SCIM_USER_SCHEMA, type ScimAddress, ScimError, type ScimEnterpriseUser, type ScimGroup, type ScimUser } from "./scim-client";
 export type { ScimAuth } from "./credentials";
 export { type CheckId, type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SCHEMA_VERSION, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, WebhookSignatureError, webhookSignature } from "./webhook";
 export type { StoredTargetView } from "./registry-endpoints";
-export type { DeliveryFailure, EnterpriseFields, EntraIdTarget, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
+export type { AttributeFields, DeliveryFailure, EnterpriseFields, EntraIdTarget, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
 
 
 const targetSchema = z.strictObject({
@@ -69,6 +69,7 @@ const targetSchema = z.strictObject({
   organizationId: z.string().min(1).optional(),
   mapUser: z.function().optional(),
   enterprise: enterpriseOption.optional(),
+  attributes: attributesOption.optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
   update: z.enum(["put", "patch"]).optional(),
   compat: z
@@ -117,6 +118,7 @@ const optionsSchema = z.strictObject({
       maxTargetsPerOrganization: z.number().int().min(1).max(1000).optional(),
       allowHosts: z.array(z.string().min(1)).optional(),
       enterpriseFields: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field")).optional(),
+      attributeFields: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field")).optional(),
       fetch: z.function().optional(),
     })
     .optional(),
@@ -334,6 +336,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     if (target.teamGroups && !teamsEnabled) issues.push("settings.teamGroups: needs the organization plugin's teams");
     const missing = missingEnterpriseFields(target.enterprise, userFields);
     if (missing.length) issues.push(`settings.enterprise: reads ${missing.join(", ")}, which the host's users don't have`);
+    const missingAttributes = missingAttributeFields(target.attributes, userFields);
+    if (missingAttributes.length) issues.push(`settings.attributes: reads ${missingAttributes.join(", ")}, which the host's users don't have`);
     return issues;
   }
 
@@ -370,7 +374,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       [JOB_MODEL]: {
         fields: {
           key: { type: "string", required: true, unique: true },
-          targetId: { type: "string", required: true },
+          /** Indexed (1.4): a target's runs, its status counts and removing a target scanned every job. */
+          targetId: { type: "string", required: true, index: true },
           userId: { type: "string", required: true, index: true },
           version: { type: "number", required: true },
           attempts: { type: "number", required: true },
@@ -448,6 +453,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       for (const t of options.targets) {
         const missing = missingEnterpriseFields(t.enterprise, userFields);
         if (missing.length) throw new Error(`[scim] target ${t.id}: enterprise reads ${missing.join(", ")}, which the user model doesn't have; add them to user.additionalFields`);
+        const missingAttributes = missingAttributeFields(t.attributes, userFields);
+        if (missingAttributes.length) throw new Error(`[scim] target ${t.id}: attributes reads ${missingAttributes.join(", ")}, which the user model doesn't have; add them to user.additionalFields`);
       }
       if (options.registry && !org) throw new Error("[scim] registry needs Better Auth's organization plugin: every stored target belongs to an organization");
       const source = options.registry
@@ -581,6 +588,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           options: options.registry,
           codeIds: options.targets.map((t) => t.id),
           targetProblems,
+          userFields: () => userFields,
           instance: (ctx) => {
             const s = stateOf(ctx.context);
             if (!s) return undefined;
@@ -593,6 +601,12 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               },
               failures: async (targetId) =>
                 (await s.box.failures({ targetId, limit: 20 })).items.map((f) => ({ kind: f.kind, subjectId: f.subjectId, failed: f.failed, status: f.lastStatus, nextAttemptAt: f.nextAttemptAt })),
+              drift: async (targetId, after, limit) => {
+                const target = await s.source.get(targetId);
+                if (!target) throw new APIError("NOT_FOUND", { message: `[scim] no target ${targetId}` });
+                if (pauseReason(target) === "unreadable") throw new APIError("BAD_REQUEST", { message: "[scim] its stored credentials can't be read (was the secret changed?): give them again" });
+                return s.box.drift(target, after, limit);
+              },
             };
           },
         },
@@ -673,6 +687,27 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           const targetId = ctx.body?.targetId;
           if (targetId !== undefined && !(await s.source.get(targetId))) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           return ctx.json(await s.box.failures({ targetId, after: ctx.body?.after, limit: ctx.body?.limit ?? 100 }));
+        },
+      ),
+      /**
+       * Drift: what's at the app that isn't as we'd have it, a page of the app's own list at a time
+       * (`limit`, 100 by default, within what the app pages by; then `after: next` until it's
+       * null): accounts nobody here manages (made by hand, or by another tool), ours without a
+       * link here, and linked ones that differ (deactivated or renamed at the app, or still active
+       * though the user was deleted here). Reported, never changed. A webhook receiver can't be
+       * listed; a disabled stored target still is (it's read only), one whose credentials can't
+       * be read isn't.
+       */
+      scimProvisioningDrift: createAuthEndpoint.serverOnly(
+        { method: "POST", body: z.strictObject({ targetId: z.string().min(1), after: z.string().optional(), limit: z.number().int().min(1).max(1000).optional() }) },
+        async (ctx) => {
+          const s = stateOf(ctx.context);
+          if (!s) throw new Error("[scim] not initialised");
+          const target = await s.source.get(ctx.body.targetId);
+          if (!target) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${ctx.body.targetId}` });
+          if (target.type === "webhook") throw new APIError("BAD_REQUEST", { message: "[scim] a webhook receiver can't be listed, so it has no drift to report" });
+          if (pauseReason(target) === "unreadable") throw new APIError("BAD_REQUEST", { message: `[scim] target ${target.id}: its stored credentials can't be read (was the secret changed?): give them again` });
+          return ctx.json(await s.box.drift(target, ctx.body.after ?? null, ctx.body.limit ?? 100));
         },
       ),
       /** Deliver what's due (retries included). Call it from a scheduled job, e.g. every minute. */

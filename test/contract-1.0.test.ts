@@ -49,6 +49,6 @@ describe("exports", () => {
   it("check results have stable ids", async () => {
     const app = mockScim();
     const results = await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch });
-    expect(results.map((r) => r.id)).toEqual(["service-provider-config", "create", "keeps-external-id", "find", "find-any-case", "duplicate-refused", "update-put", "update-patch", "update-patch-path", "deactivate", "delete"]);
+    expect(results.map((r) => r.id)).toEqual(["service-provider-config", "enterprise-user", "create", "keeps-external-id", "find", "find-any-case", "duplicate-refused", "update-put", "update-patch", "update-patch-path", "deactivate", "delete"]);
   });
 });

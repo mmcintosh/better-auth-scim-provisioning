@@ -1,12 +1,13 @@
 // What does this app's SCIM actually support? `checkScimTarget` asks it: its ServiceProviderConfig,
-// then a throwaway test user taken through create, find, replace, both PATCH forms, deactivate and
-// delete. The test user is always removed (or at least deactivated) at the end. Behind
-// `npx better-auth-scim-provisioning check`, and usable from an admin page ("test connection").
+// whether it advertises the Enterprise User extension, then a throwaway test user taken through
+// create, find, replace, both PATCH forms, deactivate and delete. The test user is always removed
+// (or at least deactivated) at the end. Behind `npx better-auth-scim-provisioning check`, and
+// usable from an admin page ("test connection").
 import { credentials, type ScimAuth } from "./credentials";
-import { fetchFailure, SCIM_USER_SCHEMA, scimString, targetUrl, trimSlashes } from "./scim-client";
+import { fetchFailure, SCIM_ENTERPRISE_USER_SCHEMA, SCIM_USER_SCHEMA, scimString, targetUrl, trimSlashes } from "./scim-client";
 
-/** Each check, by a stable id (the `name` is for people and may change). */
-export type CheckId = "service-provider-config" | "create" | "keeps-external-id" | "find" | "find-any-case" | "duplicate-refused" | "update-put" | "update-patch" | "update-patch-path" | "deactivate" | "delete";
+/** Each check, by a stable id (the `name` is for people and may change). The list can grow in a minor release. */
+export type CheckId = "service-provider-config" | "enterprise-user" | "create" | "keeps-external-id" | "find" | "find-any-case" | "duplicate-refused" | "update-put" | "update-patch" | "update-patch-path" | "deactivate" | "delete";
 
 export interface CheckResult {
   id: CheckId;
@@ -88,6 +89,40 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
     const schemes = Array.isArray(spc.json.authenticationSchemes) ? (spc.json.authenticationSchemes as { type?: unknown }[]).map((s) => String(s.type)).join(", ") : "";
     note("service-provider-config", "ServiceProviderConfig", true, `patch ${flag("patch")}, filter ${flag("filter")}, bulk ${flag("bulk")}, etag ${flag("etag")}, sort ${flag("sort")}${schemes ? `; auth: ${schemes}` : ""}`);
   } else note("service-provider-config", "ServiceProviderConfig", null, `not available (${why(spc)}); fine, it's optional in practice`);
+
+  // 1b. Does the app advertise the Enterprise User extension (RFC 7643 §4.3)? /ResourceTypes says
+  // which extensions its User type has, and /Schemas lists every schema it knows (RFC 7644 §4).
+  // Read only: the test user isn't sent the extension, which an app that doesn't know it could
+  // refuse, taking every later result with it. Many apps have neither endpoint; then nothing is
+  // known, and whether to set `enterprise` is a question for the app's docs.
+  // A ListResponse's Resources (RFC 7644 §4), or a bare array, which some apps answer with instead.
+  const listed = (json: Record<string, unknown> | null): unknown[] => (Array.isArray(json) ? json : Array.isArray(json?.Resources) ? (json.Resources as unknown[]) : []);
+  const ENTERPRISE = "Enterprise User extension";
+  const notListed = (where: string) => `not listed by ${where}: set \`enterprise\` only if the app's docs say it's accepted`;
+  const types = await call("GET", "/ResourceTypes");
+  const userType = (types.status === 200 ? listed(types.json) : []).find((r) => {
+    const t = r as { schema?: unknown; id?: unknown; name?: unknown } | null;
+    return t?.schema === SCIM_USER_SCHEMA || t?.id === "User" || t?.name === "User";
+  }) as { schemaExtensions?: unknown } | undefined;
+  if (userType) {
+    const extensions = Array.isArray(userType.schemaExtensions) ? (userType.schemaExtensions as { schema?: unknown }[]) : [];
+    const has = extensions.some((x) => x?.schema === SCIM_ENTERPRISE_USER_SCHEMA);
+    note("enterprise-user", ENTERPRISE, has, has ? "listed by /ResourceTypes" : notListed("/ResourceTypes"));
+  } else {
+    const schemas = await call("GET", "/Schemas");
+    const all = schemas.status === 200 ? listed(schemas.json) : [];
+    if (all.length) {
+      const has = all.some((x) => (x as { id?: unknown } | null)?.id === SCIM_ENTERPRISE_USER_SCHEMA);
+      note("enterprise-user", ENTERPRISE, has, has ? "listed by /Schemas" : notListed("/Schemas"));
+    } else {
+      // Some apps answer only for one schema by its id (a URN's colons are fine in a path).
+      const one = await call("GET", `/Schemas/${SCIM_ENTERPRISE_USER_SCHEMA}`);
+      const has = one.status === 200 && one.json?.id === SCIM_ENTERPRISE_USER_SCHEMA;
+      // What each answered: a 404 (most apps), a 401 (a token without that scope), or a 200 that listed nothing useful.
+      const saw = (r: { status: number; json: Record<string, unknown> | null; error?: string }, what: string, without: string) => (r.status === 200 ? `${what} answered without ${without}` : `${what} ${why(r)}`);
+      note("enterprise-user", ENTERPRISE, has ? true : null, has ? "served at /Schemas/<its id>" : `can't tell: ${saw(types, "/ResourceTypes", "a User type")}, ${saw(schemas, "/Schemas", "any schema")}; the app's docs say whether \`enterprise\` is accepted`);
+    }
+  }
 
   // 2. A throwaway user.
   const suffix = crypto.randomUUID().slice(0, 8);
