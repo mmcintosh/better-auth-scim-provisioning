@@ -515,9 +515,13 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         if (removed) await client.remove(removed);
       }
       // At Entra, the link stays (inactive) until a delete finds the account gone: the check a
-      // minute later deletes again, and its 404 (then not found by the immutableId) ends it.
-      if (entra && removed) {
-        await saveLink(target, userId, { remoteId: removed, userName: link.userName, externalId, active: false });
+      // minute later deletes again, and its 404 (then not found by the immutableId) ends it. The
+      // first delete's 404 isn't the end either: an account made seconds earlier can answer 404
+      // and be missing from the immutableId lookup for a moment (found live), and taking that as
+      // gone left the account live. So it's checked a minute later too; only an inactive link (a
+      // delete already sent, or an earlier deactivation) ends on a 404.
+      if (entra && (removed || link.active)) {
+        await saveLink(target, userId, { remoteId: removed ?? link.remoteId, userName: link.userName, externalId, active: false });
         return confirmAt();
       }
       await dropLink(key);

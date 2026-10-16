@@ -14,6 +14,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 - **Jobs are indexed by target.** A target's scheduled runs, its status counts and removing a target read its jobs by `targetId`, which scanned the whole table. New installs get the index from the migration; `npx auth migrate` doesn't add it to an existing table, so add it by hand if you like: `CREATE INDEX "scimProvisioningJob_targetId_idx" ON "scimProvisioningJob" ("targetId");` (the Workers example's `0004` migration does). No column changes.
 
+### Fixed
+
+- **Entra ID: a delete seconds after the create could leave the account live.** Graph can answer 404 to a delete of an account made moments earlier, with the lookup by immutableId not finding it yet either (found live). The link was dropped as gone, and the account stayed, active. Now a delete's 404 ends the link only at the check a minute later that follows every delete at Entra, which deletes again if the account is there.
+
 ## [1.3.0] - 2026-10-14
 
 Microsoft Entra ID (Microsoft 365) as a target: users through Microsoft Graph, linked for federated sign-in through better-auth-saml-idp, verified live.
