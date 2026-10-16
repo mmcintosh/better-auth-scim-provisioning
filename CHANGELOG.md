@@ -6,9 +6,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [1.4.0] - 2026-10-16
 
-More 
-  attributes (title, phones, a work address), drift detection, the check result for the Enterprise User extension, and jobs indexed by 
-  target. Entra ID: a delete seconds after the create is checked a minute later.
+More attributes (title, phones, a work address), drift detection, the `check` result for the Enterprise User extension, and jobs indexed by target. Entra ID: a delete seconds after the create is checked a minute later.
 
 ### Added
 
