@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-16
+
+More attributes (title, phones, a work address), drift detection, the `check` result for the Enterprise User extension, and jobs indexed by target. Entra ID: a delete seconds after the create is checked a minute later.
+
 ### Added
 
 - **More attributes (`attributes`)**: the job title, work and mobile phone numbers and a work address, read from user fields and sent as SCIM's `title`, `phoneNumbers` and `addresses`. `true` reads fields of those names (`title`, `phone`, `mobile`, `streetAddress`, `locality`, `region`, `postalCode`, `country`) that your users have; a map names your own. An empty field clears the attribute at the app (a PUT leaves it out; a PATCH removes it by path). Entra ID gets `jobTitle`, `businessPhones`, `mobilePhone` and the address fields; Google Workspace the primary organization's title, `phones` and `addresses`, touching only what the target names and keeping an admin's other entries (one primary per list, ours when we send one). A `mapUser` that sets one of these itself takes precedence, at Google and Entra too. Webhooks get the same object. Organizations' stored targets can set it, reading only the fields the host allows (`registry.attributeFields`; by default the attribute names, resolved against the fields your users have, so `attributes: true` passes a narrowed list that covers them). Hosts with `registry`: on upgrade, organizations' targets may read those eight fields by default; set `registry.attributeFields` if any of them means something else in your user model. `ScimUser` gains `title`, `phoneNumbers` and `addresses`; exports the `AttributeFields` and `ScimAddress` types.

@@ -1,6 +1,6 @@
 {
   "name": "better-auth-scim-provisioning",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "User provisioning for Better Auth: create, update and deactivate users in the apps they sign in to, over SCIM 2.0, Google Workspace, Microsoft Entra ID and signed webhooks.",
   "license": "MIT",
   "author": "Mark McIntosh",
