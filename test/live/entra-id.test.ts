@@ -1,10 +1,11 @@
 // Microsoft Entra ID, live, through Microsoft Graph: a user's whole life (created with our id as
 // onPremisesImmutableId, renamed, a new email, disabled with sessions revoked, enabled, disabled
-// when deleted), delete mode (the recycle bin, then restored when the user is back), and the
-// Enterprise User attributes with a manager. Everything is read back from Graph, and everything
-// the test made is deleted and purged at the end. Graph's replicas lag for seconds after a write,
-// so reads are retried until they agree.
-// A deprovisioning is followed by a confirm check a minute later, which this waits for: about 8 minutes in all.
+// when deleted), delete mode (the recycle bin, then restored when the user is back), the
+// Enterprise User attributes with a manager, the `attributes` fields (title, phones, address) set
+// and cleared, and drift detection a page at a time through Graph's own next links. Everything is
+// read back from Graph, and everything the test made is deleted and purged at the end. Graph's
+// replicas lag for seconds after a write, so reads are retried until they agree.
+// A deprovisioning is followed by a confirm check a minute later, which this waits for: about 10 minutes in all.
 // Runs only with ENTRA_TENANT_ID, ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET and ENTRA_TEST_DOMAIN (a
 // verified domain of the tenant, such as its <name>.onmicrosoft.com) in .env.live: an app
 // registration with the Graph application permission User.ReadWrite.All, admin consented. With
@@ -24,7 +25,7 @@ const domain = process.env.ENTRA_TEST_DOMAIN;
 const federated = process.env.ENTRA_FEDERATED_DOMAIN;
 const configured = !!(tenantId && clientId && clientSecret && domain);
 const G = "https://graph.microsoft.com/v1.0";
-const SELECT = "id,userPrincipalName,displayName,givenName,surname,accountEnabled,onPremisesImmutableId,employeeId,department,companyName,employeeOrgData";
+const SELECT = "id,userPrincipalName,displayName,givenName,surname,accountEnabled,onPremisesImmutableId,employeeId,department,companyName,employeeOrgData,jobTitle,businessPhones,mobilePhone,streetAddress,city,state,postalCode,country";
 
 describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, () => {
   const stamp = Date.now().toString(36);
@@ -115,7 +116,7 @@ describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, ()
       return links.find((l) => l.userId === userId)?.remoteId as string | undefined;
     };
     const user = (email: string, name: string) => ctx.internalAdapter.createUser({ email, name, emailVerified: true }, { method: "admin" });
-    return { ctx, jobs, settle, remoteOf, user };
+    return { auth, ctx, jobs, settle, remoteOf, user };
   };
 
   afterAll(async () => {
@@ -224,6 +225,81 @@ describe.skipIf(!configured)("live Microsoft Entra ID", { timeout: 600_000 }, ()
     expect(await h.jobs()).toEqual([]);
     expect(await read(id, (x) => x?.department === null && x?.employeeOrgData?.costCenter === "CC9" && x?.employeeOrgData?.division === null)).toMatchObject({ department: null, employeeOrgData: { costCenter: "CC9", division: null } });
     expect(await managerOf(id, null)).toBeNull();
+  });
+
+  it("attributes: the title, phones and work address, set and cleared", async () => {
+    const fields = { title: { type: "string" }, phone: { type: "string" }, mobile: { type: "string" }, streetAddress: { type: "string" }, locality: { type: "string" }, region: { type: "string" }, postalCode: { type: "string" }, country: { type: "string" } } as const;
+    const h = await setup({ attributes: true }, fields);
+    const u = await h.user(email("eve"), "Eve Fields");
+    await h.settle();
+    await h.ctx.internalAdapter.updateUser(u.id, { title: "Engineer", phone: "+44 20 7946 0001", mobile: "+44 7700 900001", streetAddress: "1 Main Street", locality: "London", region: "Greater London", postalCode: "SW1A 1AA", country: "United Kingdom" });
+    await h.settle();
+    expect(await h.jobs()).toEqual([]);
+    const id = (await h.remoteOf(u.id))!;
+    const r = await read(id, (x) => x?.jobTitle === "Engineer" && x?.mobilePhone === "+44 7700 900001" && x?.country === "United Kingdom");
+    console.log("5 attributes", JSON.stringify(r));
+    expect(r).toMatchObject({ jobTitle: "Engineer", businessPhones: ["+44 20 7946 0001"], mobilePhone: "+44 7700 900001", streetAddress: "1 Main Street", city: "London", state: "Greater London", postalCode: "SW1A 1AA", country: "United Kingdom" });
+
+    // Cleared in part: the title and the mobile go; the work phone and the address stay.
+    await h.ctx.internalAdapter.updateUser(u.id, { title: null, mobile: null });
+    await h.settle();
+    expect(await h.jobs()).toEqual([]);
+    expect(await read(id, (x) => x?.jobTitle === null && x?.mobilePhone === null)).toMatchObject({ jobTitle: null, businessPhones: ["+44 20 7946 0001"], mobilePhone: null, city: "London", postalCode: "SW1A 1AA" });
+
+    // Then the rest: an empty list clears the work phone, nulls clear the address.
+    await h.ctx.internalAdapter.updateUser(u.id, { phone: null, streetAddress: null, locality: null, region: null, postalCode: null, country: null });
+    await h.settle();
+    expect(await h.jobs()).toEqual([]);
+    expect(await read(id, (x) => x?.businessPhones?.length === 0 && x?.country === null)).toMatchObject({ businessPhones: [], streetAddress: null, city: null, state: null, postalCode: null, country: null });
+  });
+
+  it("drift: the tenant's accounts a page at a time through Graph's own next links; an account changed by hand is reported", async () => {
+    const h = await setup({});
+    const u = await h.user(email("gus"), "Gus Drift");
+    await h.settle();
+    expect(await h.jobs()).toEqual([]);
+    const id = (await h.remoteOf(u.id))!;
+    expect(await read(id, (x) => !!x)).toMatchObject({ accountEnabled: true });
+    type Item = { remoteId: string; finding: string; userId: string | null; active: boolean | null };
+    /** The whole directory in pages of one, as a caller would: the `next` handed out drives the paging. */
+    const scan = async () => {
+      const items: Item[] = [];
+      let pages = 0;
+      let scanned = 0;
+      let after: string | undefined;
+      do {
+        const page = await h.auth.api.scimProvisioningDrift({ body: { targetId: "entra", limit: 1, ...(after ? { after } : {}) } });
+        pages++;
+        scanned += page.scanned;
+        items.push(...page.items);
+        after = page.next ?? undefined;
+      } while (after && pages < 500);
+      return { items, pages, scanned, ended: !after };
+    };
+    // Disabled by hand at Entra: a mismatch, once Graph's list shows it (replicas lag).
+    expect((await graph("PATCH", `/users/${id}`, { accountEnabled: false })).status).toBe(204);
+    let s = await scan();
+    for (let i = 0; i < 20 && !s.items.some((x) => x.remoteId === id); i++) {
+      await sleep(3000);
+      s = await scan();
+    }
+    console.log(`6 drift: ${s.scanned} accounts over ${s.pages} pages, ${s.items.length} findings`, JSON.stringify(s.items.filter((x) => x.remoteId === id)));
+    expect(s.ended).toBe(true);
+    expect(s.pages).toBeGreaterThan(1);
+    expect(s.scanned).toBeGreaterThanOrEqual(2);
+    expect(s.items).toContainEqual(expect.objectContaining({ remoteId: id, finding: "mismatch", active: false, userId: u.id }));
+    // The tenant's own accounts, made by hand, are unmanaged: reported, never touched.
+    expect(s.items.some((x) => x.finding === "unmanaged")).toBe(true);
+
+    // Enabled again by hand: nothing to report for our account.
+    expect((await graph("PATCH", `/users/${id}`, { accountEnabled: true })).status).toBe(204);
+    s = await scan();
+    for (let i = 0; i < 20 && s.items.some((x) => x.remoteId === id); i++) {
+      await sleep(3000);
+      s = await scan();
+    }
+    expect(s.items.some((x) => x.remoteId === id)).toBe(false);
+    expect(await read(id, (x) => x?.accountEnabled === true)).toMatchObject({ accountEnabled: true });
   });
 
   it.skipIf(!federated)("a federated domain: created with the immutableId and no password", async () => {

@@ -16,7 +16,7 @@
 // `deleteLag`: as found live, a user deleted moments ago still reads as live by id (GET 200) though
 // changes to it 404, for the next `deleteLag` reads.
 // `lag`: as found live, a user created moments ago isn't there by id or userPrincipalName yet
-// (GET, PATCH and DELETE 404) though the immutableId lookup finds it, for the next `lag` requests
+// (GET, PATCH and DELETE 404) though the immutableId lookup finds it, for the next `lag` requests (with `lagFilter`, that lookup misses it too: found live, once, by a delete seconds after the create)
 // by id or userPrincipalName.
 
 export interface GraphStoredUser {
@@ -47,7 +47,7 @@ export interface GraphStoredUser {
 }
 
 /** `nextLinkBase`: where a list's nextLink points (the real Graph points at itself, whatever the client calls); default this mock's own url. */
-export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">; lag?: number | undefined; deleteLag?: number | undefined; nextLinkBase?: string | undefined } = {}) {
+export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">; lag?: number | undefined; lagFilter?: boolean | undefined; deleteLag?: number | undefined; nextLinkBase?: string | undefined } = {}) {
   const domains = o.domains ?? { "example.com": "Federated", "managed.example": "Managed" };
   const tenantId = "00000000-0000-4000-8000-000000000001";
   const clientId = "11111111-2222-3333-4444-555555555555";
@@ -155,7 +155,7 @@ export function mockGraph(o: { domains?: Record<string, "Federated" | "Managed">
       if (!filter) return gerror(400, "Request_UnsupportedQuery", "Unsupported query.");
       const value = filter[2]!.replace(/''/g, "'");
       const found =
-        filter[1] === "userPrincipalName" ? [...users.values()].filter((x) => x.userPrincipalName.toLowerCase() === value.toLowerCase() && !hidden(x.id)) : [...users.values()].filter((x) => x.onPremisesImmutableId === value);
+        filter[1] === "userPrincipalName" ? [...users.values()].filter((x) => x.userPrincipalName.toLowerCase() === value.toLowerCase() && !hidden(x.id)) : [...users.values()].filter((x) => x.onPremisesImmutableId === value && !(o.lagFilter && hidden(x.id)));
       return json(200, { "@odata.context": `${url}/$metadata#users`, value: found.map((x) => select(x, q)) });
     }
     if (path === "/users" && method === "POST") {

@@ -190,6 +190,27 @@ describe("Entra ID", () => {
     expect(await h.jobs()).toEqual([]);
   });
 
+  it("deleted moments after its create, with the immutableId lookup missing it too: checked a minute later, never taken as gone", async () => {
+    const h = await createHost({ targets: [{ ...E, deprovision: "delete" }], graphLag: 2, graphLagFilter: true });
+    const u = await h.user("Ada Lovelace");
+    const id = atGraph(h)[0]!.id;
+    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+    await h.settle();
+    // Graph said 404 to the delete and found nothing by immutableId (found live, once): the account
+    // is still there, so the link is kept (inactive) and the delete is checked a minute later, as
+    // every delete at Entra is.
+    expect(atGraph(h)).toHaveLength(1);
+    expect(await h.links()).toEqual([expect.objectContaining({ userId: u.id, remoteId: id, active: false })]);
+    const [job] = await h.jobs();
+    expect(job).toMatchObject({ userId: u.id, failed: false });
+    expect(new Date(job!.nextAttemptAt as Date).getTime()).toBeGreaterThan(Date.now() + 50_000);
+    await drain(h);
+    expect(atGraph(h)).toEqual([]);
+    expect(h.graph.bin.has(id)).toBe(true);
+    expect(await h.links()).toEqual([]);
+    expect(await h.jobs()).toEqual([]);
+  });
+
   it("a timed ban: a dropped disable is checked a minute later, not when the ban ends; then the job waits for the ban's end", async () => {
     const h = await createHost({ targets: [E] });
     const u = await h.user("Ada Lovelace");
