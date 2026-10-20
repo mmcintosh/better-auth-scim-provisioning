@@ -9,5 +9,6 @@ case "$want" in
   *) v="$want" ;;
 esac
 echo "better-auth $want -> $v"
-# @better-auth/scim (the interop tests' receiver) follows Better Auth's version.
-pnpm add -D "better-auth@$v" "@better-auth/core@$v" "@better-auth/scim@$v"
+# Every pinned @better-auth/* package follows Better Auth's version (@better-auth/scim is the
+# interop tests' receiver); one left behind pulls in a second @better-auth/core.
+pnpm add -D "better-auth@$v" "@better-auth/core@$v" "@better-auth/scim@$v" "@better-auth/drizzle-adapter@$v"
