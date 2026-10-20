@@ -12,12 +12,6 @@
   ],
   "overrides": [
     {
-      "selector": "@better-auth/utils",
-      "via": "better-auth@1",
-      "dependency": "@better-auth/utils",
-      "why": "Better Auth 1.7 pins 0.4.2; the override keeps one copy in the tree. Remove when the install no longer needs it."
-    },
-    {
       "selector": "deepmerge-ts@<8.0.0",
       "via": "@prisma/config@7",
       "dependency": "deepmerge-ts",

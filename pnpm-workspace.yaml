@@ -2,8 +2,10 @@
 # Don't install a version published less than a day ago: most npm malware is found and pulled
 # within hours. Dependabot waits 3 days (cooldown), so it never proposes a version this rejects.
 # Better Auth is exempt, because the canary and CI's latest-1.7 row exist to try its newest
-# releases at once; Socket Firewall still checks them in CI.
+# releases at once; Socket Firewall still checks them in CI. better-call is Better Auth's own
+# router, pinned exactly by each release (1.7.12 came out pinning a better-call 19 hours old).
 minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
   - better-auth
   - "@better-auth/*"
+  - better-call
