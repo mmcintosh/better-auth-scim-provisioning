@@ -6,7 +6,7 @@
 // is found by the IdP's user id while the user is active, and not after they're deactivated or
 // deleted, plus the profile, groups, and what deactivation does (and doesn't) do to sessions.
 import { DatabaseSync } from "node:sqlite";
-import { acquireActiveSCIMUserLink, scim } from "@better-auth/scim";
+import { acquireActiveSCIMUserLink, type SCIMIdentityState, type SCIMTransactionContext, scim } from "@better-auth/scim";
 import { type BetterAuthPlugin, betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { admin, organization } from "better-auth/plugins";
@@ -18,8 +18,25 @@ const RECEIVER = "https://receiver.example";
 const CONNECTION = "our-idp";
 const TOKEN = "receiver-bearer-token-that-is-long-enough";
 
-/** The app our users sign in to: Better Auth with @better-auth/scim, one connection for our IdP. */
-async function receiver() {
+const SCIM_BAN = "Deprovisioned by SCIM";
+
+/**
+ * The README's recipe for an app that must refuse new sign-ins once we deactivate a user
+ * (@better-auth/scim ends their sessions, but any sign-in method still works): ban them with the
+ * admin plugin while no SCIM connection has them active, and lift only that ban, never an admin's.
+ */
+async function blockInactiveSignIn({ userId, active }: SCIMIdentityState, { database }: SCIMTransactionContext) {
+  const where = [{ field: "id", value: userId }];
+  const user = await database.findOne<{ banned?: boolean | null; banReason?: string | null }>({ model: "user", where });
+  if (!active && !user?.banned) await database.update({ model: "user", where, update: { banned: true, banReason: SCIM_BAN } });
+  if (active && user?.banned && user.banReason === SCIM_BAN) await database.update({ model: "user", where, update: { banned: false, banReason: null } });
+}
+
+/**
+ * The app our users sign in to: Better Auth with @better-auth/scim, one connection for our IdP.
+ * `blockSignIn` adds the admin plugin and the README's recipe.
+ */
+async function receiver({ blockSignIn = false } = {}) {
   const lifecycle: { userId: string; active: boolean }[] = [];
   const auth = betterAuth({
     baseURL: RECEIVER,
@@ -28,14 +45,16 @@ async function receiver() {
     database: new DatabaseSync(":memory:"),
     emailAndPassword: { enabled: true },
     plugins: [
+      ...(blockSignIn ? [admin()] : []),
       // Cast: @better-auth/scim's schema type has an optional table, which BetterAuthPlugin's
       // doesn't allow under exactOptionalPropertyTypes. Its runtime is unaffected.
       scim({
         connections: [{ id: CONNECTION, credentials: [{ type: "bearer", id: "our-idp-token", token: TOKEN }] }],
         identity: {
           // The application's hook for a user's overall state, called on every change.
-          reconcileUser(state) {
+          async reconcileUser(state, context) {
             lifecycle.push({ userId: state.userId, active: state.active });
+            if (blockSignIn) await blockInactiveSignIn(state, context);
           },
         },
       }) as unknown as BetterAuthPlugin,
@@ -148,6 +167,53 @@ describe("@better-auth/scim as the receiver", () => {
     await us.ctx.internalAdapter.updateUser(cy.id, { banned: true });
     await us.delivered();
     expect(await sessions()).toBe(0);
+  });
+
+  /** A provisioned user given a password there, and a sign-in with it. */
+  const withPassword = async (app: Awaited<ReturnType<typeof receiver>>, userId: string) => {
+    await app.ctx.internalAdapter.linkAccount({ userId, providerId: "credential", accountId: userId, password: await app.ctx.password.hash("their-password-123") });
+    const email = (await app.userById(userId))!.email as string;
+    return () => app.auth.api.signInEmail({ body: { email, password: "their-password-123" } });
+  };
+
+  it("deactivation doesn't stop a new sign-in there: the user signs in again with any method the app offers", async () => {
+    const app = await receiver();
+    const us = await idp(app);
+    const jo = await us.newUser("jo@example.com", "Jo March");
+    await us.delivered();
+    const signIn = await withPassword(app, (await app.linkFor(jo.id))!.userId);
+    await us.ctx.internalAdapter.updateUser(jo.id, { banned: true });
+    await us.delivered();
+    expect(await app.scimUsers()).toEqual([expect.objectContaining({ externalId: jo.id, active: false })]);
+    await expect(signIn()).resolves.toMatchObject({ token: expect.any(String) });
+  });
+
+  it("with the README's recipe, deactivation refuses new sign-ins there, reactivation lets them in again, and an admin's own ban stays", async () => {
+    const app = await receiver({ blockSignIn: true });
+    const us = await idp(app);
+    const kit = await us.newUser("kit@example.com", "Kit Carson");
+    await us.delivered();
+    const userId = (await app.linkFor(kit.id))!.userId;
+    const signIn = await withPassword(app, userId);
+    await expect(signIn()).resolves.toMatchObject({ token: expect.any(String) });
+
+    await us.ctx.internalAdapter.updateUser(kit.id, { banned: true });
+    await us.delivered();
+    expect(await app.userById(userId)).toMatchObject({ banned: true, banReason: SCIM_BAN });
+    await expect(signIn()).rejects.toMatchObject({ body: { code: "BANNED_USER" } });
+
+    await us.ctx.internalAdapter.updateUser(kit.id, { banned: false });
+    await us.delivered();
+    await expect(signIn()).resolves.toMatchObject({ token: expect.any(String) });
+
+    // Banned there by an admin, for their own reason: our deactivation and reactivation leave it.
+    await app.ctx.internalAdapter.updateUser(userId, { banned: true, banReason: "Abuse" });
+    await us.ctx.internalAdapter.updateUser(kit.id, { banned: true });
+    await us.delivered();
+    await us.ctx.internalAdapter.updateUser(kit.id, { banned: false });
+    await us.delivered();
+    expect(await app.userById(userId)).toMatchObject({ banned: true, banReason: "Abuse" });
+    await expect(signIn()).rejects.toMatchObject({ body: { code: "BANNED_USER" } });
   });
 
   it("organizations arrive as SCIM Groups with their provisioned members", async () => {

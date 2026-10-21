@@ -359,6 +359,23 @@ The tests run this pair for real: [`@better-auth/scim`](https://www.npmjs.com/pa
 - Users are created there, updated, deactivated when banned or deleted here, and reactivated when unbanned; `deprovision: "delete"` deletes them there.
 - Organizations arrive as SCIM Groups with their provisioned members (`groups`).
 - **Deactivation signs the user out there.** `@better-auth/scim` deletes a user's sessions once none of their SCIM connections has them active.
+- **But it doesn't stop them signing in again.** The user is still there, so any sign-in method the app offers (a password, a password reset, a magic link, a social account) gets them back in, as Better Auth's docs say. To refuse that, the app records the state in `@better-auth/scim`'s `reconcileUser` hook. With Better Auth's admin plugin, a ban does it: the tests show this refuses new sign-ins once we deactivate the user, lets them in again once we reactivate them, and never lifts a ban an admin set themselves.
+
+```ts
+// The app (with Better Auth's admin plugin): no new sign-ins while no SCIM connection has the user active.
+const SCIM_BAN = "Deprovisioned by SCIM";
+scim({
+  connections: [/* … */],
+  identity: {
+    async reconcileUser({ userId, active }, { database }) {
+      const where = [{ field: "id", value: userId }];
+      const user = await database.findOne<{ banned?: boolean | null; banReason?: string | null }>({ model: "user", where });
+      if (!active && !user?.banned) await database.update({ model: "user", where, update: { banned: true, banReason: SCIM_BAN } });
+      if (active && user?.banned && user.banReason === SCIM_BAN) await database.update({ model: "user", where, update: { banned: false, banReason: null } });
+    },
+  },
+});
+```
 - **Only users with a verified email are sent**, by default (`requireVerifiedEmail`), so a new sign-up appears there once they've verified it.
 - **Their email is unverified there.** `@better-auth/scim` creates users with `emailVerified: false`. If the app requires verified emails to sign in with a password, provisioned users sign in another way (SSO, an ID-JAG) or verify there.
 - **On Cloudflare, give that app Postgres through Hyperdrive, not D1.** `@better-auth/scim` needs database transactions, which D1 doesn't have. This package, the identity provider side, runs on D1 as before.

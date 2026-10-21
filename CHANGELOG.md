@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Documentation
+
+- **Better Auth apps: deactivation doesn't stop a new sign-in there.** `@better-auth/scim` ends a deactivated user's sessions, but the user can sign in again with any method the app offers (a password reset, a magic link, a social account). The README now shows the fix on the app's side: a `reconcileUser` hook that bans the user with Better Auth's admin plugin while no SCIM connection has them active, lifts only that ban when one does again, and leaves an admin's own ban alone. The interoperability tests pin both: without it the user signs back in, with it they're refused until reactivated.
+
 ## [1.4.0] - 2026-10-16
 
 More attributes (title, phones, a work address), drift detection, the `check` result for the Enterprise User extension, and jobs indexed by target. Entra ID: a delete seconds after the create is checked a minute later.
