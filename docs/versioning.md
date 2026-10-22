@@ -21,7 +21,7 @@ A change to any of these that could break an app using them as documented comes 
 - The example apps in `examples/`, which follow the next release.
 - Behaviour that contradicts the documentation is a bug, and fixing it can come in a minor or patch release.
 
-**Lists of values can grow in a minor release**: webhook event `type`s, `DeliveryFailure.kind` and the failures' `kind`, and `CheckId`. Their TypeScript types list today's values; code that switches over them should handle a value it doesn't know (a `default` branch), not assume the list is complete.
+**Lists of values can grow in a minor release**: webhook event `type`s, `DeliveryFailure.kind` and the failures' `kind`, drift's `finding`, and `CheckId`. Their TypeScript types list today's values; code that switches over them should handle a value it doesn't know (a `default` branch), not assume the list is complete.
 
 ## Better Auth versions
 

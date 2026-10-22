@@ -12,7 +12,7 @@ import { attributeFields, defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, 
 import { type EntraIdClient, entraIdClient } from "./entra";
 import { googleWorkspaceClient } from "./google";
 import { webhookClient } from "./webhook";
-import { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, type ScimEnterpriseUser, ScimError, type ScimUser, scimClient } from "./scim-client";
+import { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, type ScimEnterpriseUser, ScimError, type ScimUser, scimClient, trimSlashes } from "./scim-client";
 import type { AttributeFields, DeliveryFailure, ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
 
 export const JOB_MODEL = "scimProvisioningJob";
@@ -127,6 +127,8 @@ export type GroupRef = { kind: Exclude<Kind, "user">; id: string };
  * a time (its cursor is in its own row: see Decommission).
  */
 type JobKind = Kind | "resync" | "reports" | "decommission";
+/** A purge of more accounts than this needs their number confirmed. */
+export const PURGE_CONFIRM_ABOVE = 500;
 /** The decommission job's subject: one per target. */
 const STEP = "step";
 /** How often a decommission that's waiting on deliveries looks again. */
@@ -302,6 +304,24 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const row = await decommissionOf(target.id);
     if (row && (row.state === "running" || row.state === "complete")) return row.phase;
     return target.decommission === true ? "frozen" : "none";
+  }
+
+  /** Which app a target sends to: two targets at one app (two organizations' with the same URL) can share an account. */
+  const appOf = (t: Target) =>
+    JSON.stringify([t.type ?? "scim", t.type === "entra-id" ? t.entra.tenantId : t.type === "google-workspace" ? (t.google.adminEmail.split("@")[1] ?? "").toLowerCase() : trimSlashes(t.url)]);
+
+  /**
+   * Another target at the same app, not being retired itself, with this account active: it's
+   * theirs too (the same person, provisioned through both), so a decommission leaves it be.
+   */
+  async function sharedWith(target: Target, remoteId: string): Promise<boolean> {
+    const links = (await adapter.findMany({ model: LINK_MODEL, where: [{ field: "remoteId", value: remoteId }, { field: "active", value: true }], limit: 20 })) as Link[];
+    for (const l of links) {
+      if (l.remoteId !== remoteId || l.targetId === target.id || !l.active) continue;
+      const other = await source.get(l.targetId);
+      if (other && appOf(other) === appOf(target) && (await retiringOf(other)) === "none") return true;
+    }
+    return false;
   }
 
   /** A rate limit: the app's 429, Google's 403 rateLimitExceeded, or maxRequestsPerMinute's own. */
@@ -609,6 +629,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     // live): so after a disable or a delete, this job comes back a minute later and checks.
     const entra = target.type === "entra-id";
     const confirmAt = () => earliest(recheckAt, new Date(Date.now() + CONFIRM_MS));
+    // Decommissioning, and another target at the same app still has this account: only our link goes.
+    if (retiring !== "none" && link.active && link.remoteId && (await sharedWith(target, link.remoteId))) {
+      log.info?.(`[scim] ${target.id}: user ${userId}: their account is also another target's at the same app; left active there, and only this target's link removed`);
+      await dropLink(key);
+      return null;
+    }
     // An adopted account wasn't made by us: it's deactivated, never deleted, whatever the target says.
     // A decommission deactivates, whatever the target says; only its purge deletes.
     const deprovision = retiring === "deactivate" ? "deactivate" : retiring === "purge" ? "delete" : (target.deprovision ?? "deactivate");
@@ -1102,7 +1128,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       await adapter.updateMany({ model: GROUP_LINK_MODEL, where: [{ field: "key", value: key }], update: { remoteId, syncedAt: new Date() } });
       return null;
     }
-    const now = await resolveGroup(target, ref);
+    // A purge removes every group of ours there.
+    const now = retiring === "purge" ? null : await resolveGroup(target, ref);
 
     if (!now?.wanted) {
       if (!link) return null;
@@ -1484,10 +1511,18 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         for (const m of rows) if (m.organizationId === target.organizationId && batch.includes(m.userId)) provisions.add(m.userId);
       }
     }
-    const items: { remoteId: string; userName: string; externalId: string | null; active: boolean | null; userId: string | null; finding: "unmanaged" | "unlinked" | "mismatch"; detail: string }[] = [];
+    const items: { remoteId: string; userName: string; externalId: string | null; active: boolean | null; userId: string | null; finding: "unmanaged" | "unlinked" | "mismatch" | "ours-active"; detail: string }[] = [];
+    // A target being decommissioned, or decommissioned, should have no account of ours active.
+    // Linked ones only: one another target at the same app shares was left on, its link removed.
+    const decommission = await decommissionOf(target.id);
+    const retired = decommission?.state === "running" || decommission?.state === "complete";
     for (const u of page.users) {
       const link = byRemote.get(u.id);
       const account = { remoteId: u.id, userName: u.userName, externalId: u.externalId, active: u.active ?? null };
+      if (retired && link && u.active !== false) {
+        items.push({ ...account, userId: link.userId, finding: "ours-active", detail: link.active ? "active at a target being decommissioned, not reached yet: the decommission deactivates it" : "active at the app though the decommission deactivated it: queue the user, or deactivate it at the app" });
+        continue;
+      }
       if (link) {
         const problems: string[] = [];
         if (link.active && !exists.has(link.userId)) {
@@ -1556,20 +1591,24 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       for (const l of rows) await enqueue(target.id, l.userId, { now: true });
       next = full ? `${at}${(rows[rows.length - 1] as Link | undefined)?.userId ?? after}` : restoring ? "" : "s:";
     } else if (at === "s:") {
-      // Accounts still active with nothing queued for them: written behind the walk, by a delivery
-      // that was under way when it started.
-      const { rows, full } = await linkRows(target.id, after, true);
-      const queued = await withJobs(target.id, rows.map((l) => l.userId));
-      for (const l of rows) if (!queued.has(l.userId)) await enqueue(target.id, l.userId, { now: true });
+      // Accounts still to go with nothing queued for them: written behind the walk, by a delivery
+      // that was under way when it started. Deactivating: those still active; purging: every one
+      // not adopted (an adopted account is only ever deactivated).
+      const purge = row.phase === "purge";
+      const { rows, full } = await linkRows(target.id, after, !purge);
+      const toGo = rows.filter((l) => !purge || !l.adopted);
+      const queued = await withJobs(target.id, toGo.map((l) => l.userId));
+      for (const l of toGo) if (!queued.has(l.userId)) await enqueue(target.id, l.userId, { now: true });
       if (full) next = `s:${(rows[rows.length - 1] as Link | undefined)?.userId ?? after}`;
       else {
         const t = { field: "targetId", value: target.id };
-        const active = await adapter.count({ model: LINK_MODEL, where: [t, { field: "active", value: true }] });
+        const left = (await decommissionCounts(target.id, row.phase)).accounts;
         // Still being delivered (this job is one); a user's failed job no longer matters once no
-        // account is active, but a group's does: it may not be empty.
+        // account is left, but a group's does: it may not be empty (or, purging, gone).
         const live = await adapter.count({ model: JOB_MODEL, where: [t, { field: "failed", value: false }, { field: "attempts", value: maxAttempts, operator: "lt" }] });
         const groupsLeft = await adapter.count({ model: JOB_MODEL, where: [t, { field: "kind", value: ["group", "team", "role"], operator: "in" }] });
-        if (active === 0 && live <= 1 && groupsLeft === 0) complete = true;
+        const groupLinks = purge ? await adapter.count({ model: GROUP_LINK_MODEL, where: [t] }) : 0;
+        if (left === 0 && live <= 1 && groupsLeft === 0 && groupLinks === 0) complete = true;
         else {
           next = "s:";
           later = new Date(Date.now() + SWEEP_MS);
@@ -1584,17 +1623,45 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     });
     // Cancelled, or started again, meanwhile: that queued its own step.
     if (moved === 0) return null;
-    if (complete) log.info?.(`[scim] ${target.id}: decommission complete: ${row.total} accounts deactivated, ${row.groupsTotal} groups emptied`);
+    if (complete) log.info?.(`[scim] ${target.id}: ${row.phase === "purge" ? `purge complete: ${row.total} accounts and ${row.groupsTotal} groups deleted` : `decommission complete: ${row.total} accounts deactivated, ${row.groupsTotal} groups emptied`}`);
     if (next && !later) await enqueue(target.id, STEP, { kind: "decommission", now: true });
     return later;
   }
 
-  /** What a decommission has to do: accounts still active there (pending creates included), and groups linked. */
-  async function decommissionCounts(targetId: string) {
+  /**
+   * What a decommission has to do: accounts still active there (pending creates included), and
+   * groups linked; for a purge, accounts still there that aren't adopted (those stay, deactivated).
+   */
+  async function decommissionCounts(targetId: string, phase: Decommission["phase"] = "deactivate") {
+    const t = { field: "targetId", value: targetId };
     return {
-      accounts: await adapter.count({ model: LINK_MODEL, where: [{ field: "targetId", value: targetId }, { field: "active", value: true }] }),
-      groups: await adapter.count({ model: GROUP_LINK_MODEL, where: [{ field: "targetId", value: targetId }] }),
+      accounts:
+        phase === "purge"
+          ? (await adapter.count({ model: LINK_MODEL, where: [t] })) - (await adapter.count({ model: LINK_MODEL, where: [t, { field: "adopted", value: true }] }))
+          : await adapter.count({ model: LINK_MODEL, where: [t, { field: "active", value: true }] }),
+      groups: await adapter.count({ model: GROUP_LINK_MODEL, where: [t] }),
     };
+  }
+
+  /**
+   * After a complete decommission, delete what it deactivated: every account there that isn't
+   * adopted, and every group. Irreversible at most apps, so it can't be cancelled. Returns the row,
+   * or null if there's no complete decommission to purge.
+   */
+  async function startPurge(targetId: string, by: string): Promise<Decommission | null> {
+    const row = await decommissionOf(targetId);
+    if (row?.phase === "purge") return row;
+    if (row?.state !== "complete") return null;
+    const counts = await decommissionCounts(targetId, "purge");
+    const now = new Date();
+    await adapter.updateMany({
+      model: DECOMMISSION_MODEL,
+      where: [{ field: "id", value: row.id }, { field: "revision", value: row.revision }],
+      update: { phase: "purge", state: "running", cursor: "G:", revision: row.revision + 1, total: counts.accounts, groupsTotal: counts.groups, startedAt: now, startedBy: by, completedAt: null, updatedAt: now },
+    });
+    const started = await decommissionOf(targetId);
+    if (started?.phase === "purge" && started.state === "running") await enqueue(targetId, STEP, { kind: "decommission", now: true });
+    return started;
   }
 
   /**
@@ -1625,7 +1692,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   async function cancelDecommission(targetId: string, by: string): Promise<boolean> {
     for (let i = 0; i < 5; i++) {
       const row = await decommissionOf(targetId);
-      if (row?.state !== "running") return false;
+      // A purge deletes: what's gone can't be switched back on, so it isn't cancelled.
+      if (row?.state !== "running" || row.phase === "purge") return false;
       const now = new Date();
       const moved = await adapter.updateMany({
         model: DECOMMISSION_MODEL,
@@ -1649,7 +1717,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   async function decommissionStatus(target: Target) {
     const row = await decommissionOf(target.id);
     if (!row && target.decommission !== true) return null;
-    const { accounts, groups } = await decommissionCounts(target.id);
+    const { accounts, groups } = await decommissionCounts(target.id, row?.phase);
     if (!row || row.state === "cancelled") {
       if (target.decommission === true) return { phase: null, state: "frozen" as const, accounts, groups, total: null, groupsTotal: null, startedAt: null, startedBy: null, completedAt: null, cancelledAt: row?.cancelledAt ? new Date(row.cancelledAt).toISOString() : null };
     }
@@ -1666,10 +1734,19 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return { phase: row.phase, state, accounts, groups, total: row.total, groupsTotal: row.groupsTotal, startedAt: iso(row.startedAt), startedBy: row.startedBy, completedAt: iso(row.completedAt), cancelledAt: iso(row.cancelledAt) };
   }
 
+  /** A target's accounts, a page at a time in user id order (`after`: the last page's `next`). */
+  async function accounts(targetId: string, after: string | null, limit: number) {
+    const where: Where[] = [{ field: "targetId", value: targetId }];
+    if (after) where.push({ field: "userId", value: after, operator: "gt" });
+    const rows = ((await adapter.findMany({ model: LINK_MODEL, where, limit: limit + 1, sortBy: { field: "userId", direction: "asc" } })) as Link[]).filter((l) => l.targetId === targetId);
+    const items = rows.slice(0, limit).map((l) => ({ userId: l.userId, userName: l.userName, remoteId: l.remoteId || null, active: l.active, adopted: l.adopted === true }));
+    return { items, next: rows.length > limit ? (items[items.length - 1]?.userId ?? null) : null };
+  }
+
   /** A resumed (or fixed) target: its waiting and failed jobs are due now. */
   async function resume(targetId: string): Promise<number> {
     return adapter.updateMany({ model: JOB_MODEL, where: [{ field: "targetId", value: targetId }], update: { nextAttemptAt: new Date(), failed: false } });
   }
 
-  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, decommissionCounts, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
+  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, startPurge, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
 }
