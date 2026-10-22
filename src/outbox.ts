@@ -12,7 +12,7 @@ import { attributeFields, defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, 
 import { type EntraIdClient, entraIdClient } from "./entra";
 import { googleWorkspaceClient } from "./google";
 import { webhookClient } from "./webhook";
-import { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, type ScimEnterpriseUser, ScimError, type ScimUser, scimClient } from "./scim-client";
+import { SCIM_ENTERPRISE_USER_SCHEMA, SCIM_GROUP_SCHEMA, type ScimEnterpriseUser, ScimError, type ScimUser, scimClient, trimSlashes } from "./scim-client";
 import type { AttributeFields, DeliveryFailure, ProvisionedUser, ScimProvisioningOptions, Target } from "./types";
 
 export const JOB_MODEL = "scimProvisioningJob";
@@ -302,6 +302,24 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     const row = await decommissionOf(target.id);
     if (row && (row.state === "running" || row.state === "complete")) return row.phase;
     return target.decommission === true ? "frozen" : "none";
+  }
+
+  /** Which app a target sends to: two targets at one app (two organizations' with the same URL) can share an account. */
+  const appOf = (t: Target) =>
+    JSON.stringify([t.type ?? "scim", t.type === "entra-id" ? t.entra.tenantId : t.type === "google-workspace" ? (t.google.adminEmail.split("@")[1] ?? "").toLowerCase() : trimSlashes(t.url)]);
+
+  /**
+   * Another target at the same app, not being retired itself, with this account active: it's
+   * theirs too (the same person, provisioned through both), so a decommission leaves it be.
+   */
+  async function sharedWith(target: Target, remoteId: string): Promise<boolean> {
+    const links = (await adapter.findMany({ model: LINK_MODEL, where: [{ field: "remoteId", value: remoteId }, { field: "active", value: true }], limit: 20 })) as Link[];
+    for (const l of links) {
+      if (l.remoteId !== remoteId || l.targetId === target.id || !l.active) continue;
+      const other = await source.get(l.targetId);
+      if (other && appOf(other) === appOf(target) && (await retiringOf(other)) === "none") return true;
+    }
+    return false;
   }
 
   /** A rate limit: the app's 429, Google's 403 rateLimitExceeded, or maxRequestsPerMinute's own. */
@@ -609,6 +627,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     // live): so after a disable or a delete, this job comes back a minute later and checks.
     const entra = target.type === "entra-id";
     const confirmAt = () => earliest(recheckAt, new Date(Date.now() + CONFIRM_MS));
+    // Decommissioning, and another target at the same app still has this account: only our link goes.
+    if (retiring !== "none" && link.active && link.remoteId && (await sharedWith(target, link.remoteId))) {
+      log.info?.(`[scim] ${target.id}: user ${userId}: their account is also another target's at the same app; left active there, and only this target's link removed`);
+      await dropLink(key);
+      return null;
+    }
     // An adopted account wasn't made by us: it's deactivated, never deleted, whatever the target says.
     // A decommission deactivates, whatever the target says; only its purge deletes.
     const deprovision = retiring === "deactivate" ? "deactivate" : retiring === "purge" ? "delete" : (target.deprovision ?? "deactivate");
@@ -1666,10 +1690,19 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return { phase: row.phase, state, accounts, groups, total: row.total, groupsTotal: row.groupsTotal, startedAt: iso(row.startedAt), startedBy: row.startedBy, completedAt: iso(row.completedAt), cancelledAt: iso(row.cancelledAt) };
   }
 
+  /** A target's accounts, a page at a time in user id order (`after`: the last page's `next`). */
+  async function accounts(targetId: string, after: string | null, limit: number) {
+    const where: Where[] = [{ field: "targetId", value: targetId }];
+    if (after) where.push({ field: "userId", value: after, operator: "gt" });
+    const rows = ((await adapter.findMany({ model: LINK_MODEL, where, limit: limit + 1, sortBy: { field: "userId", direction: "asc" } })) as Link[]).filter((l) => l.targetId === targetId);
+    const items = rows.slice(0, limit).map((l) => ({ userId: l.userId, userName: l.userName, remoteId: l.remoteId || null, active: l.active, adopted: l.adopted === true }));
+    return { items, next: rows.length > limit ? (items[items.length - 1]?.userId ?? null) : null };
+  }
+
   /** A resumed (or fixed) target: its waiting and failed jobs are due now. */
   async function resume(targetId: string): Promise<number> {
     return adapter.updateMany({ model: JOB_MODEL, where: [{ field: "targetId", value: targetId }], update: { nextAttemptAt: new Date(), failed: false } });
   }
 
-  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, decommissionCounts, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
+  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
 }

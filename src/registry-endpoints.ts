@@ -10,7 +10,7 @@
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthEndpoint, sensitiveSessionMiddleware } from "better-auth/api";
 import * as z from "zod";
-import { type Adapter, clientFor, GROUP_LINK_MODEL, JOB_MODEL, LINK_MODEL } from "./outbox";
+import { type Adapter, clientFor, DECOMMISSION_MODEL, GROUP_LINK_MODEL, JOB_MODEL, LINK_MODEL } from "./outbox";
 import {
   assemble,
   credentialsKind,
@@ -49,6 +49,20 @@ export interface RegistryHost {
         status(targetId: string): Promise<{ queued: number; waiting: number; stuck: number; failed: number; accounts: number; groups: number }>;
         failures(targetId: string): Promise<{ kind: string; subjectId: string; failed: boolean; status: number | null; nextAttemptAt: string }[]>;
         drift(targetId: string, after: string | null, limit: number): Promise<{ items: unknown[]; scanned: number; next: string | null }>;
+        accounts(targetId: string, after: string | null, limit: number): Promise<{ items: { userId: string; userName: string; remoteId: string | null; active: boolean; adopted: boolean }[]; next: string | null }>;
+        /** Deliver some of the target's due jobs now, in the background; the scheduled run does the rest. */
+        kick(targetId: string): void;
+        /** What a target still has at the app: accounts active there, and groups. */
+        counts(targetId: string): Promise<{ accounts: number; groups: number }>;
+        /** Undefined without the plugin's `decommission` option. */
+        decommission:
+          | {
+              state(targetId: string): Promise<"running" | "complete" | "cancelled" | null>;
+              status(targetId: string): Promise<unknown>;
+              start(targetId: string, by: string): Promise<void>;
+              cancel(targetId: string, by: string): Promise<boolean>;
+            }
+          | undefined;
       }
     | undefined;
 }
@@ -97,7 +111,7 @@ interface Actor {
 }
 const may = (actor: Actor, organizationId: string) => actor.host || actor.organizations.has(organizationId);
 
-async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptions | undefined, o: { change?: boolean } = {}): Promise<Actor> {
+async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptions | undefined, o: { change?: boolean; roles?: string[]; freshAge?: number } = {}): Promise<Actor> {
   if (!options) throw refuse("NOT_FOUND", "the target registry isn't enabled (registry option)");
   const s = (ctx.context as { session?: { user: { id: string }; session: Record<string, unknown> } }).session;
   if (!s) throw refuse("FORBIDDEN", "sign in to manage targets");
@@ -106,7 +120,7 @@ async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptio
   if (o.change) {
     // Fresh, as Better Auth asks for a password or email change: a session cookie stolen days ago
     // mustn't be able to point an organization's users at another app.
-    const freshAge = (ctx.context as { sessionConfig?: { freshAge?: number } }).sessionConfig?.freshAge ?? 60 * 60 * 24;
+    const freshAge = o.freshAge ?? (ctx.context as { sessionConfig?: { freshAge?: number } }).sessionConfig?.freshAge ?? 60 * 60 * 24;
     const createdAt = new Date(s.session.createdAt as string | Date).getTime();
     if (freshAge !== 0 && !(Date.now() - createdAt < freshAge * 1000)) throw refuse("FORBIDDEN", "sign in again to change targets (the session isn't fresh)");
   }
@@ -120,7 +134,7 @@ async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptio
       ctx.context.logger.error("[scim] registry.canManage threw", e);
     }
   }
-  const roles = options.organizationRoles ?? ["owner", "admin"];
+  const roles = o.roles ?? options.organizationRoles ?? ["owner", "admin"];
   const organizations = new Set<string>();
   if (!host && roles.length) {
     const adapter = ctx.context.adapter as unknown as Adapter;
@@ -314,12 +328,16 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           const settings = ctx.body.settings !== undefined ? ctx.body.settings : before;
           const type = (settings as { type?: unknown } | null)?.type ?? "scim";
           if (type !== row.type) throw refuse("BAD_REQUEST", `a target's type can't change (it's ${row.type}): remove it and connect a new one`);
+          const parsed = storedSettingsSchema.safeParse(settings);
+          const moves = parsed.success && destination(parsed.data) !== destination(before);
           if (ctx.body.credentials === undefined) {
-            const parsed = storedSettingsSchema.safeParse(settings);
-            if (parsed.success && destination(parsed.data) !== destination(before)) throw refuse("BAD_REQUEST", "changing where a target sends (its URL, or Google's clientEmail or adminEmail) needs its credentials given again");
+            if (moves) throw refuse("BAD_REQUEST", "changing where a target sends (its URL, or Google's clientEmail or adminEmail) needs its credentials given again");
             current = await readable(ctx, row);
             if (!current) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give credentials too");
           }
+          // Its accounts are at this app: a decommission under way, or done, stays with it.
+          const decommission = moves ? await instance(ctx).decommission?.state(row.targetId) : null;
+          if (decommission === "running" || decommission === "complete") throw refuse("BAD_REQUEST", "a target being decommissioned (or decommissioned) can't be pointed at another app: connect a new target for that");
           const checked = check(row, settings, ctx.body.credentials ?? current);
           current = checked.credentials;
           after = checked.settings;
@@ -355,24 +373,29 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
 
     /**
      * Remove a target, with its queued jobs and its record of the accounts and groups it made.
-     * The accounts at the app stay as they are, and nothing tells the app any more: deactivate
-     * them there if they should go.
+     * The accounts at the app stay as they are, and nothing tells the app any more: decommission
+     * it first if they should go. Says what it left there (`abandoned`: accounts still active,
+     * groups). With `registry.deleteRequiresDecommission`, refused while accounts are still active,
+     * unless `abandon: true` (an app that's gone).
      */
     scimProvisioningDeleteTarget: createAuthEndpoint(
       "/scim-provisioning/targets/delete",
-      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100) }) },
+      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100), abandon: z.literal(true).optional() }) },
       async (ctx) => {
         const actor = await actorOf(ctx, host.options, { change: true });
         const row = await rowFor(ctx, actor, ctx.body.id);
         const adapter = adapterOf(ctx);
+        const abandoned = await instance(ctx).counts(row.targetId);
+        if (host.options?.deleteRequiresDecommission && abandoned.accounts > 0 && !ctx.body.abandon)
+          throw refuse("CONFLICT", `${abandoned.accounts} accounts made through this target are still active at the app: decommission it first, or delete with abandon: true to leave them as they are`);
         // The target first: deliveries look it up each time, so none starts after this. One
         // already under way can still record its account; that record is of a target that no
         // longer exists, and nothing reads it. Generated ids never differ from another target's
         // only in case, so these can't reach another's rows on a case-insensitive database.
         await adapter.deleteMany({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }] });
-        for (const model of [JOB_MODEL, LINK_MODEL, GROUP_LINK_MODEL]) await adapter.deleteMany({ model, where: [{ field: "targetId", value: row.targetId }] });
-        audit(ctx, actor, `deleted target ${row.targetId} of organization ${row.organizationId}`);
-        return ctx.json({ deleted: true });
+        for (const model of [JOB_MODEL, LINK_MODEL, GROUP_LINK_MODEL, ...(instance(ctx).decommission ? [DECOMMISSION_MODEL] : [])]) await adapter.deleteMany({ model, where: [{ field: "targetId", value: row.targetId }] });
+        audit(ctx, actor, `deleted target ${row.targetId} of organization ${row.organizationId}${abandoned.accounts || abandoned.groups ? `, leaving ${abandoned.accounts} active accounts and ${abandoned.groups} groups at the app` : ""}`);
+        return ctx.json({ deleted: true, abandoned });
       },
     ),
 
@@ -411,7 +434,66 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const actor = await actorOf(ctx, host.options);
         const row = await rowFor(ctx, actor, ctx.body.id);
         const i = instance(ctx);
-        return ctx.json({ ...(await i.status(row.targetId)), failures: await i.failures(row.targetId) });
+        return ctx.json({ ...(await i.status(row.targetId)), failures: await i.failures(row.targetId), ...(i.decommission ? { decommission: await i.decommission.status(row.targetId) } : {}) });
+      },
+    ),
+
+    /**
+     * Decommission a target (with the plugin's `decommission`): deactivate every account and empty
+     * every group made through it, deleting nothing (see `scimProvisioningDecommission`).
+     * `preview: true` says how many; starting needs `confirm` equal to the accounts it showed.
+     * `cancel: true`, before it completes, stops it and switches back on those still wanted. Only
+     * `registry.decommissionRoles` (owners, by default) and the host's administrators, signed in
+     * within `registry.decommissionFreshAge` (15 minutes). Its progress is in the status route.
+     */
+    scimProvisioningDecommissionTarget: createAuthEndpoint(
+      "/scim-provisioning/targets/decommission",
+      {
+        method: "POST",
+        use: [sensitiveSessionMiddleware],
+        body: z
+          .strictObject({ id: z.string().min(1).max(100), preview: z.literal(true).optional(), confirm: z.number().int().min(0).optional(), cancel: z.literal(true).optional() })
+          .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both"),
+      },
+      async (ctx) => {
+        const preview = ctx.body.preview === true;
+        const actor = await actorOf(ctx, host.options, preview ? { roles: host.options?.decommissionRoles ?? ["owner"] } : { change: true, roles: host.options?.decommissionRoles ?? ["owner"], freshAge: host.options?.decommissionFreshAge ?? 900 });
+        const row = await rowFor(ctx, actor, ctx.body.id);
+        const i = instance(ctx);
+        const d = i.decommission;
+        if (!d) throw refuse("BAD_REQUEST", "decommissioning isn't enabled (the plugin's decommission option)");
+        const by = `user:${actor.userId}`;
+        if (ctx.body.cancel) {
+          if (!(await d.cancel(row.targetId, by))) throw refuse("BAD_REQUEST", "no decommission is running (a complete one can't be cancelled)");
+          audit(ctx, actor, `cancelled the decommission of target ${row.targetId} of organization ${row.organizationId}`);
+          i.kick(row.targetId);
+          return ctx.json({ decommission: await d.status(row.targetId) });
+        }
+        const counts = await i.counts(row.targetId);
+        if (preview) return ctx.json({ ...counts, decommission: await d.status(row.targetId) });
+        const state = await d.state(row.targetId);
+        if (state === "complete") throw refuse("BAD_REQUEST", "its decommission is complete");
+        if (state !== "running") {
+          // Its deliveries must be able to reach the app.
+          if (!truthy(row.enabled)) throw refuse("BAD_REQUEST", "the target is disabled: enable it first");
+          if (!(await readable(ctx, row))) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give them again first");
+          if (ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)`);
+          await d.start(row.targetId, by);
+          audit(ctx, actor, `started decommissioning target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
+        }
+        i.kick(row.targetId);
+        return ctx.json({ decommission: await d.status(row.targetId) });
+      },
+    ),
+
+    /** The accounts made through a target, a page at a time (`limit`, 100 by default; then `after: next`): to keep a record before abandoning them. */
+    scimProvisioningTargetAccounts: createAuthEndpoint(
+      "/scim-provisioning/targets/accounts",
+      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100), after: z.string().max(256).optional(), limit: z.number().int().min(1).max(1000).optional() }) },
+      async (ctx) => {
+        const actor = await actorOf(ctx, host.options);
+        const row = await rowFor(ctx, actor, ctx.body.id);
+        return ctx.json(await instance(ctx).accounts(row.targetId, ctx.body.after ?? null, ctx.body.limit ?? 100));
       },
     ),
 

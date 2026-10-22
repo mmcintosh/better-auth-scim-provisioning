@@ -372,4 +372,16 @@ export interface TargetRegistryOptions {
    * resolving to private addresses: your own fetch replaces that guard, so it must do the same.
    */
   fetch?: typeof fetch | undefined;
+  /**
+   * The organization roles whose holders may decommission their organization's targets (with the
+   * plugin's `decommission`); default ["owner"]. The host's administrators (`canManage`) always may.
+   */
+  decommissionRoles?: string[] | undefined;
+  /** How recently they must have signed in to start or cancel one, in seconds; default 900 (15 minutes). */
+  decommissionFreshAge?: number | undefined;
+  /**
+   * Refuse to delete a target while accounts we made there are still active, unless the delete
+   * says `abandon: true` (for an app that's gone): decommission it first. Off by default.
+   */
+  deleteRequiresDecommission?: boolean | undefined;
 }
