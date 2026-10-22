@@ -219,7 +219,7 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     h.app.fail({ status: 503 });
     await h.user("Bea Berg");
     const status = await h.auth.api.scimProvisioningStatus({ body: {} });
-    expect(status.targets).toEqual([{ id: "app", queued: 0, waiting: 0, stuck: 1, failed: 0, accounts: 1, groups: 0 }]);
+    expect(status.targets).toEqual([{ id: "app", queued: 0, waiting: 0, stuck: 1, failed: 0, rateLimited: 0, accounts: 1, groups: 0 }]);
   });
 
   it("failures are listed a page at a time (the database's id order, gt): none skipped", async () => {
