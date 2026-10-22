@@ -5,7 +5,7 @@ import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
-import { type Adapter, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, pauseReason, staticTargets, type TargetSource } from "./outbox";
+import { type Adapter, DECOMMISSION_MODEL, PURGE_CONFIRM_ABOVE, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, pauseReason, staticTargets, type TargetSource } from "./outbox";
 import { attributesOption, enterpriseOption, missingAttributeFields, missingEnterpriseFields } from "./mapping";
 import { registrySource, secretText, TARGET_MODEL } from "./registry";
 import { registryEndpoints } from "./registry-endpoints";
@@ -88,6 +88,7 @@ const targetSchema = z.strictObject({
   roleGroupName: z.function().optional(),
   timeoutMs: z.number().int().min(100).max(120_000).optional(),
   maxRequestsPerMinute: z.number().int().min(1).max(100_000).optional(),
+  decommission: z.boolean().optional(),
   fetch: z.function().optional(),
 });
 
@@ -112,6 +113,7 @@ const optionsSchema = z.strictObject({
   retry: z.strictObject({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
   concurrency: z.number().int().min(1).max(32).optional(),
   onFailure: z.function().optional(),
+  decommission: z.boolean().optional(),
   registry: z
     .strictObject({
       canManage: z.function().optional(),
@@ -121,6 +123,9 @@ const optionsSchema = z.strictObject({
       enterpriseFields: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field")).optional(),
       attributeFields: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field")).optional(),
       fetch: z.function().optional(),
+      decommissionRoles: z.array(z.string().min(1)).optional(),
+      decommissionFreshAge: z.number().int().min(0).optional(),
+      deleteRequiresDecommission: z.boolean().optional(),
     })
     .optional(),
 });
@@ -200,6 +205,8 @@ function membersIn(returned: unknown): { userId: string; organizationId: string 
 export function scimProvisioning(options: ScimProvisioningOptions) {
   const parsed = optionsSchema.safeParse(options);
   if (!parsed.success) throw new Error(`[scim] invalid options: ${parsed.error.issues.flatMap(describeIssue).join("; ")}`);
+  for (const t of options.targets)
+    if (t.decommission && !options.decommission) throw new Error(`[scim] invalid options: targets: ${t.id}: decommission needs the plugin's \`decommission: true\` (and its table)`);
 
   /**
    * Each Better Auth instance's queue and background work, by its database adapter: one plugin
@@ -358,9 +365,13 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     if (o.resume) await s.box.resume(targetId);
     await s.box.enqueue(targetId, "m:", { kind: "resync", now: true });
     if (isPaused(target)) return;
+    kick(s, targetId);
+  }
+
+  /** A few batches of a target's due jobs now, in the background; what's left is the scheduled run's. */
+  function kick(s: State, targetId: string) {
     s.background(
       (async () => {
-        // A few batches now; what's left is the scheduled run's.
         for (let i = 0; i < 5; i++) {
           const t = await s.box.runDue(50, targetId);
           if (t.done + t.retry + t.failed === 0) break;
@@ -419,6 +430,33 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           syncedAt: { type: "date", required: true },
         },
       },
+      // Only with the option: a decommission's progress, one row per target.
+      ...(options.decommission
+        ? {
+            [DECOMMISSION_MODEL]: {
+              fields: {
+                targetId: { type: "string", required: true, unique: true },
+                /** "deactivate" (or "purge"). */
+                phase: { type: "string", required: true },
+                /** "running", "complete" or "cancelled". */
+                state: { type: "string", required: true },
+                /** Where its walk of the target's links is. */
+                cursor: { type: "string", required: false },
+                /** Bumped by every write: steps and cancels move it on only from what they read. */
+                revision: { type: "number", required: true },
+                /** Accounts and groups to go when it started. */
+                total: { type: "number", required: true },
+                groupsTotal: { type: "number", required: true },
+                startedAt: { type: "date", required: true },
+                startedBy: { type: "string", required: true },
+                completedAt: { type: "date", required: false },
+                cancelledAt: { type: "date", required: false },
+                cancelledBy: { type: "string", required: false },
+                updatedAt: { type: "date", required: true },
+              },
+            },
+          }
+        : {}),
       // Only with the registry: a table nobody uses would still have to be migrated.
       ...(options.registry
         ? {
@@ -602,6 +640,25 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               },
               failures: async (targetId) =>
                 (await s.box.failures({ targetId, limit: 20 })).items.map((f) => ({ kind: f.kind, subjectId: f.subjectId, failed: f.failed, status: f.lastStatus, nextAttemptAt: f.nextAttemptAt })),
+              accounts: (targetId, after, limit) => s.box.accounts(targetId, after, limit),
+              kick: (targetId) => kick(s, targetId),
+              counts: (targetId, phase) => s.box.decommissionCounts(targetId, phase),
+              decommission: options.decommission
+                ? {
+                    state: async (targetId) => (await s.box.decommissionOf(targetId))?.state ?? null,
+                    status: async (targetId) => {
+                      const target = await s.source.get(targetId);
+                      return target ? s.box.decommissionStatus(target) : null;
+                    },
+                    start: async (targetId, by) => void (await s.box.startDecommission(targetId, by)),
+                    purge: async (targetId, by) => void (await s.box.startPurge(targetId, by)),
+                    row: async (targetId) => {
+                      const row = await s.box.decommissionOf(targetId);
+                      return row ? { phase: row.phase, state: row.state } : null;
+                    },
+                    cancel: (targetId, by) => s.box.cancelDecommission(targetId, by),
+                  }
+                : undefined,
               drift: async (targetId, after, limit) => {
                 const target = await s.source.get(targetId);
                 if (!target) throw new APIError("NOT_FOUND", { message: `[scim] no target ${targetId}` });
@@ -645,7 +702,17 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             if (from + limit < all.length) next = ids[ids.length - 1] ?? null;
           }
           const userId = ctx.body?.userId;
-          return ctx.json(userId ? { user: await s.box.userStatus(userId, ids), next } : { targets: await s.box.status(ids), next });
+          const counts = async () => {
+            const targets: (Awaited<ReturnType<typeof s.box.status>>[number] & { decommission?: Awaited<ReturnType<typeof s.box.decommissionStatus>> })[] = await s.box.status(ids);
+            // With decommissioning: where each target is in it (null if nowhere).
+            if (options.decommission)
+              for (const t of targets) {
+                const target = await s.source.get(t.id);
+                t.decommission = target ? await s.box.decommissionStatus(target) : null;
+              }
+            return targets;
+          };
+          return ctx.json(userId ? { user: await s.box.userStatus(userId, ids), next } : { targets: await counts(), next });
         },
       ),
       /**
@@ -709,6 +776,65 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           if (target.type === "webhook") throw new APIError("BAD_REQUEST", { message: "[scim] a webhook receiver can't be listed, so it has no drift to report" });
           if (pauseReason(target) === "unreadable") throw new APIError("BAD_REQUEST", { message: `[scim] target ${target.id}: its stored credentials can't be read (was the secret changed?): give them again` });
           return ctx.json(await s.box.drift(target, ctx.body.after ?? null, ctx.body.limit ?? 100));
+        },
+      ),
+      /**
+       * Retire a target in code marked `decommission: true`: deactivate every account and empty
+       * every group we made there (whatever its `deprovision`; nothing is deleted). `preview: true`
+       * says how many; starting needs `confirm` equal to the accounts it showed. The scheduled run
+       * carries it on a page at a time until nothing of ours is active there (`scimProvisioningStatus`
+       * shows it). `cancel: true`, before it completes, stops it and switches back on those still wanted.
+       */
+      scimProvisioningDecommission: createAuthEndpoint.serverOnly(
+        {
+          method: "POST",
+          body: z
+            .strictObject({ targetId: z.string().min(1), phase: z.enum(["deactivate", "purge"]).optional(), preview: z.literal(true).optional(), confirm: z.number().int().min(0).optional(), cancel: z.literal(true).optional() })
+            .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both"),
+        },
+        async (ctx) => {
+          const s = stateOf(ctx.context);
+          if (!s) throw new Error("[scim] not initialised");
+          if (!options.decommission) throw new APIError("BAD_REQUEST", { message: "[scim] decommissioning needs the plugin's `decommission: true` option (and its table)" });
+          const { targetId, preview, confirm, cancel } = ctx.body;
+          const target = await s.source.get(targetId);
+          if (!target) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
+          if (!options.targets.some((t) => t.id === targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId} is an organization's: decommission it through the registry` });
+          if (cancel) {
+            if (!(await s.box.cancelDecommission(targetId, "server")))
+              throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: no decommission is running that can be cancelled (a complete one, or a purge, can't be)` });
+            ctx.context.logger.info(`[scim] ${targetId}: decommission cancelled (by the server); queueing its accounts and groups again`);
+            kick(s, targetId);
+            return ctx.json({ decommission: await s.box.decommissionStatus(target) });
+          }
+          if (ctx.body.phase === "purge") {
+            const counts = await s.box.decommissionCounts(targetId, "purge");
+            if (preview) return ctx.json({ ...counts, decommission: await s.box.decommissionStatus(target) });
+            const row = await s.box.decommissionOf(targetId);
+            if (row?.phase === "purge" && row.state === "complete") throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: its purge is complete` });
+            if (row?.phase !== "purge") {
+              if (row?.state !== "complete") throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: a purge comes after a complete decommission` });
+              if (counts.accounts > PURGE_CONFIRM_ABOVE && confirm !== counts.accounts)
+                throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)` });
+              await s.box.startPurge(targetId, "server");
+              ctx.context.logger.info(`[scim] ${targetId}: purge started (by the server): ${counts.accounts} accounts and ${counts.groups} groups to delete`);
+            }
+            kick(s, targetId);
+            return ctx.json({ decommission: await s.box.decommissionStatus(target) });
+          }
+          const counts = await s.box.decommissionCounts(targetId);
+          if (preview) return ctx.json({ ...counts, decommission: await s.box.decommissionStatus(target) });
+          const row = await s.box.decommissionOf(targetId);
+          if (row?.state === "complete") throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: its decommission is complete` });
+          if (row?.state !== "running") {
+            if (target.decommission !== true) throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: mark it \`decommission: true\` in its options and deploy that first` });
+            if (confirm !== counts.accounts)
+              throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)` });
+            await s.box.startDecommission(targetId, "server");
+            ctx.context.logger.info(`[scim] ${targetId}: decommission started (by the server): ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
+          }
+          kick(s, targetId);
+          return ctx.json({ decommission: await s.box.decommissionStatus(target) });
         },
       ),
       /** Deliver what's due (retries included). Call it from a scheduled job, e.g. every minute. */

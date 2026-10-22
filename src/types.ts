@@ -132,6 +132,13 @@ export interface TargetOptions {
    */
   maxRequestsPerMinute?: number | undefined;
   /**
+   * Marked for decommissioning (needs the plugin's `decommission` option). Alone, it freezes the
+   * target: nothing is sent to it, and changes wait. `auth.api.scimProvisioningDecommission` then
+   * starts deactivating every account and emptying every group we made there. Once started, removing
+   * this doesn't cancel it (only that call does); while it's here, the target stays frozen.
+   */
+  decommission?: boolean | undefined;
+  /**
    * The fetch this target's requests go through: a proxy's, or a Workers service binding's
    * (`env.MY_SERVICE.fetch.bind(env.MY_SERVICE)`). Default the global `fetch`. Redirects are
    * never followed either way.
@@ -317,6 +324,12 @@ export interface ScimProvisioningOptions {
    * belongs to one organization and only ever receives its members and groups.
    */
   registry?: TargetRegistryOptions | undefined;
+  /**
+   * Retiring a target: deactivate every account and empty every group we made at an app, through
+   * `scimProvisioningDecommission`, tracked in its own table (`scimProvisioningDecommission`, which
+   * exists only with this option: migrate after turning it on).
+   */
+  decommission?: boolean | undefined;
 }
 
 export interface TargetRegistryOptions {
@@ -359,4 +372,16 @@ export interface TargetRegistryOptions {
    * resolving to private addresses: your own fetch replaces that guard, so it must do the same.
    */
   fetch?: typeof fetch | undefined;
+  /**
+   * The organization roles whose holders may decommission their organization's targets (with the
+   * plugin's `decommission`); default ["owner"]. The host's administrators (`canManage`) always may.
+   */
+  decommissionRoles?: string[] | undefined;
+  /** How recently they must have signed in to start or cancel one, in seconds; default 900 (15 minutes). */
+  decommissionFreshAge?: number | undefined;
+  /**
+   * Refuse to delete a target while accounts we made there are still active, unless the delete
+   * says `abandon: true` (for an app that's gone): decommission it first. Off by default.
+   */
+  deleteRequiresDecommission?: boolean | undefined;
 }
