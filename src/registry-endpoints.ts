@@ -10,7 +10,7 @@
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthEndpoint, sensitiveSessionMiddleware } from "better-auth/api";
 import * as z from "zod";
-import { type Adapter, clientFor, DECOMMISSION_MODEL, GROUP_LINK_MODEL, JOB_MODEL, LINK_MODEL } from "./outbox";
+import { type Adapter, clientFor, DECOMMISSION_MODEL, GROUP_LINK_MODEL, JOB_MODEL, LINK_MODEL, PURGE_CONFIRM_ABOVE } from "./outbox";
 import {
   assemble,
   credentialsKind,
@@ -52,14 +52,16 @@ export interface RegistryHost {
         accounts(targetId: string, after: string | null, limit: number): Promise<{ items: { userId: string; userName: string; remoteId: string | null; active: boolean; adopted: boolean }[]; next: string | null }>;
         /** Deliver some of the target's due jobs now, in the background; the scheduled run does the rest. */
         kick(targetId: string): void;
-        /** What a target still has at the app: accounts active there, and groups. */
-        counts(targetId: string): Promise<{ accounts: number; groups: number }>;
+        /** What a target still has at the app: accounts active there (for a purge, not adopted), and groups. */
+        counts(targetId: string, phase?: "deactivate" | "purge"): Promise<{ accounts: number; groups: number }>;
         /** Undefined without the plugin's `decommission` option. */
         decommission:
           | {
               state(targetId: string): Promise<"running" | "complete" | "cancelled" | null>;
               status(targetId: string): Promise<unknown>;
               start(targetId: string, by: string): Promise<void>;
+              purge(targetId: string, by: string): Promise<void>;
+              row(targetId: string): Promise<{ phase: "deactivate" | "purge"; state: "running" | "complete" | "cancelled" } | null>;
               cancel(targetId: string, by: string): Promise<boolean>;
             }
           | undefined;
@@ -452,7 +454,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         method: "POST",
         use: [sensitiveSessionMiddleware],
         body: z
-          .strictObject({ id: z.string().min(1).max(100), preview: z.literal(true).optional(), confirm: z.number().int().min(0).optional(), cancel: z.literal(true).optional() })
+          .strictObject({ id: z.string().min(1).max(100), phase: z.enum(["deactivate", "purge"]).optional(), preview: z.literal(true).optional(), confirm: z.number().int().min(0).optional(), cancel: z.literal(true).optional() })
           .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both"),
       },
       async (ctx) => {
@@ -464,8 +466,24 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         if (!d) throw refuse("BAD_REQUEST", "decommissioning isn't enabled (the plugin's decommission option)");
         const by = `user:${actor.userId}`;
         if (ctx.body.cancel) {
-          if (!(await d.cancel(row.targetId, by))) throw refuse("BAD_REQUEST", "no decommission is running (a complete one can't be cancelled)");
+          if (!(await d.cancel(row.targetId, by))) throw refuse("BAD_REQUEST", "no decommission is running that can be cancelled (a complete one, or a purge, can't be)");
           audit(ctx, actor, `cancelled the decommission of target ${row.targetId} of organization ${row.organizationId}`);
+          i.kick(row.targetId);
+          return ctx.json({ decommission: await d.status(row.targetId) });
+        }
+        if (ctx.body.phase === "purge") {
+          const counts = await i.counts(row.targetId, "purge");
+          if (preview) return ctx.json({ ...counts, decommission: await d.status(row.targetId) });
+          const current = await d.row(row.targetId);
+          if (current?.phase === "purge" && current.state === "complete") throw refuse("BAD_REQUEST", "its purge is complete");
+          if (current?.phase !== "purge") {
+            if (current?.state !== "complete") throw refuse("BAD_REQUEST", "a purge comes after a complete decommission");
+            if (!truthy(row.enabled)) throw refuse("BAD_REQUEST", "the target is disabled: enable it first");
+            if (!(await readable(ctx, row))) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give them again first");
+            if (counts.accounts > PURGE_CONFIRM_ABOVE && ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)`);
+            await d.purge(row.targetId, by);
+            audit(ctx, actor, `started purging target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts and ${counts.groups} groups to delete`);
+          }
           i.kick(row.targetId);
           return ctx.json({ decommission: await d.status(row.targetId) });
         }
