@@ -197,6 +197,44 @@ describe("decommissioning a target", () => {
     expect(appUsers(h).find((u) => u.userName === "late@example.com")?.active).toBe(false);
   });
 
+  it("a purge, after it completes, deletes every account but adopted ones, and the groups; it can't be cancelled", async () => {
+    const { h, ada } = await marked();
+    const purge = (body: Record<string, unknown> = {}) => h.auth.api.scimProvisioningDecommission({ body: { targetId: "app", phase: "purge", ...body } as never });
+    await expect(purge()).rejects.toThrow(/a purge comes after a complete decommission/);
+    // Ada's account was there before us (taken over): it's only ever deactivated.
+    await adapterOf(h).updateMany({ model: "scimProvisioningLink", where: [{ field: "key", value: `app:${ada.id}` }], update: { adopted: true } });
+    await start(h, 3);
+    await drive(h, () => h.auth.api.scimProvisioningRun({ body: { limit: 200 } }), reaches(h, "complete"));
+    expect(await purge({ preview: true })).toMatchObject({ accounts: 2, groups: 1 });
+    expect(await purge()).toMatchObject({ decommission: { phase: "purge", state: "running", total: 2, groupsTotal: 1 } });
+    await expect(h.auth.api.scimProvisioningDecommission({ body: { targetId: "app", cancel: true } })).rejects.toThrow(/or a purge, can't be/);
+    await drive(h, () => h.auth.api.scimProvisioningRun({ body: { limit: 200 } }), reaches(h, "complete"));
+    expect(appUsers(h).map((u) => [u.externalId, u.active])).toEqual([[ada.id, false]]);
+    expect(h.app.groups.size).toBe(0);
+    expect(await stateOf(h)).toMatchObject({ phase: "purge", state: "complete", accounts: 0 });
+    await expect(purge()).rejects.toThrow(/its purge is complete/);
+  });
+
+  it("a purge of more than 500 accounts needs their number confirmed", async () => {
+    const { h } = await marked();
+    await start(h, 3);
+    await drive(h, () => h.auth.api.scimProvisioningRun({ body: { limit: 200 } }), reaches(h, "complete"));
+    for (let i = 0; i < 498; i++) await adapterOf(h).create({ model: "scimProvisioningLink", data: { key: `app:old${i}`, targetId: "app", userId: `old${i}`, remoteId: `r${i}`, userName: `old${i}@example.com`, active: false, syncedAt: new Date() } });
+    const purge = (body: Record<string, unknown> = {}) => h.auth.api.scimProvisioningDecommission({ body: { targetId: "app", phase: "purge", ...body } as never });
+    await expect(purge()).rejects.toThrow(/confirm the number of accounts to delete: 501/);
+    expect(await purge({ confirm: 501 })).toMatchObject({ decommission: { phase: "purge", total: 501 } });
+  });
+
+  it("drift reports an account of ours active again at a decommissioned target", async () => {
+    const { h, ada } = await marked();
+    await start(h, 3);
+    await drive(h, () => h.auth.api.scimProvisioningRun({ body: { limit: 200 } }), reaches(h, "complete"));
+    expect((await h.auth.api.scimProvisioningDrift({ body: { targetId: "app" } })).items).toEqual([]);
+    const adaAt = appUsers(h).find((u) => u.externalId === ada.id)!;
+    adaAt.active = true;
+    expect((await h.auth.api.scimProvisioningDrift({ body: { targetId: "app" } })).items).toEqual([expect.objectContaining({ remoteId: adaAt.id, userId: ada.id, finding: "ours-active" })]);
+  });
+
   it("two starts at once make one decommission", async () => {
     const { h, box } = await marked();
     await Promise.all([box.startDecommission("app", "a"), box.startDecommission("app", "b")]);

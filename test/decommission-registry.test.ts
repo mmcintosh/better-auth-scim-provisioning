@@ -105,6 +105,19 @@ describe("decommissioning an organization's target", () => {
     expect(await again.h.auth.api.scimProvisioningDeleteTarget({ body: { id: again.target.id, abandon: true }, headers: again.owner.headers })).toMatchObject({ abandoned: { accounts: 2 } });
   });
 
+  it("a purge, by an owner, after it completes", async () => {
+    const { owner, admin, decommission, statusOf, drive, remote } = await setup({ decommissionRoles: ["owner"] });
+    await expect(decommission(owner.headers, { phase: "purge" })).rejects.toThrow(/after a complete decommission/);
+    await decommission(owner.headers, { confirm: 2 });
+    await drive();
+    expect(await status(decommission(admin.headers, { phase: "purge" }))).toBe(403);
+    expect(await decommission(owner.headers, { phase: "purge", preview: true })).toMatchObject({ accounts: 2 });
+    await decommission(owner.headers, { phase: "purge" });
+    await drive();
+    expect(await statusOf()).toMatchObject({ decommission: { phase: "purge", state: "complete" } });
+    expect(remote.users.size).toBe(0);
+  });
+
   it("an account another organization's target at the same app still has is left on", async () => {
     const { h, remote, owner, admin, settings, decommission, drive, active } = await setup();
     // Ann is in Globex too, whose target reaches the same app: her account there is both targets'.
