@@ -75,7 +75,7 @@ export function googleWorkspaceClient(target: Target, owns?: AttributeFields | n
       throw new ScimError(`${method} ${path}: ${fetchFailure(e, timeoutMs)}`, null, true);
     }
     const text = await res.text();
-    let json: { error?: { code?: unknown; message?: unknown } } & GoogleUser = {};
+    let json: { error?: { code?: unknown; message?: unknown; errors?: { reason?: unknown }[] } } & GoogleUser = {};
     try {
       json = text ? JSON.parse(text) : {};
     } catch {}
@@ -86,19 +86,23 @@ export function googleWorkspaceClient(target: Target, owns?: AttributeFields | n
     const google404 = res.status === 404 && typeof json.error?.code === "number";
     // Not Google's own "not found" (a wrong URL answers 404 for everything): the host's to fix.
     const misplaced = res.status === 404 && !google404;
-    const auth = res.status === 401 || res.status === 403;
+    // Google's rate limits can answer 403, not 429: waited out like a 429, not taken for the credentials.
+    const limited = res.status === 403 && (Array.isArray(json.error?.errors) ? json.error.errors : []).some((e) => e?.reason === "rateLimitExceeded" || e?.reason === "userRateLimitExceeded");
+    const auth = (res.status === 401 || res.status === 403) && !limited;
     // 412 "User creation is not complete": Google is still making a user created seconds ago. But
     // a 412 "Cannot restore a user suspended for abuse" is Google's own hold on the account, which
     // only a person lifts (found live): not retried.
     const held = res.status === 412 && /suspended for abuse/i.test(String(json.error?.message ?? ""));
     const creating = res.status === 412 && !held;
-    const retryable = res.status === 408 || creating || res.status === 429 || res.status >= 500 || auth || misplaced;
+    const retryable = res.status === 408 || creating || res.status === 429 || limited || res.status >= 500 || auth || misplaced;
     const message = typeof json.error?.message === "string" ? ` ${json.error.message.slice(0, 300)}` : "";
     throw new ScimError(
-      `${method} ${path}: ${res.status}${auth ? " (check the service account, its domain-wide delegation and the admin)" : misplaced ? " (check the target's url)" : creating ? " (Google is still creating the user; retrying)" : held ? " (Google suspended the account itself; the user signing in, or an admin in the Admin console, lifts it)" : ""}${message}`,
+      `${method} ${path}: ${res.status}${auth ? " (check the service account, its domain-wide delegation and the admin)" : misplaced ? " (check the target's url)" : creating ? " (Google is still creating the user; retrying)" : held ? " (Google suspended the account itself; the user signing in, or an admin in the Admin console, lifts it)" : limited ? " (Google's rate limit)" : ""}${message}`,
       res.status,
       retryable,
       retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
+      undefined,
+      limited || undefined,
     );
   }
 

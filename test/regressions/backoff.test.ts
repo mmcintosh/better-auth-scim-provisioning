@@ -31,7 +31,7 @@ describe("backoff", () => {
     h.app.fail({ status: 429, retryAfter: "99999999999999" });
     await h.user();
     const [job] = await h.jobs();
-    expect(job).toMatchObject({ attempts: 1, failed: false });
+    expect(job).toMatchObject({ attempts: 0, failed: false });
     expect(new Date(job!.lockedUntil as Date).getTime()).toBeLessThan(Date.now());
   });
 });

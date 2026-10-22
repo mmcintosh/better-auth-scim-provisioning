@@ -50,14 +50,15 @@ export function atlassian(target: ScimTarget): ScimTarget {
 /**
  * GitHub Enterprise Managed Users (documented). DELETE is hard deprovisioning: it permanently
  * suspends the account, which can't be reactivated, so this profile only deactivates and refuses
- * `deprovision: "delete"`. GitHub asks for at most 1,000 users an hour; keep `concurrency` low for
- * a first reconcile. The token is a classic personal access token of the setup user with
- * `scim:enterprise`, and only one system may provision the enterprise.
+ * `deprovision: "delete"`. GitHub asks for at most 1,000 users an hour, so it sends at most 30
+ * requests a minute (`maxRequestsPerMinute` to change it): a scheduled run every minute then
+ * delivers about 900 users an hour. The token is a classic personal access token of the setup
+ * user with `scim:enterprise`, and only one system may provision the enterprise.
  */
 export function githubEnterprise(target: ScimTarget): ScimTarget {
   if (target.deprovision === "delete")
     throw new Error(`[scim] target ${target.id}: GitHub's DELETE permanently suspends the account; githubEnterprise only deactivates`);
-  return { ...target, deprovision: "deactivate" };
+  return { ...target, maxRequestsPerMinute: target.maxRequestsPerMinute ?? 30, deprovision: "deactivate" };
 }
 
 /**

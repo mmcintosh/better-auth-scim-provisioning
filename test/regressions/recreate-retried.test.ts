@@ -1,4 +1,4 @@
-// With groupRename "recreate", a failed delete of the old group (a 429, say) left the new group
+// With groupRename "recreate", a failed delete of the old group (a 503, say) left the new group
 // made, and the retry tried to create it again: a 409, and the group job failed for good. The retry
 // now finds its own new group and carries on, and the link moves only once the old one is gone.
 import { expect, it } from "vitest";
@@ -23,11 +23,11 @@ it("a rename whose old group's delete failed once completes on the retry, with o
   const org = await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers: await owner(h) });
   await h.settle();
   h.db.prepare('UPDATE "organization" SET "name" = ? WHERE "id" = ?').run("Acme Corp", org!.id);
-  let limited = false;
+  let failed = false;
   const f: typeof fetch = async (i, init) => {
-    if (!limited && init?.method === "DELETE") {
-      limited = true;
-      return new Response(JSON.stringify({ detail: "slow down" }), { status: 429 });
+    if (!failed && init?.method === "DELETE") {
+      failed = true;
+      return new Response(JSON.stringify({ detail: "unavailable" }), { status: 503 });
     }
     return h.app.fetch(i, init);
   };

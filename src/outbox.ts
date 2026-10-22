@@ -102,6 +102,10 @@ const ON_FAILURE_TIMEOUT_MS = 5_000;
 /** Re-deliveries in a row for a job that keeps changing; the scheduled run takes over after. */
 const MAX_ROUNDS = 3;
 const MAX_DELAY_MS = 6 * 3_600_000;
+/** How long a rate-limited target's jobs wait when the app doesn't say (no Retry-After). */
+const RATE_LIMIT_WAIT_MS = 60_000;
+/** The longest a request waits its turn under `maxRequestsPerMinute`; past that, its job goes back in the queue. */
+const MAX_PACE_WAIT_MS = 30_000;
 /** Page size for walking links. */
 const PAGE = 500;
 /** Ids per `in` query: D1 allows 100 bound parameters per statement. */
@@ -220,6 +224,53 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   const maxAttempts = options.retry?.maxAttempts ?? 8;
   const baseDelayMs = options.retry?.baseDelayMs ?? 30_000;
   const backoff = (attempts: number) => Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** Math.max(0, attempts - 1));
+
+  /** When each paced target (`maxRequestsPerMinute`) may send its next request, in this process. */
+  const nextSlot = new Map<string, number>();
+  /**
+   * The target with its requests spaced out, if it has `maxRequestsPerMinute`. A request that
+   * would wait too long is answered here with a 429, as the app would, so its job is held like one.
+   * The request after a wait gets its own timeout: the client's started before the wait.
+   */
+  function paced(target: Target): Target {
+    const perMinute = target.maxRequestsPerMinute;
+    if (!perMinute) return target;
+    const send = target.fetch ?? fetch;
+    const timeoutMs = target.timeoutMs ?? 10_000;
+    const paced: typeof fetch = async (input, init) => {
+      const now = Date.now();
+      const at = Math.max(now, nextSlot.get(target.id) ?? 0);
+      if (at - now > MAX_PACE_WAIT_MS) {
+        const detail = `held back: the target's maxRequestsPerMinute (${perMinute})`;
+        return new Response(JSON.stringify({ detail, error: { message: detail } }), { status: 429, headers: { "content-type": "application/json", "retry-after": String(Math.ceil((at - now) / 1000)) } });
+      }
+      nextSlot.set(target.id, at + 60_000 / perMinute);
+      if (at > now) await new Promise((resolve) => setTimeout(resolve, at - now));
+      return send(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    };
+    return { ...target, fetch: paced } as Target;
+  }
+
+  /** A rate limit: the app's 429, Google's 403 rateLimitExceeded, or maxRequestsPerMinute's own. */
+  const rateLimited = (e: ScimError) => e.status === 429 || e.rateLimited === true;
+
+  /**
+   * The app is rate limiting this target: its other jobs that would go before `until` wait until
+   * then too, rather than each finding out with a request of its own. Marked 429, so a change to
+   * one of those users keeps the wait (enqueue). Jobs being delivered now are left to finish.
+   */
+  async function holdTarget(targetId: string, until: Date): Promise<void> {
+    await adapter.updateMany({
+      model: JOB_MODEL,
+      where: [
+        { field: "targetId", value: targetId },
+        { field: "failed", value: false },
+        { field: "lockedUntil", value: new Date(), operator: "lt" },
+        { field: "nextAttemptAt", value: until, operator: "lt" },
+      ],
+      update: { nextAttemptAt: until, lastStatus: 429 },
+    });
+  }
 
   /**
    * The jobs for (target, user). Normally one; a database without the UNIQUE key (MongoDB builds
@@ -369,7 +420,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   }
 
   async function deliverUser(target: Target, userId: string, change?: string): Promise<Date | null> {
-    const client = clientFor(target, change, attributesOf(target));
+    const client = clientFor(paced(target), change, attributesOf(target));
     const user = (await adapter.findOne({ model: "user", where: [{ field: "id", value: userId }] })) as ProvisionedUser | null;
     const key = keyOf(target.id, userId);
     let link = await findLink(key);
@@ -679,23 +730,27 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           ? await deliverGroup(target, { kind: current.kind as GroupRef["kind"], id: current.userId }, change)
           : await deliver(target, current.userId, change);
     } catch (e) {
-      const attempts = current.attempts + 1;
       const err = e instanceof ScimError ? e : new ScimError((e as Error).message, null, true);
+      // A rate limit isn't a failure: the job waits as asked (the app's Retry-After) without an
+      // attempt counted, so a large sync can't make jobs stuck, and the target's other jobs wait too.
+      const limited = rateLimited(err);
+      const attempts = limited ? current.attempts : current.attempts + 1;
       // Only an error that won't fix itself fails the job. The app's (an outage, an expired token)
       // keeps retrying, every 6 hours once past maxAttempts, so it recovers when the app does.
       // One from the host's own code or database (mapUser, include, a query) fails at
       // maxAttempts: it won't fix itself on a timer.
-      const giveUp = !err.retryable || (!(e instanceof ScimError) && attempts >= maxAttempts);
-      const wait = Math.max(err.retryAfterMs ?? 0, attempts >= maxAttempts ? MAX_DELAY_MS : backoff(attempts));
-      const loud = giveUp || attempts === maxAttempts;
+      const giveUp = !limited && (!err.retryable || (!(e instanceof ScimError) && attempts >= maxAttempts));
+      const wait = limited ? (err.retryAfterMs ?? RATE_LIMIT_WAIT_MS) : Math.max(err.retryAfterMs ?? 0, attempts >= maxAttempts ? MAX_DELAY_MS : backoff(attempts));
+      const loud = !limited && (giveUp || attempts === maxAttempts);
       (loud ? log.error : log.warn)(
-        `[scim] ${target.id}: ${isResync ? "queueing its organization at" : isReports ? "queueing the users reporting to" : isGroup ? `${current.kind === "group" ? "" : `${current.kind} `}group` : "user"} ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
+        `[scim] ${target.id}: ${isResync ? "queueing its organization at" : isReports ? "queueing the users reporting to" : isGroup ? `${current.kind === "group" ? "" : `${current.kind} `}group` : "user"} ${current.userId}: ${err.message}${giveUp ? " (failed; retried on the user's next change or a reconcile)" : limited ? ` (rate limited; the target's jobs wait ${Math.round(wait / 1000)} s)` : ` (attempt ${attempts}; retry in ${Math.round(wait / 1000)} s)`}`,
       );
       const recorded = await adapter.updateMany({
         model: JOB_MODEL,
         where: [{ field: "id", value: current.id }, { field: "version", value: current.version }],
-        update: { attempts, lastError: err.message.slice(0, 1000), lastStatus: err.status, lockedUntil: RELEASED, failed: giveUp, nextAttemptAt: new Date(Date.now() + wait), updatedAt: new Date() },
+        update: { attempts, lastError: err.message.slice(0, 1000), lastStatus: limited ? 429 : err.status, lockedUntil: RELEASED, failed: giveUp, nextAttemptAt: new Date(Date.now() + wait), updatedAt: new Date() },
       });
+      if (limited) await holdTarget(target.id, new Date(Date.now() + wait));
       // Only a failure that was recorded: a job bumped during delivery goes out again at once,
       // so it hasn't failed. The host's hook gets a few seconds; this worker still holds the job.
       if (loud && recorded > 0 && options.onFailure && !isResync && !isReports) {
@@ -709,11 +764,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       // Bumped during delivery (a new change, already due now): free it and try the new state;
       // but an app that asked us to wait (429) is waited for, whatever changed meanwhile.
       if (recorded === 0) {
-        if (err.retryAfterMs)
+        const hold = limited ? wait : err.retryAfterMs;
+        if (hold)
           await adapter.updateMany({
             model: JOB_MODEL,
-            where: [{ field: "id", value: current.id }, { field: "nextAttemptAt", value: new Date(Date.now() + err.retryAfterMs), operator: "lt" }],
-            update: { nextAttemptAt: new Date(Date.now() + err.retryAfterMs), lastStatus: err.status, updatedAt: new Date() },
+            where: [{ field: "id", value: current.id }, { field: "nextAttemptAt", value: new Date(Date.now() + hold), operator: "lt" }],
+            update: { nextAttemptAt: new Date(Date.now() + hold), lastStatus: limited ? 429 : err.status, updatedAt: new Date() },
           });
         await release(current.id);
       }
@@ -773,7 +829,14 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       sortBy: { field: "nextAttemptAt", direction: "asc" },
       limit: targetId === undefined ? limit * 4 : limit,
     })) as Job[];
-    const due = fairShare(candidates, limit);
+    // A paced target (maxRequestsPerMinute) takes about a minute's worth (two requests a job),
+    // whatever else is due: more would only wait their turn, holding up the run.
+    const paces = new Map<string, number>();
+    for (const id of new Set(candidates.map((j) => j.targetId))) {
+      const perMinute = (await source.get(id))?.maxRequestsPerMinute;
+      if (perMinute) paces.set(id, Math.max(1, Math.floor(perMinute / 2)));
+    }
+    const due = fairShare(candidates, limit, paces);
     const tally: Record<Outcome, number> = { done: 0, retry: 0, failed: 0, busy: 0 };
     let next = 0;
     const worker = async () => {
@@ -783,18 +846,22 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return tally;
   }
 
-  /** Up to `limit` jobs, oldest first, no target taking more than its share while others' wait; the rest of the batch fills from what's left. */
-  function fairShare(jobs: Job[], limit: number): Job[] {
+  /**
+   * Up to `limit` jobs, oldest first, no target taking more than its share while others' wait; the
+   * rest of the batch fills from what's left. A paced target never takes more than its pace.
+   */
+  function fairShare(jobs: Job[], limit: number, paces: ReadonlyMap<string, number> = new Map()): Job[] {
     const cap = Math.max(1, Math.floor(limit * PER_TARGET_SHARE));
     const taken = new Map<string, number>();
     const picked: Job[] = [];
     const skipped: Job[] = [];
     for (const j of jobs) {
       const n = taken.get(j.targetId) ?? 0;
-      if (n < cap && picked.length < limit) {
-        picked.push(j);
-        taken.set(j.targetId, n + 1);
-      } else skipped.push(j);
+      const pace = paces.get(j.targetId);
+      if (pace !== undefined && n >= pace) continue;
+      if (n < Math.min(cap, pace ?? cap) && picked.length < limit) picked.push(j);
+      else skipped.push(j);
+      taken.set(j.targetId, n + 1);
     }
     return [...picked, ...skipped].slice(0, limit);
   }
@@ -919,7 +986,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
 
   /** Make the app's group match its organization, team or role: create, update, adopt, or remove. */
   async function deliverGroup(target: Target, ref: GroupRef, change?: string): Promise<null> {
-    const client = clientFor(target, change);
+    const client = clientFor(paced(target), change);
     const key = keyFor(ref.kind, target.id, ref.id);
     const externalId = externalIdOf(ref);
     let link = await findGroupLink(key);
@@ -1285,7 +1352,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * changed: a reconcile, or queueing the user, is what sends our state again.
    */
   async function drift(target: Target, after: string | null, limit: number) {
-    const page = await clientFor(target).listUsers(after, limit);
+    const page = await clientFor(paced(target)).listUsers(after, limit);
     const byRemote = new Map<string, Link>();
     const remoteIds = page.users.map((u) => u.id);
     for (let i = 0; i < remoteIds.length; i += IN_BATCH) {
