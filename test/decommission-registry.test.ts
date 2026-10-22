@@ -134,4 +134,37 @@ describe("decommissioning an organization's target", () => {
     await drive();
     expect(active()).toEqual(["ann@example.com", "oscar@example.com"]);
   });
+
+  it("a purge leaves an account another organization's target at the same app took up since", async () => {
+    const { h, remote, owner, admin, settings, decommission, drive, active, signIn } = await setup();
+    await decommission(owner.headers, { confirm: 2 });
+    await drive();
+    expect(active()).toEqual([]);
+    // Then Globex connects the same app, Ann among its members: its target takes up her account again.
+    const oscar = await signIn("oscar@example.com");
+    const globex = (await h.auth.api.createOrganization({ body: { name: "Globex", slug: "globex" }, headers: oscar.headers }))!;
+    await h.auth.api.addMember({ body: { userId: admin.id, organizationId: globex.id, role: "member" } });
+    await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: globex.id, settings, credentials: { token: remote.token } }, headers: oscar.headers });
+    await h.settle();
+    expect(active()).toEqual(["ann@example.com", "oscar@example.com"]);
+    await decommission(owner.headers, { phase: "purge" });
+    await drive();
+    expect([...remote.users.values()].map((u) => u.userName).sort()).toEqual(["ann@example.com", "oscar@example.com"]);
+    expect(active()).toEqual(["ann@example.com", "oscar@example.com"]);
+  });
+
+  it("while it's being decommissioned (or is), only those who may decommission it may remove or pause the target", async () => {
+    const { h, owner, admin, target, decommission } = await setup();
+    await decommission(owner.headers, { confirm: 2 });
+    expect(await status(h.auth.api.scimProvisioningDeleteTarget({ body: { id: target.id, abandon: true }, headers: admin.headers }))).toBe(403);
+    expect(await status(h.auth.api.scimProvisioningUpdateTarget({ body: { id: target.id, enabled: false }, headers: admin.headers }))).toBe(403);
+    // A rename is still theirs to make.
+    expect(await status(h.auth.api.scimProvisioningUpdateTarget({ body: { id: target.id, settings: { url: "https://app.example.com/scim/v2", name: "Old app" } }, headers: admin.headers }))).toBe(200);
+    expect(await status(h.auth.api.scimProvisioningUpdateTarget({ body: { id: target.id, enabled: false }, headers: owner.headers }))).toBe(200);
+  });
+
+  it("decommissionRoles counts only roles that may manage targets at all", async () => {
+    const { admin, decommission } = await setup({ organizationRoles: ["owner"], decommissionRoles: ["owner", "admin"] });
+    expect(await status(decommission(admin.headers, { preview: true }))).toBe(403);
+  });
 });

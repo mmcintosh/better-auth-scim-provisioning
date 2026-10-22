@@ -104,6 +104,9 @@ describe("holding up", () => {
     expect(h.app.users.size).toBe(0);
     // A rate limit isn't counted as an attempt.
     expect(await h.jobs()).toEqual([expect.objectContaining({ attempts: 0, failed: false, lastStatus: 429, lastError: expect.stringContaining("429") })]);
+    // Retry-After: 0 still waits a few seconds; then the scheduled run delivers it.
+    expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 0 });
+    await h.ctx.adapter.updateMany({ model: "scimProvisioningJob", where: [], update: { nextAttemptAt: new Date(Date.now() - 1000) } });
     expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 1 });
     expect(appUsers(h.app)).toEqual([expect.objectContaining({ userName: u.email })]);
     expect(await h.jobs()).toEqual([]);
