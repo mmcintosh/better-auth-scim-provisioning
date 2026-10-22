@@ -5,6 +5,7 @@
 // through Miniflare; no ADAPTER_URL). ADAPTER_URL points at a server where the test may create
 // databases. Each test gets a fresh, empty database.
 import { afterEach, describe, expect, it } from "vitest";
+import { type Adapter, outbox } from "../../src/outbox";
 import { createHost, type HostDatabase, schemaOptions } from "../support/host";
 import { mockScim } from "../support/mock-scim";
 
@@ -406,6 +407,24 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     expect(await h.jobs()).toEqual([]);
     expect(appUsers(remote)).toHaveLength(106);
   }, 120_000);
+
+  it("a decommission: its walk, compare-and-set and counts (in on kind, OR connectors)", async () => {
+    const h = await host({ decommission: true });
+    for (const name of ["Ada Lovelace", "Bo Bell", "Cy Young"]) await h.user(name);
+    const adapter = h.ctx.adapter as unknown as Adapter;
+    const box = outbox({ decommission: true, targets: [{ id: "app", url: h.app.url, token: h.app.token, fetch: h.app.fetch, decommission: true }] }, adapter, { warn() {}, error() {} });
+    const target = (await box.source.get("app"))!;
+    expect(await box.decommissionCounts("app")).toEqual({ accounts: 3, groups: 0 });
+    const [a, b] = await Promise.all([box.startDecommission("app", "server"), box.startDecommission("app", "server")]);
+    expect(a.id).toBe(b.id);
+    for (let i = 0; i < 20 && (await box.decommissionOf("app"))?.state !== "complete"; i++) {
+      await box.runDue(200);
+      await adapter.updateMany({ model: "scimProvisioningJob", where: [{ field: "targetId", value: "app" }], update: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    }
+    expect(await box.decommissionStatus(target)).toMatchObject({ phase: "deactivate", state: "complete", accounts: 0, total: 3 });
+    expect([...h.app.users.values()].map((u) => u.active)).toEqual([false, false, false]);
+    expect(await box.cancelDecommission("app", "server")).toBe(false);
+  });
 
   it("a timed ban is lifted when it runs out", async () => {
     const h = await host();

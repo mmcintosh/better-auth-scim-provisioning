@@ -49,7 +49,7 @@ The live tests run by hand with real credentials, not in CI. Webhooks have no th
 
 ## Contents
 
-[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Apps](#apps) · [Better Auth apps, and ID-JAG](#better-auth-apps-and-id-jag) · [Google Workspace](#google-workspace) · [Microsoft Entra ID](#microsoft-entra-id) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Organizations' own targets](#organizations-own-targets) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
+[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Retiring an app](#retiring-an-app) · [Apps](#apps) · [Better Auth apps, and ID-JAG](#better-auth-apps-and-id-jag) · [Google Workspace](#google-workspace) · [Microsoft Entra ID](#microsoft-entra-id) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Organizations' own targets](#organizations-own-targets) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
 
 ## Install
 
@@ -143,6 +143,7 @@ Without it, a cancelled delivery waits for the scheduled run instead of happenin
 | `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
 | `timeoutMs` | `10000` | Per request. |
 | `maxRequestsPerMinute` | none (30 with the `githubEnterprise` profile) | At most this many requests a minute to the app, for apps with a rate limit (see [Rate limits](#how-it-holds-up)). |
+| `decommission` | `false` | Marked for decommissioning: frozen until it's started (see [Retiring an app](#retiring-an-app)). Needs the plugin's `decommission: true`. |
 | `fetch` | the global `fetch` | The fetch requests go through: a proxy's, or a Workers service binding's. |
 
 Options are checked when the plugin starts: an unknown or misspelled option, or one in the wrong place, stops it with a message naming it. The scheduled run delivers 4 jobs at once by default: `concurrency: 4` (1 to 32), shared by all targets. Retries are shared too: `retry: { maxAttempts: 8, baseDelayMs: 30000 }`. The delay doubles each attempt, or is longer if the app's `Retry-After` asks for it (up to a day). After `maxAttempts`, failures that can fix themselves are retried every 6 hours. A rate limit isn't a failure: it never counts toward `maxAttempts` (see Rate limits under [How it holds up](#how-it-holds-up)).
@@ -169,7 +170,7 @@ const { items: drift, scanned, next: more } = await auth.api.scimProvisioningDri
 
 `scimProvisioningDrift` reads the app's own list and reports each account that isn't as we'd have it, with a `finding`: `unmanaged` (no link here and not our externalId: made by hand, or by another tool; at Google Workspace and Entra ID that's every account the plugin didn't make, the whole directory being listed), `unlinked` (our externalId for a user here, but no link: queue the user, and the next delivery takes the account over if its userName is still the user's address), or `mismatch` (deactivated or renamed at the app, or still active though the user was deleted here: a reconcile, or queueing the user, sends our state again). Each item carries the account's `remoteId`, `userName`, `externalId`, `active`, the `userId` here when known, and a `detail`. It changes nothing. A webhook receiver can't be listed; a disabled stored target still is (it's read only), and one whose credentials can't be read isn't. At an organization's target, only its members count as users here. The app must page as SCIM says, by `startIndex` (with `totalResults`, or full pages until a short one) or by a cursor.
 
-In `scimProvisioningFailures` items and `onFailure`, `kind` is what was being delivered: `user`, or a group: `group` (an organization's own group), `team` or `role` (and, in failures only, `resync`: queueing an organization for its own target, page by page). `subjectId` is the user's, organization's or team's id, and for a role group `"<organization id>:<role>"`.
+In `scimProvisioningFailures` items and `onFailure`, `kind` is what was being delivered: `user`, or a group: `group` (an organization's own group), `team` or `role` (and, in failures only, `resync`: queueing an organization for its own target, page by page; `decommission`: a step of retiring a target). `subjectId` is the user's, organization's or team's id, and for a role group `"<organization id>:<role>"`.
 
 `onFailure` is called when a delivery gives up (an error that won't fix itself) or reaches `retry.maxAttempts`: alert on it, so a deprovisioning that isn't getting through doesn't go unnoticed.
 
@@ -301,6 +302,26 @@ Most apps grant access by group: assign the group to the app or role there (AWS 
 - **Reconcile** covers every user, and every user still linked at a target, so deleted users whose deprovisioning was lost are cleaned up too.
 - **Deleted users' links are kept** (with `deprovision: "deactivate"`): the account stays at the app, deactivated, and its link (with the userName, usually the email) stays here, so switching to `delete` later can still remove it. Every reconcile looks at them again. If you need that data gone, delete those rows from `scimProvisioningLink`.
 - **No redirects.** The token only goes to the target's URL: a redirect is never followed. It's retried (a maintenance page passes), with the new location in the error, so a target moved for good shows up as "check the target's url".
+
+## Retiring an app
+
+Removing a target stops sending to it, and that's all: every account we made there stays active, and every group keeps its members, as when you remove an app from Okta or Entra. To take everyone off the app first, decommission it: every account we made there is deactivated and every group emptied (kept, so what the app ties to it, such as an AWS permission set or an Access policy, is still there if you change your mind). Nothing is deleted, whatever the target's `deprovision` says.
+
+1. **Turn on the option, and migrate.** `decommission: true` adds a table, `scimProvisioningDecommission`, which holds each decommission's progress: run your migration (`npx auth migrate`, or generate your ORM's schema) before deploying.
+2. **Mark the target, and deploy.** `decommission: true` on the target freezes it: nothing is sent to it from then on, and changes wait. Nothing is deactivated yet.
+3. **Start it,** with the number of accounts it will deactivate:
+
+```ts
+const { accounts, groups } = await auth.api.scimProvisioningDecommission({ body: { targetId: "app", preview: true } });
+await auth.api.scimProvisioningDecommission({ body: { targetId: "app", confirm: accounts } });
+```
+
+4. **Wait for it to complete.** The scheduled run carries it on a page at a time, at the app's pace (see Rate limits under [How it holds up](#how-it-holds-up)). It's complete once no account of ours there is active and nothing for the target is queued or failing; it looks again every minute until then. `scimProvisioningStatus` shows it on each target as `decommission`: `{ phase, state, accounts, groups, total, groupsTotal, startedAt, startedBy, completedAt, cancelledAt }`. `state` is `frozen` (marked, not started), `running`, `blocked` (all that's left is failed or stuck: `scimProvisioningFailures` says why), `complete` or `cancelled`. `accounts` is what's still active there.
+5. **Remove the target**, once it's complete. A complete decommission is final for that target id; to use the app again, add it under a new id.
+
+To stop it before it completes: `{ targetId, cancel: true }`. Every account it deactivated whose user is still wanted there is switched back on, and the groups get their members back (nothing was deleted, so nothing is made again). Cancel first, then remove the mark: while the target is marked, it stays frozen. Once started, removing the mark doesn't cancel it (a rollback, or old and new versions running side by side on Workers, mustn't switch it off and on), and the target stays retired until it completes or is cancelled.
+
+Organizations' own targets can't be decommissioned this way yet.
 
 ## Apps
 
