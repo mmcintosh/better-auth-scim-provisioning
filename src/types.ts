@@ -123,6 +123,15 @@ export interface TargetOptions {
   /** Per request; default 10 seconds. */
   timeoutMs?: number | undefined;
   /**
+   * At most this many requests a minute to the app, for an app with a rate limit (the
+   * `githubEnterprise` profile sets 30). Requests wait their turn; one that would wait more than
+   * 30 seconds goes back in the queue, and a scheduled run sends the target about a minute's worth.
+   * Counted per server process: with several running deliveries at once, each keeps to it. Without
+   * it, an app that answers 429 (or Google's rate limits) holds all of the target's jobs for its
+   * Retry-After (a minute if it gives none), and rate limits never count toward `retry.maxAttempts`.
+   */
+  maxRequestsPerMinute?: number | undefined;
+  /**
    * The fetch this target's requests go through: a proxy's, or a Workers service binding's
    * (`env.MY_SERVICE.fetch.bind(env.MY_SERVICE)`). Default the global `fetch`. Redirects are
    * never followed either way.
@@ -287,9 +296,9 @@ export interface ScimProvisioningOptions {
   concurrency?: number | undefined;
   retry?: {
     /**
-     * Attempts at the normal backoff; default 8. After that, a failure that can fix itself (429,
-     * 5xx, timeouts, 401/403) is retried every 6 hours. Other errors fail the job at once, until
-     * the user changes again or a reconcile.
+     * Attempts at the normal backoff; default 8. After that, a failure that can fix itself (5xx,
+     * timeouts, 401/403) is retried every 6 hours. Other errors fail the job at once, until the
+     * user changes again or a reconcile. A rate limit (429) isn't counted: the job waits as asked.
      */
     maxAttempts?: number | undefined;
     /** First retry after this; doubles each attempt, capped at 6 hours. Default 30 seconds. */

@@ -102,7 +102,8 @@ describe("holding up", () => {
     h.app.fail({ status: 429, retryAfter: "0" });
     const u = await h.user();
     expect(h.app.users.size).toBe(0);
-    expect(await h.jobs()).toEqual([expect.objectContaining({ attempts: 1, failed: false, lastError: expect.stringContaining("429") })]);
+    // A rate limit isn't counted as an attempt.
+    expect(await h.jobs()).toEqual([expect.objectContaining({ attempts: 0, failed: false, lastStatus: 429, lastError: expect.stringContaining("429") })]);
     expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 1 });
     expect(appUsers(h.app)).toEqual([expect.objectContaining({ userName: u.email })]);
     expect(await h.jobs()).toEqual([]);

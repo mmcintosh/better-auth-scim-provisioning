@@ -127,6 +127,8 @@ export class ScimError extends Error {
     readonly retryable: boolean,
     readonly retryAfterMs?: number | undefined,
     readonly scimType?: string | undefined,
+    /** The app is rate limiting us, though its status isn't 429 (Google's 403 rateLimitExceeded). */
+    readonly rateLimited?: boolean | undefined,
   ) {
     super(message);
     this.name = "ScimError";

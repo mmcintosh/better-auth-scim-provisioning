@@ -4,6 +4,15 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+
+- **`maxRequestsPerMinute`**, a target option for apps with a rate limit: requests to the app are spaced out to stay under it, one that would wait more than 30 seconds goes back in the queue (held as a 429 would be), and a scheduled run takes about a minute's worth of the target's jobs, so a slow target doesn't hold up the others. Counted per server process. The `githubEnterprise` profile sets 30 (GitHub asks for at most 1,000 users an hour); set it on the target to change that. Organizations' stored targets get it from their profile.
+
+### Changed
+
+- **Rate limits hold the whole target, and never count as failed attempts.** An app's 429 used to hold only the job that got it, count an attempt, and after `retry.maxAttempts` make the job stuck (retried every 6 hours) and call `onFailure`. Now every queued job for that target waits for the `Retry-After` (a minute if the app gives none), no attempt is counted, and `onFailure` isn't called: a large first sync or reconcile against a rate-limited app no longer leaves jobs stuck. A job held this way shows `lastStatus` 429.
+- **Google Workspace: Google's rate limits are recognised.** Google can answer 403 with `rateLimitExceeded` or `userRateLimitExceeded`; that was retried as "check the service account". It's now a rate limit, as above. `ScimError` gains `rateLimited` for such an error whose status isn't 429.
+
 ### Documentation
 
 - **Better Auth apps: deactivation doesn't stop a new sign-in there.** `@better-auth/scim` ends a deactivated user's sessions, but the user can sign in again with any method the app offers (a password reset, a magic link, a social account). The README now shows the fix on the app's side: a `reconcileUser` hook that bans the user with Better Auth's admin plugin while no SCIM connection has them active, lifts only that ban when one does again, and leaves an admin's own ban alone. The interoperability tests pin both: without it the user signs back in, with it they're refused until reactivated.
