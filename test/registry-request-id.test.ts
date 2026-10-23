@@ -1,14 +1,22 @@
 // A create with a `requestId` is safe to retry: the same request makes one target, and a retry (or
 // a second at once) gets that target back, marked `replayed`; a request that asks for something
 // else with the same id is refused, as is one whose target was removed since (with `audit`).
+import { memoryAdapter } from "better-auth/adapters/memory";
+import { getAuthTables } from "better-auth/db";
 import { describe, expect, it } from "vitest";
 import type { TargetRegistryOptions } from "../src";
-import { createHost } from "./support/host";
+import { createHost, schemaOptions } from "./support/host";
 import { mockScim } from "./support/mock-scim";
 
-async function setup(o: { audit?: boolean; registry?: Omit<TargetRegistryOptions, "fetch"> } = {}) {
+async function setup(o: { audit?: boolean; registry?: Omit<TargetRegistryOptions, "fetch">; memory?: boolean } = {}) {
   const remote = mockScim();
-  const h = await createHost({ targets: [], ...(o.audit === false ? {} : { audit: true }), registry: { fetch: remote.fetch, ...o.registry } });
+  const h = await createHost({
+    targets: [],
+    ...(o.audit === false ? {} : { audit: true }),
+    registry: { fetch: remote.fetch, ...o.registry },
+    // The memory adapter wants each table up front.
+    ...(o.memory ? { database: { database: memoryAdapter(Object.fromEntries(Object.values(getAuthTables(schemaOptions() as never)).map((t) => [t.modelName, []]))), migrate: false } } : {}),
+  });
   const signIn = async (email: string) => {
     const up = await h.auth.api.signUpEmail({ body: { email, password: "correct-horse-battery", name: email.split("@")[0]! } });
     await h.ctx.internalAdapter.updateUser(up.user.id, { emailVerified: true });
@@ -90,6 +98,14 @@ describe("a create with a requestId", () => {
     expect(await status(create({}, oscar))).toBe(403);
     expect(await status(create({ requestId: "short" }))).toBe(400);
     expect(await status(create({ requestId: "has spaces in it" }))).toBe(400);
+  });
+
+  it("two at once on a database that doesn't enforce unique fields (MongoDB's, Better Auth's memory adapter): still one", async () => {
+    const { create, rows } = await setup({ memory: true });
+    const both = await Promise.all([create(), create(), create()]);
+    expect(new Set(both.map((r) => r.target.id)).size).toBe(1);
+    expect(both.filter((r) => !r.replayed)).toHaveLength(1);
+    expect(await rows()).toBe(1);
   });
 
   it("without one, two creates make two targets, as before", async () => {
