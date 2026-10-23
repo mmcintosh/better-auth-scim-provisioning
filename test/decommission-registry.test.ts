@@ -66,14 +66,17 @@ describe("decommissioning an organization's target", () => {
   });
 
   it("refused for a disabled target; cancelled before it completes, those still wanted are back", async () => {
-    const { h, owner, target, decommission, statusOf, active } = await setup();
+    const { h, remote, owner, target, decommission, statusOf, active } = await setup();
     await h.auth.api.scimProvisioningUpdateTarget({ body: { id: target.id, enabled: false }, headers: owner.headers });
     await expect(decommission(owner.headers, { confirm: 2 })).rejects.toThrow(/disabled: enable it first/);
     await h.auth.api.scimProvisioningUpdateTarget({ body: { id: target.id, enabled: true }, headers: owner.headers });
     await h.settle();
+    // Olive's account can't be reached for now: it isn't complete.
+    const olive = [...remote.users.values()].find((u) => u.userName === "olive@example.com")!;
+    for (let i = 0; i < 10; i++) for (const method of ["PATCH", "PUT"]) remote.failOn(method, new RegExp(`^/Users/${olive.id}$`), { status: 503 });
     await decommission(owner.headers, { confirm: 2 });
     await h.settle();
-    expect(active()).toEqual([]);
+    expect(active()).toEqual(["olive@example.com"]);
     expect(await statusOf()).toMatchObject({ decommission: { state: "running" } });
     expect(await decommission(owner.headers, { cancel: true })).toMatchObject({ decommission: { state: "cancelled" } });
     await h.settle();
