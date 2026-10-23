@@ -715,6 +715,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               accounts: (targetId, after, limit) => s.box.accounts(targetId, after, limit),
               kick: (targetId) => kick(s, targetId, DECOMMISSION_KICK),
               counts: (targetId, phase) => s.box.decommissionCounts(targetId, phase),
+              shared: (targetId, phase) => s.box.sharedCounts(targetId, phase),
               decommission: options.decommission
                 ? {
                     state: async (targetId) => (await s.box.decommissionOf(targetId))?.state ?? null,
@@ -900,7 +901,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           }
           if (ctx.body.phase === "purge") {
             const counts = await s.box.decommissionCounts(targetId, "purge");
-            if (preview) return ctx.json({ ...counts, decommission: await s.box.decommissionStatus(target) });
+            if (preview) return ctx.json({ ...counts, shared: await s.box.sharedCounts(targetId, "purge"), decommission: await s.box.decommissionStatus(target) });
             const row = await s.box.decommissionOf(targetId);
             if (row?.phase === "purge" && row.state === "complete") throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: its purge is complete` });
             if (row?.phase !== "purge") {
@@ -917,7 +918,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             return ctx.json({ decommission: await s.box.decommissionStatus(target) });
           }
           const counts = await s.box.decommissionCounts(targetId);
-          if (preview) return ctx.json({ ...counts, decommission: await s.box.decommissionStatus(target) });
+          if (preview) return ctx.json({ ...counts, shared: await s.box.sharedCounts(targetId), decommission: await s.box.decommissionStatus(target) });
           const row = await s.box.decommissionOf(targetId);
           if (row?.state === "complete") throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: its decommission is complete` });
           if (row?.state !== "running") {

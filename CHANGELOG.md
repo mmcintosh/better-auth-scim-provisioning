@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+
+- **A decommission's preview says how many accounts and groups it will leave on**: `preview: true` (on `scimProvisioningDecommission` and the registry's `targets/decommission`, for a purge too) gains `shared: { accounts, groups }`, those of its counts that another target still in use at the same app shares, and so are left there. `null` past 10,000 accounts, which aren't counted. `confirm` is unchanged.
+
 ### Changed
 
 - **Roles**: a user in more than 1,000 organizations is logged at `warn` (the roles of those past the first 1,000 aren't sent), as groups already were, rather than cut short silently. The README says how to add two-field indexes to the audit table for a long history.

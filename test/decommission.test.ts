@@ -408,17 +408,69 @@ describe("decommissioning a target", () => {
     expect(await adapterOf(h).count({ model: "scimProvisioningGroupLink" })).toBe(2);
     expect([...h.app.groups.values()].map((g) => g.members?.length)).toEqual([1]);
     const statusOf = async () => box.decommissionStatus((await box.source.get("app"))!);
+    // A preview counts them: Ada's account and the owner's, the owner's and the group shared.
+    expect(await box.decommissionCounts("app")).toEqual({ accounts: 2, groups: 1 });
+    expect(await box.sharedCounts("app")).toEqual({ accounts: 1, groups: 1 });
     await box.startDecommission("app", "server");
     await drive(h, () => box.runDue(200), async () => (await statusOf())?.state === "complete");
     // Ada was only app's: deactivated. The owner and the group, app2's too: as they were.
     const accounts = () => appUsers(h).map((u) => [u.externalId === ada.id ? "ada" : u.externalId === olive.id ? "olive" : u.externalId, u.active]).sort();
     expect(accounts()).toEqual([["ada", false], ["olive", true]]);
     expect([...h.app.groups.values()].map((g) => g.members?.length)).toEqual([1]);
+    // Their links here went with the decommission: nothing shared is left for a purge to count.
+    expect(await box.sharedCounts("app", "purge")).toEqual({ accounts: 0, groups: 0 });
     await box.startPurge("app", "server");
     await drive(h, () => box.runDue(200), async () => (await statusOf())?.state === "complete");
     expect(accounts()).toEqual([["olive", true]]);
     expect(h.app.groups.size).toBe(1);
   });
+
+  it("the preview's shared counts: only the same person's account, at the same app, at a target still in use", async () => {
+    const h = await createHost({ decommission: true, targets: [] });
+    const app = mockScim();
+    const at = (id: string, url = app.url) => ({ id, url, token: app.token, fetch: app.fetch, groups: true });
+    const box = outbox({ decommission: true, targets: [at("app"), at("app2"), at("elsewhere", "https://other.example.com/scim/v2"), { ...at("retiring"), decommission: true }] }, adapterOf(h), quiet);
+    await box.startDecommission("retiring", "server");
+    const link = (targetId: string, userId: string, remoteId: string, active = true, adopted = false) =>
+      adapterOf(h).create({ model: "scimProvisioningLink", data: { key: `${targetId}:${userId}`, targetId, userId, remoteId, userName: `${userId}@example.com`, active, adopted, syncedAt: new Date() } });
+    await link("app", "u1", "r1"); // app2 has it too: shared
+    await link("app2", "u1", "r1");
+    await link("app", "u2", "r2"); // app2's is deactivated: shared only for a purge
+    await link("app2", "u2", "r2", false);
+    await link("app", "u3", "r3"); // another app's
+    await link("elsewhere", "u3", "r3");
+    await link("app", "u4", "r4"); // a target being decommissioned itself
+    await link("retiring", "u4", "r4");
+    await link("app", "u5", "r5"); // the same remote id for someone else
+    await link("app2", "u9", "r5");
+    await link("app", "u6", "r6", false, true); // deactivated here, and adopted: neither counts
+    await link("app2", "u6", "r6");
+    await link("app", "u7", "r7", false); // deactivated here: shared only for a purge
+    await link("app2", "u7", "r7");
+    const org = (await adapterOf(h).create({ model: "organization", data: { name: "Acme", slug: "acme", createdAt: new Date() } })) as { id: string };
+    const group = (targetId: string, remoteId: string) => adapterOf(h).create({ model: "scimProvisioningGroupLink", data: { key: `${targetId}:group:${remoteId}`, targetId, organizationId: org.id, remoteId, displayName: remoteId, syncedAt: new Date() } });
+    await group("app", "g1");
+    await group("app2", "g1");
+    await group("app", "g2");
+    await group("app", "g3");
+    await group("retiring", "g3");
+    expect(await box.sharedCounts("app")).toEqual({ accounts: 1, groups: 1 });
+    expect(await box.sharedCounts("app", "purge")).toEqual({ accounts: 3, groups: 1 });
+    expect(await box.sharedCounts("nope")).toBeNull();
+  });
+
+  it("the preview's shared counts aren't counted past 10,000 accounts", async () => {
+    const h = await createHost({ decommission: true, targets: [] });
+    const app = mockScim();
+    const at = (id: string) => ({ id, url: app.url, token: app.token, fetch: app.fetch });
+    const box = outbox({ decommission: true, targets: [at("app"), at("app2")] }, adapterOf(h), quiet);
+    for (let i = 0; i <= 10_000; i++) await adapterOf(h).create({ model: "scimProvisioningLink", data: { key: `app:u${i}`, targetId: "app", userId: `u${i}`, remoteId: `r${i}`, userName: `u${i}@example.com`, active: true, syncedAt: new Date() } });
+    expect(await box.sharedCounts("app")).toBeNull();
+    await adapterOf(h).deleteMany({ model: "scimProvisioningLink", where: [{ field: "key", value: "app:u0" }] });
+    // At 10,000, counted, the last pages too (u9999 sorts after u10000).
+    await adapterOf(h).create({ model: "scimProvisioningLink", data: { key: "app2:u9999", targetId: "app2", userId: "u9999", remoteId: "r9999", userName: "u9999@example.com", active: true, syncedAt: new Date() } });
+    expect(await box.sharedCounts("app")).toEqual({ accounts: 1, groups: 0 });
+  }, 60_000);
 
   it("a step is a page of 50 and about 60 queries (D1 allows 1,000 an invocation)", async () => {
     const { h } = await marked();
