@@ -98,6 +98,24 @@ describe("RFC 7643's other user attributes", () => {
     expect(([...app.users.values()][0] as { roles?: unknown } | undefined)?.roles).toEqual([{ value: "admin", type: "organization" }]);
   });
 
+  it("roles are read from a user's first 1,000 organizations, with a warning when there are that many", async () => {
+    const h = await createHost({ targets: [] });
+    const ada = await h.user("Ada Lovelace");
+    for (let i = 0; i < 1000; i++) {
+      const org = (await h.ctx.adapter.create({ model: "organization", data: { name: `Org ${i}`, slug: `org-${i}`, createdAt: new Date() } })) as { id: string };
+      await h.ctx.adapter.create({ model: "member", data: { userId: ada.id, organizationId: org.id, role: "member", createdAt: new Date() } });
+    }
+    const { outbox } = await import("../src/outbox");
+    const { mockScim } = await import("./support/mock-scim");
+    const app = mockScim();
+    const log = { warn: vi.fn(), error: vi.fn() };
+    const box = outbox({ targets: [{ id: "app", url: app.url, token: app.token, fetch: app.fetch, roles: true }] }, h.ctx.adapter as never, log);
+    await box.enqueue("app", ada.id);
+    expect(await box.runFor("app", ada.id)).toBe("done");
+    expect(([...app.users.values()][0] as { roles?: unknown[] } | undefined)?.roles).toHaveLength(1000);
+    expect(log.warn).toHaveBeenCalledWith(`[scim] user ${ada.id}: organizations: only the first 1000 are taken into account; the rest's roles aren't sent`);
+  });
+
   it("with PATCH, no roles left removes them by path", async () => {
     const h = await createHost({ targets: [{ id: "app", roles: true, update: "patch", patch: true }] });
     const ada = await h.user("Ada Lovelace");
