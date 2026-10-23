@@ -520,8 +520,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                 updatedAt: { type: "date", required: true },
               },
               // The id's uniqueness as a table-level index too, which MongoDB's adapter makes (it
-              // doesn't make the field-level one): a create with a requestId relies on it.
-              indexes: [{ fields: ["targetId"], unique: true, name: "scimProvisioningTarget_targetId_unique" }],
+              // doesn't make the field-level one): a create with a requestId relies on it. Not
+              // `<table>_targetId_unique`: Drizzle gives the field's own constraint that name.
+              indexes: [{ fields: ["targetId"], unique: true, name: "scimProvisioningTarget_targetId_unique_idx" }],
             },
           }
         : {}),

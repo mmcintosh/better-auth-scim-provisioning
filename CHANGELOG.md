@@ -4,25 +4,27 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
-**Migrate after upgrading** (`npx auth migrate`, or regenerate your ORM's schema) to add three indexes. Nothing breaks before you do: Better Auth doesn't check indexes, and the plugin works without them, only slower (the audit history) or without the guarantee that two identical creates at once make one target (`requestId`). MongoDB's adapter makes them itself, on first use. In SQL:
+**Migrate after upgrading** (`npx auth migrate`, or regenerate your ORM's schema) to add three indexes. Nothing breaks before you do: Better Auth doesn't check indexes, and the plugin works without them, only slower (the audit history) or without the guarantee that two identical creates at once make one target (`requestId`). MongoDB's adapter makes them itself, on first use (the first write after the upgrade waits while it indexes what's there). In SQL (MySQL: backticks for the double quotes):
 
 ```sql
 -- With `registry`: the target id's uniqueness, as an index MongoDB's adapter also makes.
-CREATE UNIQUE INDEX "scimProvisioningTarget_targetId_unique" ON "scimProvisioningTarget" ("targetId");
+CREATE UNIQUE INDEX "scimProvisioningTarget_targetId_unique_idx" ON "scimProvisioningTarget" ("targetId");
 -- With `audit`: one target's or organization's events, newest first, without sorting them all.
 CREATE INDEX "scimProvisioningAuditEvent_targetId_key_idx" ON "scimProvisioningAuditEvent" ("targetId", "key");
 CREATE INDEX "scimProvisioningAuditEvent_organizationId_key_idx" ON "scimProvisioningAuditEvent" ("organizationId", "key");
 ```
 
+If you added 1.7.0's two audit indexes by hand (`scimProvisioningAuditEvent_targetId_key` and `scimProvisioningAuditEvent_organizationId_key`, or MongoDB's `{ targetId: 1, key: -1 }` and `{ organizationId: 1, key: -1 }`), drop them after migrating: these replace them.
+
 ### Fixed
 
-- **A create answered 202 (RFC 9967) no longer fails the user's job**: RFC 9967 (May 2026) lets an app accept a slow request and do it later, answering 202 with no body, even to a client that didn't ask. A create answered so was taken as "no id" and failed. It's now retried, and a retry of a create of ours that's pending (a 202, or a reply lost) looks for the account or group first, so it's linked, not made twice.
+- **A create answered 202 (RFC 9967) no longer fails the user's job**: RFC 9967 (May 2026) lets an app accept a slow request and do it later, answering 202 with no body, even to a client that didn't ask. A create answered so was taken as "no id" and failed. It's now retried, and a retry of a create of ours that's pending (a 202, or a reply lost) looks for the account or group first, so it's linked, not made twice; an app that says it exists but can't show it yet is asked again. A 202 that gives the new id is taken as made.
 - **Attribute names in any case** (RFC 7643 §2.1): an app answering `resources`, `totalresults`, `ID` and so on was taken as not answering SCIM lists; it's read like any other.
 
 ### Added
 
 - **Indexes declared in the schema** (see above): the audit history's two (which 1.7.0's README had you add by hand), and the target id's uniqueness at table level, so MongoDB enforces it too.
-- **A registry create that's safe to retry (`requestId`)**: `targets/create` (and `auth.api.scimProvisioningCreateTarget`) takes an optional `requestId`. The target's id is derived from it and the organization, so a create sent again after a timeout, or twice at once, makes one target; the repeat answers with it (`replayed: true`), queuing nothing and recording nothing again. A repeat asking for anything else, or after the target was changed or (with `audit`) removed, is refused (409). Nothing new is stored: no new column or setting (one new index, above).
+- **A registry create that's safe to retry (`requestId`)**: `targets/create` (and `auth.api.scimProvisioningCreateTarget`) takes an optional `requestId`. The target's id is derived from it and the organization, so a create sent again after a timeout, or twice at once, makes one target; the repeat answers with it (`replayed: true`), recording nothing again (it queues the organization again, as one job, in case the first create was cut short). A repeat asking for anything else, or after the target was changed, or removed (while `audit` still has its events), is refused (409). Nothing new is stored: no new column or setting (one new index, above).
 - **The user's photo, and the rest of RFC 7643's single-valued user attributes**: `attributes` can also name `photo` (sent as `photos`, type `photo`: Better Auth's own `image` is `{ photo: "image" }`), `nickName`, `profileUrl`, and `middleName`, `honorificPrefix` and `honorificSuffix` (in `name`). Only when named, so nothing new is sent on upgrade; the photo and profile URL only as https URLs (others are left out and logged); each cleared when empty. SCIM apps and webhooks only. `ScimUser` gains `photos`, `nickName`, `profileUrl` and the three name parts.
 - **`check` reports RFC 9865's paging and RFC 9967's asynchronous requests** when the ServiceProviderConfig gives them, and says when a create is answered 202.
 

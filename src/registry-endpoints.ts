@@ -352,21 +352,29 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         if (host.codeIds.some((c) => c.toLowerCase() === targetId)) throw refuse("CONFLICT", "requestId: use another");
         const { settings, credentials } = check({ targetId, organizationId }, ctx.body.settings, ctx.body.credentials);
         const enabled = ctx.body.enabled ?? true;
-        /** A create with this requestId was made before: the same target again, or 409 if this asks for another. */
+        /**
+         * A create with this requestId was made before: the same target again, or 409 if this asks
+         * for another. Queued again (one job, however many repeats), in case the first was cut
+         * short after the target was made, before its members were queued.
+         */
         const replay = async (row: TargetRow) => {
+          const stored = await readable(ctx, row);
+          if (stored === null) throw refuse("CONFLICT", "requestId: the target it created has credentials that can't be read (was Better Auth's secret changed?); a new create needs a new requestId");
           const same =
             row.organizationId === organizationId &&
             truthy(row.enabled) === enabled &&
             canonical(settingsOf(row)) === canonical(settings) &&
-            canonical(await readable(ctx, row)) === canonical(credentials);
+            canonical(stored) === canonical(credentials);
           if (!same) throw refuse("CONFLICT", "requestId: already used to create a target with other settings, credentials or enabled (or it was changed since); a new create needs a new requestId");
+          await instance(ctx).resync(targetId, { resume: false });
           return ctx.json({ target: view(row, credentials), replayed: true as const });
         };
         const made = async () => ((await adapter.findMany({ model: TARGET_MODEL, where: [{ field: "targetId", value: targetId }], limit: 2 })) as TargetRow[]).find((r) => r.targetId === targetId);
         if (requestId) {
           const before = await made();
           if (before) return replay(before);
-          // Removed since: making it again would give a new target the old one's id, and its history.
+          // Removed since: making it again would give a new target the old one's id, and its history
+          // (as long as the history keeps the old one's events: keepDays removes them).
           if (instance(ctx).audit.on && (await instance(ctx).audit.list({ targetId, limit: 1 })).items.length)
             throw refuse("CONFLICT", "requestId: the target it created was removed since; a new create needs a new requestId");
         }

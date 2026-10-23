@@ -51,7 +51,7 @@ describe("RFC 7643's other user attributes", () => {
     // PATCH: left as it was at the app, and none cleared.
     expect(remote(ada.email)).toMatchObject({ timezone: "America/Toronto", locale: "en-CA", preferredLanguage: "fr-CA" });
     expect(lastPatch()?.Operations.filter((o) => o.op === "remove")).toEqual([]);
-    expect(warn.mock.calls.flat().join(" ")).toMatch(/preferredLanguage, locale, timezone left out, not a valid value/);
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/preferredLanguage \(a language tag such as en-CA\), locale \(a language tag such as en-CA\), timezone \(an IANA time zone such as America\/Toronto\) left out/);
     // Empty: removed by path.
     await set(ada.id, { tz: null, locale: "en-CA", preferredLanguage: "fr-CA" });
     expect(lastPatch()?.Operations.filter((o) => o.op === "remove")).toEqual([expect.objectContaining({ path: "timezone" })]);
