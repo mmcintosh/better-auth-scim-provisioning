@@ -70,6 +70,7 @@ export interface RegistryHost {
               purge(targetId: string, by: string): Promise<void>;
               row(targetId: string): Promise<{ phase: "deactivate" | "purge"; state: "running" | "complete" | "cancelled" } | null>;
               cancel(targetId: string, by: string): Promise<boolean>;
+              forget(targetId: string, userIds: string[], by: string): Promise<number | null>;
             }
           | undefined;
       }
@@ -497,8 +498,16 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         method: "POST",
         use: [sensitiveSessionMiddleware],
         body: z
-          .strictObject({ id: z.string().min(1).max(100), phase: z.enum(["deactivate", "purge"]).optional(), preview: z.literal(true).optional(), confirm: z.number().int().min(0).optional(), cancel: z.literal(true).optional() })
-          .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both"),
+          .strictObject({
+            id: z.string().min(1).max(100),
+            phase: z.enum(["deactivate", "purge"]).optional(),
+            preview: z.literal(true).optional(),
+            confirm: z.number().int().min(0).optional(),
+            cancel: z.literal(true).optional(),
+            forget: z.array(z.string().min(1).max(256)).min(1).max(100).optional(),
+          })
+          .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both")
+          .refine((b) => !b.forget || (!b.preview && !b.cancel && b.confirm === undefined), "forget goes alone"),
       },
       async (ctx) => {
         const preview = ctx.body.preview === true;
@@ -508,6 +517,14 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const d = i.decommission;
         if (!d) throw refuse("BAD_REQUEST", "decommissioning isn't enabled (the plugin's decommission option)");
         const by = `user:${actor.userId}`;
+        if (ctx.body.forget) {
+          const forgotten = await d.forget(row.targetId, ctx.body.forget, by);
+          if (forgotten === null) throw refuse("BAD_REQUEST", "accounts are forgotten only while a decommission runs, or once it's complete");
+          await record(ctx, actor, row, "decommission.forgot", { userIds: [...new Set(ctx.body.forget)], forgotten });
+          audit(ctx, actor, `forgot ${forgotten} accounts of target ${row.targetId} of organization ${row.organizationId}, left at the app as they are: ${[...new Set(ctx.body.forget)].join(", ")}`);
+          i.kick(row.targetId);
+          return ctx.json({ forgotten, decommission: await d.status(row.targetId) });
+        }
         if (ctx.body.cancel) {
           if (!(await d.cancel(row.targetId, by))) throw refuse("BAD_REQUEST", "no decommission is running that can be cancelled (a complete one, or a purge, can't be)");
           const left = await i.counts(row.targetId);

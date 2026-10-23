@@ -696,6 +696,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                       return row ? { phase: row.phase, state: row.state } : null;
                     },
                     cancel: (targetId, by) => s.box.cancelDecommission(targetId, by),
+                    forget: (targetId, userIds, by) => s.box.forgetAccounts(targetId, userIds, by),
                   }
                 : undefined,
               audit: s.box.audit,
@@ -824,22 +825,38 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
        * says how many; starting needs `confirm` equal to the accounts it showed. The scheduled run
        * carries it on a page at a time until nothing of ours is active there (`scimProvisioningStatus`
        * shows it). `cancel: true`, before it completes, stops it and switches back on those still wanted.
+       * `forget: [userId, …]`: accounts it can't get through that you've dealt with at the app.
        */
       scimProvisioningDecommission: createAuthEndpoint.serverOnly(
         {
           method: "POST",
           body: z
-            .strictObject({ targetId: z.string().min(1), phase: z.enum(["deactivate", "purge"]).optional(), preview: z.literal(true).optional(), confirm: z.number().int().min(0).optional(), cancel: z.literal(true).optional() })
-            .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both"),
+            .strictObject({
+              targetId: z.string().min(1),
+              phase: z.enum(["deactivate", "purge"]).optional(),
+              preview: z.literal(true).optional(),
+              confirm: z.number().int().min(0).optional(),
+              cancel: z.literal(true).optional(),
+              forget: z.array(z.string().min(1).max(256)).min(1).max(100).optional(),
+            })
+            .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both")
+            .refine((b) => !b.forget || (!b.preview && !b.cancel && b.confirm === undefined), "forget goes alone"),
         },
         async (ctx) => {
           const s = stateOf(ctx.context);
           if (!s) throw new Error("[scim] not initialised");
           if (!options.decommission) throw new APIError("BAD_REQUEST", { message: "[scim] decommissioning needs the plugin's `decommission: true` option (and its table)" });
-          const { targetId, preview, confirm, cancel } = ctx.body;
+          const { targetId, preview, confirm, cancel, forget } = ctx.body;
           const target = await s.source.get(targetId);
           if (!target) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           if (!options.targets.some((t) => t.id === targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId} is an organization's: decommission it through the registry` });
+          if (forget) {
+            const forgotten = await s.box.forgetAccounts(targetId, forget, "server");
+            if (forgotten === null) throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: accounts are forgotten only while a decommission runs, or once it's complete` });
+            await s.box.audit.record({ targetId, organizationId: null, actor: "server", action: "decommission.forgot", detail: { userIds: [...new Set(forget)], forgotten } });
+            kick(s, targetId, DECOMMISSION_KICK);
+            return ctx.json({ forgotten, decommission: await s.box.decommissionStatus(target) });
+          }
           if (cancel) {
             if (!(await s.box.cancelDecommission(targetId, "server")))
               throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: no decommission is running that can be cancelled (a complete one, or a purge, can't be)` });

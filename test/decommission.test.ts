@@ -190,6 +190,35 @@ describe("decommissioning a target", () => {
     expect(h.app.users.get(adaAt.id)?.active).toBe(true);
   });
 
+  it("an account it can't get through, dealt with at the app by hand, can be forgotten: then it completes", async () => {
+    const { h, ada } = await marked();
+    const adaAt = appUsers(h).find((u) => u.externalId === ada.id)!;
+    for (let i = 0; i < 10; i++) for (const method of ["PATCH", "PUT"]) h.app.failOn(method, new RegExp(`^/Users/${adaAt.id}$`), { status: 400, detail: "can't" });
+    const decommission = (body: Record<string, unknown>) => h.auth.api.scimProvisioningDecommission({ body: { targetId: "app", ...body } as never });
+    await expect(decommission({ forget: [ada.id] })).rejects.toThrow(/only while a decommission runs/);
+    await start(h, 3);
+    const unmarked = unmarkedBox(h);
+    await drive(h, () => unmarked.runDue(200), reaches(h, "blocked"));
+    await expect(decommission({ forget: [ada.id], cancel: true })).rejects.toThrow(/forget goes alone/);
+    expect(await decommission({ forget: [ada.id, ada.id] })).toMatchObject({ forgotten: 1 });
+    await drive(h, () => unmarked.runDue(200), reaches(h, "complete"));
+    // Left at the app as it was: someone dealt with it there.
+    expect(h.app.users.get(adaAt.id)?.active).toBe(true);
+  });
+
+  it("estimates when it completes, at its pace so far", async () => {
+    const { h, ada } = await marked();
+    const adaAt = appUsers(h).find((u) => u.externalId === ada.id)!;
+    for (let i = 0; i < 10; i++) for (const method of ["PATCH", "PUT"]) h.app.failOn(method, new RegExp(`^/Users/${adaAt.id}$`), { status: 503 });
+    const unmarked = unmarkedBox(h);
+    await unmarked.startDecommission("app", "server");
+    expect(await stateOf(h)).toMatchObject({ estimatedCompletionAt: null });
+    await untilOff(h, unmarked, ada.id);
+    const status = (await stateOf(h)) as unknown as { state: string; accounts: number; estimatedCompletionAt: string | null };
+    expect(status).toMatchObject({ state: "running", accounts: 1 });
+    expect(new Date(status.estimatedCompletionAt as string).getTime()).toBeGreaterThan(Date.now());
+  });
+
   it("isn't complete while a group is still to be emptied", async () => {
     const { h } = await marked();
     for (let i = 0; i < 40; i++) h.app.failOn("PUT", /^\/Groups\//, { status: 503 });

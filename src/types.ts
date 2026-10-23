@@ -400,6 +400,7 @@ export type AuditAction =
   | "decommission.started"
   | "decommission.cancelled"
   | "decommission.completed"
+  | "decommission.forgot"
   | "purge.started"
   | "purge.completed";
 
@@ -417,7 +418,7 @@ export interface AuditEvent {
    * `type`, `url` (as the API shows it) and `enabled`; for target.updated, `changed` (of
    * `settings`, `credentials`, `enabled`), `url` and `enabled`; for target.deleted, `abandoned`
    * (`accounts`, `groups`); for the decommission ones, `accounts` and `groups` (to go, or, after a
-   * cancel, still active), or `total` and `groupsTotal` when complete.
+   * cancel, still active), or `total` and `groupsTotal` when complete; for decommission.forgot, `userIds` and how many were `forgotten`.
    */
   detail: Record<string, unknown>;
 }

@@ -1981,7 +1981,31 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       else if (moved(row, target) || (bad > 0 && bad >= others)) state = "blocked";
     }
     const iso = (d: unknown) => (d ? new Date(d as string).toISOString() : null);
-    return { phase: row.phase, state, accounts, groups, total: row.total, groupsTotal: row.groupsTotal, startedAt: iso(row.startedAt), startedBy: row.startedBy, completedAt: iso(row.completedAt), cancelledAt: iso(row.cancelledAt) };
+    // At the pace so far: the accounts done since it started, and those left.
+    let estimatedCompletionAt: string | null = null;
+    const done = row.total - accounts;
+    const elapsed = Date.now() - new Date(row.startedAt).getTime();
+    if (state === "running" && done > 0 && accounts > 0 && elapsed > 0) estimatedCompletionAt = new Date(Date.now() + (accounts * elapsed) / done).toISOString();
+    return { phase: row.phase, state, accounts, groups, total: row.total, groupsTotal: row.groupsTotal, startedAt: iso(row.startedAt), startedBy: row.startedBy, completedAt: iso(row.completedAt), cancelledAt: iso(row.cancelledAt), estimatedCompletionAt };
+  }
+
+  /**
+   * Accounts a decommission (or purge) can't get through, and that someone has dealt with at the
+   * app by hand (an account the app won't deactivate, or delete): forgotten here, their links and
+   * jobs at this target removed, so it can complete. Only while one is running or complete. Returns
+   * how many links were removed, or null if there's no such decommission. The caller records it.
+   */
+  async function forgetAccounts(targetId: string, userIds: string[], by: string): Promise<number | null> {
+    const row = await decommissionOf(targetId);
+    if (row?.state !== "running" && row?.state !== "complete") return null;
+    let forgotten = 0;
+    for (const userId of new Set(userIds)) {
+      const key = keyOf(targetId, userId);
+      forgotten += await dropLink(key);
+      await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "key", value: key }] });
+    }
+    log.warn(`[scim] ${targetId}: ${forgotten} accounts forgotten by ${by}, left at the app as they are: ${[...new Set(userIds)].join(", ")}`);
+    return forgotten;
   }
 
   /** A target's accounts, a page at a time in user id order (`after`: the last page's `next`). */
@@ -1998,5 +2022,5 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return adapter.updateMany({ model: JOB_MODEL, where: [{ field: "targetId", value: targetId }], update: { nextAttemptAt: new Date(), failed: false } });
   }
 
-  return { audit, enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, startPurge, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
+  return { audit, forgetAccounts, enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, startPurge, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
 }

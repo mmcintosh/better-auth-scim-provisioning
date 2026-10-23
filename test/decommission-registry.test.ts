@@ -170,4 +170,11 @@ describe("decommissioning an organization's target", () => {
     const { admin, decommission } = await setup({ organizationRoles: ["owner"], decommissionRoles: ["owner", "admin"] });
     expect(await status(decommission(admin.headers, { preview: true }))).toBe(403);
   });
+
+  it("an owner can forget an account it can't get through; an admin can't", async () => {
+    const { owner, admin, decommission } = await setup();
+    await decommission(owner.headers, { confirm: 2 });
+    expect(await status(decommission(admin.headers, { forget: [admin.id] }))).toBe(403);
+    expect(await decommission(owner.headers, { forget: [admin.id] })).toMatchObject({ forgotten: 1 });
+  });
 });
