@@ -396,7 +396,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           const order = (r: TargetRow) => `${new Date(r.createdAt).toISOString()}|${r.id}`;
           const first = all.sort((a, b) => (order(a) < order(b) ? -1 : order(a) > order(b) ? 1 : 0))[0];
           if (first && first.id !== row.id) {
-            await adapter.delete({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }] });
+            await adapter.deleteMany({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }] });
             return replay(first);
           }
         }
