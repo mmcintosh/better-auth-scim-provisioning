@@ -199,6 +199,8 @@ export function entraIdClient(target: Target, owns?: AttributeFields | null): En
     if (owns?.title || Object.hasOwn(user, "title")) body.jobTitle = user.title ?? null;
     if (owns?.phone || types.has("work")) body.businessPhones = phone("work") ? [phone("work")] : [];
     if (owns?.mobile || types.has("mobile")) body.mobilePhone = phone("mobile");
+    // Only when sent: one that wasn't a language tag was left out, and stays as it is.
+    if (Object.hasOwn(user, "preferredLanguage")) body.preferredLanguage = user.preferredLanguage ?? null;
     const address = user.addresses?.find((a) => !a.type || a.type === "work");
     const theirs = { streetAddress: "streetAddress", locality: "city", region: "state", postalCode: "postalCode", country: "country" } as const;
     for (const part of ADDRESS_PARTS) if (owns?.[part] || address?.[part] !== undefined) body[theirs[part]] = address?.[part] ?? null;

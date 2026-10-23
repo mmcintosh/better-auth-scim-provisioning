@@ -10,7 +10,7 @@
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthEndpoint, sensitiveSessionMiddleware } from "better-auth/api";
 import * as z from "zod";
-import { type Adapter, clientFor, DECOMMISSION_MODEL, GROUP_LINK_MODEL, JOB_MODEL, LINK_MODEL, PURGE_CONFIRM_ABOVE } from "./outbox";
+import { type Adapter, clientFor, credentialsMarkerKey, DECOMMISSION_MODEL, jwtExpiry, GROUP_LINK_MODEL, JOB_MODEL, LINK_MODEL, PURGE_CONFIRM_ABOVE } from "./outbox";
 import {
   assemble,
   credentialsKind,
@@ -66,10 +66,12 @@ export interface RegistryHost {
           | {
               state(targetId: string): Promise<"running" | "complete" | "cancelled" | null>;
               status(targetId: string): Promise<unknown>;
-              start(targetId: string, by: string): Promise<void>;
-              purge(targetId: string, by: string): Promise<void>;
+              /** True if this call started it (not one that was already under way). */
+              start(targetId: string, by: string): Promise<boolean>;
+              purge(targetId: string, by: string): Promise<boolean>;
               row(targetId: string): Promise<{ phase: "deactivate" | "purge"; state: "running" | "complete" | "cancelled" } | null>;
               cancel(targetId: string, by: string): Promise<boolean>;
+              forget(targetId: string, userIds: string[], by: string): Promise<{ forgotten: string[]; skipped: string[] } | null>;
             }
           | undefined;
       }
@@ -270,7 +272,11 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
       }
     }
     if (issues.length) throw refuse("BAD_REQUEST", "invalid target", issues);
-    return { settings: settings.data as StoredSettings, credentials: credentials.data as StoredCredentials };
+    const c = credentials.data as StoredCredentials;
+    // A token that's a JWT says when it expires: kept in the settings, so the scheduled run's
+    // check reads it there instead of decrypting every target's credentials.
+    const own = (settings.data as StoredSettings).credentialsExpireAt === undefined ? jwtExpiry("token" in c ? c.token : "auth" in c && c.auth.type === "header" ? c.auth.value.split(" ").pop() : undefined) : null;
+    return { settings: { ...(settings.data as StoredSettings), ...(own ? { credentialsExpireAt: own.toISOString() } : {}) }, credentials: c };
   }
 
   const page = z.object({ organizationId: z.string().min(1).max(256).optional(), limit: z.coerce.number().int().min(1).max(500).optional(), offset: z.coerce.number().int().min(0).optional() }).optional();
@@ -438,6 +444,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         // only in case, so these can't reach another's rows on a case-insensitive database.
         await adapter.deleteMany({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }] });
         for (const model of [JOB_MODEL, LINK_MODEL, GROUP_LINK_MODEL, ...(instance(ctx).decommission ? [DECOMMISSION_MODEL] : [])]) await adapter.deleteMany({ model, where: [{ field: "targetId", value: row.targetId }] });
+        await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "key", value: credentialsMarkerKey(row.targetId) }] });
         await record(ctx, actor, row, "target.deleted", { abandoned });
         audit(ctx, actor, `deleted target ${row.targetId} of organization ${row.organizationId}${abandoned.accounts || abandoned.groups ? `, leaving ${abandoned.accounts} active accounts and ${abandoned.groups} groups at the app` : ""}`);
         return ctx.json({ deleted: true, abandoned });
@@ -497,8 +504,16 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         method: "POST",
         use: [sensitiveSessionMiddleware],
         body: z
-          .strictObject({ id: z.string().min(1).max(100), phase: z.enum(["deactivate", "purge"]).optional(), preview: z.literal(true).optional(), confirm: z.number().int().min(0).optional(), cancel: z.literal(true).optional() })
-          .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both"),
+          .strictObject({
+            id: z.string().min(1).max(100),
+            phase: z.enum(["deactivate", "purge"]).optional(),
+            preview: z.literal(true).optional(),
+            confirm: z.number().int().min(0).optional(),
+            cancel: z.literal(true).optional(),
+            forget: z.array(z.string().min(1).max(256)).min(1).max(100).optional(),
+          })
+          .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both")
+          .refine((b) => !b.forget || (!b.preview && !b.cancel && b.confirm === undefined), "forget goes alone"),
       },
       async (ctx) => {
         const preview = ctx.body.preview === true;
@@ -508,6 +523,16 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const d = i.decommission;
         if (!d) throw refuse("BAD_REQUEST", "decommissioning isn't enabled (the plugin's decommission option)");
         const by = `user:${actor.userId}`;
+        if (ctx.body.forget) {
+          const done = await d.forget(row.targetId, ctx.body.forget, by);
+          if (done === null) throw refuse("BAD_REQUEST", "accounts are forgotten only while a decommission runs, or once it's complete");
+          if (done.forgotten.length) {
+            await record(ctx, actor, row, "decommission.forgot", { userIds: done.forgotten, skipped: done.skipped.length });
+            audit(ctx, actor, `forgot ${done.forgotten.length} accounts of target ${row.targetId} of organization ${row.organizationId}, left at the app as they are: ${done.forgotten.join(", ")}`);
+          }
+          i.kick(row.targetId);
+          return ctx.json({ forgotten: done.forgotten.length, skipped: done.skipped, decommission: await d.status(row.targetId) });
+        }
         if (ctx.body.cancel) {
           if (!(await d.cancel(row.targetId, by))) throw refuse("BAD_REQUEST", "no decommission is running that can be cancelled (a complete one, or a purge, can't be)");
           const left = await i.counts(row.targetId);
@@ -526,9 +551,10 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
             if (!truthy(row.enabled)) throw refuse("BAD_REQUEST", "the target is disabled: enable it first");
             if (!(await readable(ctx, row))) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give them again first");
             if (counts.accounts > PURGE_CONFIRM_ABOVE && ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)`);
-            await d.purge(row.targetId, by);
-            await record(ctx, actor, row, "purge.started", counts);
-            audit(ctx, actor, `started purging target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts and ${counts.groups} groups to delete`);
+            if (await d.purge(row.targetId, by)) {
+              await record(ctx, actor, row, "purge.started", counts);
+              audit(ctx, actor, `started purging target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts and ${counts.groups} groups to delete`);
+            }
           } else await d.purge(row.targetId, by);
           i.kick(row.targetId);
           return ctx.json({ decommission: await d.status(row.targetId) });
@@ -542,9 +568,10 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           if (!truthy(row.enabled)) throw refuse("BAD_REQUEST", "the target is disabled: enable it first");
           if (!(await readable(ctx, row))) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give them again first");
           if (ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)`);
-          await d.start(row.targetId, by);
-          await record(ctx, actor, row, "decommission.started", counts);
-          audit(ctx, actor, `started decommissioning target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
+          if (await d.start(row.targetId, by)) {
+            await record(ctx, actor, row, "decommission.started", counts);
+            audit(ctx, actor, `started decommissioning target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
+          }
         } else await d.start(row.targetId, by);
         i.kick(row.targetId);
         return ctx.json({ decommission: await d.status(row.targetId) });

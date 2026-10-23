@@ -71,6 +71,8 @@ const targetSchema = z.strictObject({
   mapUser: z.function().optional(),
   enterprise: enterpriseOption.optional(),
   attributes: attributesOption.optional(),
+  roles: z.boolean().optional(),
+  entitlements: z.function().optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
   update: z.enum(["put", "patch"]).optional(),
   compat: z
@@ -89,7 +91,7 @@ const targetSchema = z.strictObject({
   roleGroupName: z.function().optional(),
   timeoutMs: z.number().int().min(100).max(120_000).optional(),
   maxRequestsPerMinute: z.number().int().min(1).max(100_000).optional(),
-  credentialsExpireAt: z.union([z.date(), z.iso.datetime({ offset: true })]).optional(),
+  credentialsExpireAt: z.union([z.date(), z.iso.datetime({ offset: true }), z.iso.date()]).optional(),
   decommission: z.boolean().optional(),
   fetch: z.function().optional(),
 });
@@ -109,7 +111,8 @@ const optionsSchema = z.strictObject({
         .refine((t) => t.type === "entra-id" || t.entra === undefined, { message: "entra is for entra-id targets", path: ["entra"] })
         .refine((t) => t.type !== "entra-id" || (!t.groups && !t.teamGroups && !t.roleGroups), "groups aren't supported for entra-id targets yet (groups, teamGroups, roleGroups)")
         .refine((t) => t.type === undefined || t.type === "scim" || t.update === undefined, { message: "update is for scim targets only", path: ["update"] })
-        .refine((t) => t.type === undefined || t.type === "scim" || t.compat === undefined, { message: "compat is for scim targets only", path: ["compat"] }),
+        .refine((t) => t.type === undefined || t.type === "scim" || t.compat === undefined, { message: "compat is for scim targets only", path: ["compat"] })
+        .refine((t) => t.type === undefined || t.type === "scim" || t.type === "webhook" || (!t.roles && t.entitlements === undefined), "roles and entitlements are for scim and webhook targets"),
     )
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
   retry: z.strictObject({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
@@ -202,7 +205,10 @@ function membersIn(returned: unknown): { userId: string; organizationId: string 
     !!m && typeof m === "object" && typeof (m as { userId?: unknown }).userId === "string" && typeof (m as { organizationId?: unknown }).organizationId === "string" && "role" in m;
   if (isMember(returned)) return [returned];
   const wrapped = (returned as { member?: unknown } | null)?.member;
-  return isMember(wrapped) ? [wrapped] : [];
+  if (isMember(wrapped)) return [wrapped];
+  // A new organization comes back with its members (its creator).
+  const list = (returned as { members?: unknown } | null)?.members;
+  return Array.isArray(list) ? list.filter(isMember) : [];
 }
 
 /**
@@ -231,6 +237,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
     background: (p: Promise<unknown>) => void;
     /** A user's groups at each target, noted just before they're deleted (see delete.before). */
     deleting: Map<string, { at: number; groups: Map<string, GroupRef[]> }>;
+    /** An organization's members, noted just before it's deleted: their roles at targets that send them change. */
+    deletingOrganizations: Map<string, { at: number; userIds: string[] }>;
   }
   const states = new WeakMap<object, State>();
   const stateOf = (context: { adapter: unknown }) => states.get(context.adapter as object);
@@ -540,6 +548,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
         adapter: ctx.adapter as unknown as Adapter,
         background: (p) => ctx.runInBackground(p.catch((e) => ctx.logger.error("[scim] delivery failed", e))),
         deleting: new Map(),
+        deletingOrganizations: new Map(),
       };
       states.set(ctx.adapter as object, s);
       const { box, deleting } = s;
@@ -590,6 +599,26 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
       };
     },
     hooks: {
+      // Targets of no organization that send roles: a deleted organization's members lose theirs,
+      // and the members are gone after the delete, so they're noted before it.
+      before: [
+        {
+          matcher: (ctx) => ctx.path === "/organization/delete" && options.targets.some((t) => !t.organizationId && t.roles),
+          handler: createAuthMiddleware(async (ctx) => {
+            const s = stateOf(ctx.context);
+            const orgId = (ctx.body as { organizationId?: unknown } | undefined)?.organizationId;
+            if (!s || typeof orgId !== "string") return;
+            try {
+              const members = await findAll<{ userId: string; organizationId: string }>(s.adapter, "member", [{ field: "organizationId", value: orgId }], (m) => m.organizationId === orgId);
+              const now = Date.now();
+              for (const [k, v] of s.deletingOrganizations) if (now - v.at > 60_000) s.deletingOrganizations.delete(k);
+              s.deletingOrganizations.set(orgId, { at: now, userIds: members.map((m) => m.userId) });
+            } catch (e) {
+              ctx.context.logger.error(`[scim] could not note the members of organization ${orgId} before its delete: their roles are updated at their next change or a reconcile`, e);
+            }
+          }),
+        },
+      ],
       after: [
         {
           // Membership changes go through the organization plugin's own adapter calls, which
@@ -598,7 +627,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           // targets of that organization.
           matcher: (ctx) =>
             // Stored targets come and go at runtime, and all belong to an organization.
-            (!!options.registry || options.targets.some((t) => t.organizationId || t.groups || t.teamGroups || t.roleGroups)) &&
+            (!!options.registry || options.targets.some((t) => t.organizationId || t.groups || t.teamGroups || t.roleGroups || t.roles)) &&
             (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path) || ORGANIZATION_WRITES.has(ctx.path) || TEAM_WRITES.has(ctx.path)),
           handler: createAuthMiddleware(async (ctx) => {
             const returned = (ctx.context as { returned?: unknown }).returned;
@@ -615,7 +644,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             };
             const members = membersIn(returned);
             for (const m of members) {
-              await attempt(`user ${m.userId}`, async () => changed(s, m.userId, (await s.source.forOrganizations([m.organizationId])).filter((t) => t.organizationId === m.organizationId)));
+              // The organization's targets; and any other that sends roles, which just changed.
+              await attempt(`user ${m.userId}`, async () => changed(s, m.userId, (await s.source.forOrganizations([m.organizationId])).filter((t) => t.organizationId === m.organizationId || (!t.organizationId && t.roles === true))));
             }
             // Groups: the organization whose membership, roles, name or existence changed, and the
             // team that changed.
@@ -641,6 +671,13 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             // (never a burst at the app), and whatever doesn't finish there is delivered by the
             // scheduled run.
             if (ctx.path !== "/organization/delete" || typeof bodyOrg !== "string") return;
+            // Their roles there are gone, at targets of no organization that send them.
+            const noted = s.deletingOrganizations.get(bodyOrg);
+            s.deletingOrganizations.delete(bodyOrg);
+            if (noted) {
+              const sendRoles = options.targets.filter((t) => !t.organizationId && t.roles);
+              for (const userId of noted.userIds) await attempt(`user ${userId}`, () => changed(s, userId, sendRoles));
+            }
             const queued: [string, string][] = [];
             await attempt(`the members of deleted organization ${bodyOrg} for deprovisioning; run a reconcile`, async () => {
               for (const t of (await s.source.forOrganizations([bodyOrg])).filter((x) => x.organizationId === bodyOrg)) {
@@ -685,13 +722,14 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                       const target = await s.source.get(targetId);
                       return target ? s.box.decommissionStatus(target) : null;
                     },
-                    start: async (targetId, by) => void (await s.box.startDecommission(targetId, by)),
-                    purge: async (targetId, by) => void (await s.box.startPurge(targetId, by)),
+                    start: async (targetId, by) => (await s.box.startDecommission(targetId, by)).started,
+                    purge: async (targetId, by) => (await s.box.startPurge(targetId, by))?.started === true,
                     row: async (targetId) => {
                       const row = await s.box.decommissionOf(targetId);
                       return row ? { phase: row.phase, state: row.state } : null;
                     },
                     cancel: (targetId, by) => s.box.cancelDecommission(targetId, by),
+                    forget: (targetId, userIds, by) => s.box.forgetAccounts(targetId, userIds, by),
                   }
                 : undefined,
               audit: s.box.audit,
@@ -820,22 +858,38 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
        * says how many; starting needs `confirm` equal to the accounts it showed. The scheduled run
        * carries it on a page at a time until nothing of ours is active there (`scimProvisioningStatus`
        * shows it). `cancel: true`, before it completes, stops it and switches back on those still wanted.
+       * `forget: [userId, …]`: accounts it can't get through that you've dealt with at the app.
        */
       scimProvisioningDecommission: createAuthEndpoint.serverOnly(
         {
           method: "POST",
           body: z
-            .strictObject({ targetId: z.string().min(1), phase: z.enum(["deactivate", "purge"]).optional(), preview: z.literal(true).optional(), confirm: z.number().int().min(0).optional(), cancel: z.literal(true).optional() })
-            .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both"),
+            .strictObject({
+              targetId: z.string().min(1),
+              phase: z.enum(["deactivate", "purge"]).optional(),
+              preview: z.literal(true).optional(),
+              confirm: z.number().int().min(0).optional(),
+              cancel: z.literal(true).optional(),
+              forget: z.array(z.string().min(1).max(256)).min(1).max(100).optional(),
+            })
+            .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both")
+            .refine((b) => !b.forget || (!b.preview && !b.cancel && b.confirm === undefined), "forget goes alone"),
         },
         async (ctx) => {
           const s = stateOf(ctx.context);
           if (!s) throw new Error("[scim] not initialised");
           if (!options.decommission) throw new APIError("BAD_REQUEST", { message: "[scim] decommissioning needs the plugin's `decommission: true` option (and its table)" });
-          const { targetId, preview, confirm, cancel } = ctx.body;
+          const { targetId, preview, confirm, cancel, forget } = ctx.body;
           const target = await s.source.get(targetId);
           if (!target) throw new APIError("BAD_REQUEST", { message: `[scim] unknown target ${targetId}` });
           if (!options.targets.some((t) => t.id === targetId)) throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId} is an organization's: decommission it through the registry` });
+          if (forget) {
+            const done = await s.box.forgetAccounts(targetId, forget, "server");
+            if (done === null) throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: accounts are forgotten only while a decommission runs, or once it's complete` });
+            if (done.forgotten.length) await s.box.audit.record({ targetId, organizationId: null, actor: "server", action: "decommission.forgot", detail: { userIds: done.forgotten, skipped: done.skipped.length } });
+            kick(s, targetId, DECOMMISSION_KICK);
+            return ctx.json({ forgotten: done.forgotten.length, skipped: done.skipped, decommission: await s.box.decommissionStatus(target) });
+          }
           if (cancel) {
             if (!(await s.box.cancelDecommission(targetId, "server")))
               throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: no decommission is running that can be cancelled (a complete one, or a purge, can't be)` });
@@ -853,9 +907,11 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               if (row?.state !== "complete") throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: a purge comes after a complete decommission` });
               if (counts.accounts > PURGE_CONFIRM_ABOVE && confirm !== counts.accounts)
                 throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)` });
-              await s.box.startPurge(targetId, "server");
-              ctx.context.logger.warn(`[scim] ${targetId}: purge started (by the server): ${counts.accounts} accounts and ${counts.groups} groups to delete`);
-              await s.box.audit.record({ targetId, organizationId: null, actor: "server", action: "purge.started", detail: counts });
+              // Only the call that started it says so (two at once: one starts, the other nudges).
+              if ((await s.box.startPurge(targetId, "server"))?.started) {
+                ctx.context.logger.warn(`[scim] ${targetId}: purge started (by the server): ${counts.accounts} accounts and ${counts.groups} groups to delete`);
+                await s.box.audit.record({ targetId, organizationId: null, actor: "server", action: "purge.started", detail: counts });
+              }
             } else await s.box.startPurge(targetId, "server");
             kick(s, targetId, DECOMMISSION_KICK);
             return ctx.json({ decommission: await s.box.decommissionStatus(target) });
@@ -868,9 +924,10 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             if (target.decommission !== true) throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: mark it \`decommission: true\` in its options and deploy that first` });
             if (confirm !== counts.accounts)
               throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)` });
-            await s.box.startDecommission(targetId, "server");
-            ctx.context.logger.warn(`[scim] ${targetId}: decommission started (by the server): ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
-            await s.box.audit.record({ targetId, organizationId: null, actor: "server", action: "decommission.started", detail: counts });
+            if ((await s.box.startDecommission(targetId, "server")).started) {
+              ctx.context.logger.warn(`[scim] ${targetId}: decommission started (by the server): ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
+              await s.box.audit.record({ targetId, organizationId: null, actor: "server", action: "decommission.started", detail: counts });
+            }
           } else await s.box.startDecommission(targetId, "server");
           kick(s, targetId, DECOMMISSION_KICK);
           return ctx.json({ decommission: await s.box.decommissionStatus(target) });

@@ -95,4 +95,52 @@ describe("credentials that expire", () => {
       vi.useRealTimers();
     }
   });
+
+  it("every process together alerts once a day, and a higher level the same day still goes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-11-02T08:00:00Z"));
+      const h = await createHost();
+      const app = mockScim();
+      const onFailure = vi.fn<(f: DeliveryFailure) => void>();
+      const log = logger();
+      const boxOf = () => outbox({ targets: [{ id: "t", url: app.url, token: app.token, fetch: app.fetch, credentialsExpireAt: "2026-11-09T12:00:00Z" }], onFailure }, h.ctx.adapter as unknown as Adapter, log);
+      // 7.2 days out: a warning, from one of two processes.
+      await boxOf().runDue();
+      await boxOf().runDue();
+      expect(log.warn).toHaveBeenCalledTimes(1);
+      expect(onFailure).not.toHaveBeenCalled();
+      // The same day, 6.7 days out: the alert goes, once.
+      vi.setSystemTime(new Date("2026-11-02T20:00:00Z"));
+      await boxOf().runDue();
+      await boxOf().runDue();
+      expect(onFailure).toHaveBeenCalledTimes(1);
+      // The marker is in no target's counts.
+      expect((await boxOf().status(["t"]))[0]).toMatchObject({ queued: 0, waiting: 0, stuck: 0, failed: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a bearer token given as auth is read too; a stored target's JWT expiry is kept in its settings", async () => {
+    expect(credentialsExpiry({ id: "a", url: "https://app.example.com/scim/v2", auth: { type: "bearer", token: jwt({ exp: 1_900_000_000 }) } })?.getTime()).toBe(1_900_000_000_000);
+    const remote = mockScim();
+    const h = await createHost({ targets: [], registry: { fetch: remote.fetch } });
+    const up = await h.auth.api.signUpEmail({ body: { email: "olive@example.com", password: "correct-horse-battery", name: "Olive" } });
+    await h.ctx.internalAdapter.updateUser(up.user.id, { emailVerified: true });
+    const res = await h.auth.api.signInEmail({ body: { email: "olive@example.com", password: "correct-horse-battery" }, asResponse: true });
+    const headers = new Headers({ cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") });
+    const acme = (await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers }))!;
+    const { target } = await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, settings: { url: "https://app.example.com/scim/v2" }, credentials: { token: jwt({ exp: 1_900_000_000 }) } }, headers });
+    expect(target.settings).toMatchObject({ credentialsExpireAt: new Date(1_900_000_000_000).toISOString() });
+    // Expiring soon: alerted, which notes it; removing the target removes the note.
+    const soon = await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, settings: { url: "https://app.example.com/scim/v2" }, credentials: { token: jwt({ exp: Math.floor(Date.now() / 1000) + 3 * 86_400 }) } }, headers });
+    await h.auth.api.scimProvisioningRun({ body: {} });
+    const marker = () => h.ctx.adapter.count({ model: "scimProvisioningJob", where: [{ field: "key", value: `${soon.target.id}:credentials:alert` }] });
+    expect(await marker()).toBe(1);
+    await h.auth.api.scimProvisioningDeleteTarget({ body: { id: soon.target.id }, headers });
+    expect(await marker()).toBe(0);
+    // A date alone is a date: midnight UTC.
+    expect(credentialsExpiry({ id: "a", url: "https://app.example.com/scim/v2", token: "t", credentialsExpireAt: "2027-01-01" })?.toISOString()).toBe("2027-01-01T00:00:00.000Z");
+  });
 });

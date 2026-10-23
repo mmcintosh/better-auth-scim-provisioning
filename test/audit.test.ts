@@ -129,4 +129,36 @@ describe("the audit history", () => {
     await expect(h.auth.api.scimProvisioningAuditEvents({ body: {} })).rejects.toThrow(/needs the plugin's `audit` option/);
     expect(await h.ctx.adapter.count({ model: "scimProvisioningAuditEvent" }).catch(() => "no table")).toBe("no table");
   });
+
+  it("keeps a long detail whole: a long list keeps its first items and says how many more", async () => {
+    const h = await createHost({ decommission: true, audit: true, targets: [{ id: "app", decommission: true, organizationId: "org-1" }] });
+    await h.ctx.adapter.create({ model: "organization", data: { id: "org-1", name: "One", slug: "one", createdAt: new Date() } });
+    const ids = Array.from({ length: 100 }, (_, i) => `user_${crypto.randomUUID()}_${i}`);
+    await h.ctx.adapter.create({ model: "scimProvisioningDecommission", data: { targetId: "app", phase: "deactivate", state: "running", cursor: "s:", revision: 0, total: 100, groupsTotal: 0, startedAt: new Date(), startedBy: "server", updatedAt: new Date() } });
+    for (const id of ids) {
+      await h.ctx.adapter.create({ model: "scimProvisioningLink", data: { key: `app:${id}`, targetId: "app", userId: id, remoteId: `r-${id}`, userName: `${id}@example.com`, active: true, syncedAt: new Date() } });
+      await h.ctx.adapter.create({ model: "scimProvisioningJob", data: { key: `app:${id}`, targetId: "app", userId: id, version: 1, attempts: 1, nextAttemptAt: new Date(), lockedUntil: new Date("2000-01-01"), failed: true, createdAt: new Date(), updatedAt: new Date() } });
+    }
+    expect(await h.auth.api.scimProvisioningDecommission({ body: { targetId: "app", forget: ids } })).toMatchObject({ forgotten: 100, skipped: [] });
+    const { items } = await h.auth.api.scimProvisioningAuditEvents({ body: { targetId: "app" } });
+    const forgot = items.find((e) => e.action === "decommission.forgot")!;
+    expect(forgot.detail).toMatchObject({ userIds: ids.slice(0, 20), userIdsMore: 80, skipped: 0 });
+    // A target in code: no organization, whatever it's limited to; its completion too.
+    expect(forgot.organizationId).toBeNull();
+    // Its step (the row was written by hand here): starting again while it runs queues it.
+    await h.auth.api.scimProvisioningDecommission({ body: { targetId: "app", confirm: 0 } });
+    for (let i = 0; i < 5; i++) {
+      await h.auth.api.scimProvisioningRun({ body: {} });
+      await h.ctx.adapter.updateMany({ model: "scimProvisioningJob", where: [{ field: "targetId", value: "app" }], update: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    }
+    const after = await h.auth.api.scimProvisioningAuditEvents({ body: { targetId: "app" } });
+    expect(after.items.find((e) => e.action === "decommission.completed")).toMatchObject({ actor: "system", organizationId: null });
+  });
+
+  it("two starts at once record one start", async () => {
+    const h = await createHost({ decommission: true, audit: true, targets: [{ id: "app", decommission: true }] });
+    await Promise.all([0, 1].map(() => h.auth.api.scimProvisioningDecommission({ body: { targetId: "app", confirm: 0 } })));
+    const { items } = await h.auth.api.scimProvisioningAuditEvents({ body: { targetId: "app" } });
+    expect(items.filter((e) => e.action === "decommission.started")).toHaveLength(1);
+  });
 });
