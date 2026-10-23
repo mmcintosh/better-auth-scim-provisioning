@@ -215,6 +215,15 @@ const { items, next } = await auth.api.scimProvisioningAuditEvents({ body: { tar
 
 `action` is `target.created`, `target.updated` or `target.deleted` (organizations' stored targets), `decommission.started`, `decommission.cancelled`, `decommission.completed`, `decommission.forgot`, `purge.started` or `purge.completed`; the list can grow in a minor release. `actor` is `user:<id>` for the registry's routes (with `detail.hostAdministrator` for a host administrator), `server` for `auth.api` calls from your code, and `system` for the plugin itself (a decommission completing). `detail` says what: the URL (as the API shows it) and `enabled` of a new target; which of `settings`, `credentials` and `enabled` changed; what a delete left at the app (`abandoned`); a decommission's counts. With the registry, an organization's administrators read their own organization's at `targets/events` (see [Organizations' own targets](#organizations-own-targets)). `keepDays` has the scheduled run remove older events, hourly. `onEvent` gets each event as it's recorded, with a few seconds to take it; an error it throws is logged, never in the way. An event is written just after the change it records: if that write fails, it's logged as an error (the change's own `warn` line is still there), and the change stands.
 
+**A long history.** The table's fields are indexed one by one (Better Auth's schema can't declare an index on two fields), so listing one target's or one organization's events reads all of them to sort by time. Once a target or an organization has tens of thousands, add an index on each with `key`, in a migration of your own (with your table's names, if your adapter renames them):
+
+```sql
+CREATE INDEX "scimProvisioningAuditEvent_targetId_key" ON "scimProvisioningAuditEvent" ("targetId", "key");
+CREATE INDEX "scimProvisioningAuditEvent_organizationId_key" ON "scimProvisioningAuditEvent" ("organizationId", "key");
+-- MySQL: the same, with `backticks` for the double quotes.
+-- MongoDB: db.scimProvisioningAuditEvent.createIndex({ targetId: 1, key: -1 }), and the same for organizationId.
+```
+
 ## Who is provisioned, and what's sent
 
 A user is at a target when their email is verified (unless `requireVerifiedEmail: false`), they aren't banned (the admin plugin), they're a member of `organizationId` if one is set, and `include` returns true (if set). Otherwise they're deprovisioned there, if they had been provisioned. A timed ban is lifted at the app when it runs out.
@@ -265,7 +274,7 @@ scimProvisioning({
 });
 ```
 
-- **`roles: true`** sends the user's organization roles as SCIM `roles`. At an organization's target, their roles there, as `{ value: "admin", type: "organization" }`; at any other, their roles in every organization they're in, each with the organization's slug as `type` (`{ value: "admin", type: "acme" }`). They follow membership changes made through the organization plugin; a renamed slug shows at the user's next delivery, or a reconcile. Organizations' own targets can set it too.
+- **`roles: true`** sends the user's organization roles as SCIM `roles`. At an organization's target, their roles there, as `{ value: "admin", type: "organization" }`; at any other, their roles in every organization they're in, each with the organization's slug as `type` (`{ value: "admin", type: "acme" }`). They follow membership changes made through the organization plugin; a renamed slug shows at the user's next delivery, or a reconcile. A user's first 1,000 organizations are read (each delivery reads them in one query, as for groups); a user in more is logged at `warn`, and the rest's roles aren't sent. Organizations' own targets can set it too.
 - **`entitlements`** is a function of the user that returns what they're entitled to (a licence, a plan), sent as SCIM `entitlements` (`{ value }`, duplicates and blanks dropped). It's called at each delivery of the user, so when what it reads changes outside the user (a billing system), queue them (`scimProvisioningQueue`). In code only: a function can't be stored.
 - None (no roles, `[]`) clears them at the app, as for the attributes above. A `mapUser` that sets `roles` or `entitlements` itself takes precedence.
 - SCIM apps and webhooks only: Google Workspace and Entra ID have no place for them (Entra's app roles are assignments, not attributes).

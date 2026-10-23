@@ -562,7 +562,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   async function scimRolesOf(target: Target, userId: string): Promise<NonNullable<ScimUser["roles"]>> {
     const where: Where[] = [{ field: "userId", value: userId }];
     if (target.organizationId) where.push({ field: "organizationId", value: target.organizationId });
-    const members = ((await adapter.findMany({ model: "member", where, limit: 1000 })) as { userId: string; organizationId: string; role?: string | null }[]).filter(
+    const members = (
+      await capped<{ userId: string; organizationId: string; role?: string | null }>(adapter.findMany({ model: "member", where, limit: 1000 }), `user ${userId}: organizations`, "the rest's roles aren't sent")
+    ).filter(
       (m) => m.userId === userId && (!target.organizationId || m.organizationId === target.organizationId),
     );
     const slugs = new Map<string, string>();
@@ -1483,10 +1485,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return null;
   }
 
-  /** Rows up to a cap, with a warning when it's reached: beyond it, groups would be skipped silently. */
-  async function capped<T>(rows: Promise<unknown[]>, what: string, cap = 1000): Promise<T[]> {
+  /** Rows up to a cap, with a warning when it's reached: beyond it, groups (or roles) would be skipped silently. */
+  async function capped<T>(rows: Promise<unknown[]>, what: string, rest = "the rest's groups aren't updated", cap = 1000): Promise<T[]> {
     const got = (await rows) as T[];
-    if (got.length >= cap) log.warn(`[scim] ${what}: only the first ${cap} are taken into account; the rest's groups aren't updated`);
+    if (got.length >= cap) log.warn(`[scim] ${what}: only the first ${cap} are taken into account; ${rest}`);
     return got;
   }
 

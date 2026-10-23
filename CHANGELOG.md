@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed
+
+- **Roles**: a user in more than 1,000 organizations is logged at `warn` (the roles of those past the first 1,000 aren't sent), as groups already were, rather than cut short silently. The README says how to add two-field indexes to the audit table for a long history.
+
 ## [1.6.0] - 2026-10-23
 
 An audit history of target changes, warnings before credentials expire, more of RFC 7643's user attributes with roles and entitlements, and a decommission's estimated completion and forget.
