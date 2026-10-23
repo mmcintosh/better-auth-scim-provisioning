@@ -108,7 +108,7 @@ describe("decommissioning a target", () => {
     expect(h.app.requests).toEqual([]);
     const [job] = await h.jobs();
     expect(new Date(job!.nextAttemptAt as Date).getTime()).toBeGreaterThan(Date.now() + 60_000);
-    expect(await stateOf(h)).toMatchObject({ state: "frozen", accounts: 0 });
+    expect(await stateOf(h)).toMatchObject({ state: "frozen", accounts: 0, estimatedCompletionAt: null });
   });
 
   it("deactivates every account and empties every group, deleting nothing; then it's complete, and final", async () => {
