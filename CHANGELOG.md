@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-23
+
+Rate limits that hold a whole target and never count as failed attempts, with maxRequestsPerMinute pacing; and decommissioning a target: deactivate everything we made at an app before removing it, with preview, cancel, an optional purge, and the same for organizations' own targets.
+
 ### Added
 
 - **Decommissioning a target (`decommission`)**: deactivate every account and empty every group we made at an app before removing it, which until now left them all active. The plugin option `decommission: true` adds a table, `scimProvisioningDecommission`, for its progress (migrate after turning it on). Marking a target `decommission: true` freezes it (nothing sent, changes wait); `auth.api.scimProvisioningDecommission({ targetId, confirm })` then starts it, `confirm` being the number of accounts `preview: true` reported. It deactivates, whatever the target's `deprovision`, and empties groups without removing them. The scheduled run carries it on a page at a time, sweeping for accounts written behind its walk, until nothing of ours is active there and nothing is queued or failing. `scimProvisioningStatus` shows it on each target (`decommission`: `frozen`, `running`, `blocked`, `complete` or `cancelled`, with counts). `cancel: true` stops it before it completes and switches back on those still wanted; removing the mark after it started doesn't cancel it. `failures()` gains the kind `decommission`. An account another target at the same app still has (the same person provisioned through both) is left on, and only this target's link removed; so is a group another target of the organization at the same app uses, and a purge deletes neither. A target pointed at another app after its decommission started sends nothing there in its name (`blocked`, with an error logged). Starting it again while it runs queues its next step at once. A step is a page of 50 and about 60 queries, within D1's limit per invocation.
