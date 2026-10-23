@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-23
+
+A registry create that's safe to retry (requestId), a create answered 202 (RFC 9967) retried rather than failed, SCIM's names read in any case, the user's photo and the rest of RFC 7643's single-valued attributes, and indexes declared in the schema (migrate after upgrading).
+
 **Migrate after upgrading** (`npx auth migrate`, or regenerate your ORM's schema) to add three indexes. Nothing breaks before you do: Better Auth doesn't check indexes, and the plugin works without them, only slower (the audit history) or without the guarantee that two identical creates at once make one target (`requestId`). MongoDB's adapter makes them itself, on first use (the first write after the upgrade waits while it indexes what's there). In SQL (MySQL: backticks for the double quotes):
 
 ```sql
