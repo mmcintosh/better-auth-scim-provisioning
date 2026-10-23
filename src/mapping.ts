@@ -93,14 +93,27 @@ const textOf = (v: unknown): string | undefined => {
 };
 
 /** The attributes `attributes` can send, each read from a user field of that name by default. */
-export const ATTRIBUTE_NAMES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country", "preferredLanguage", "locale", "timezone", "userType"] as const;
+export const ATTRIBUTE_NAMES = [
+  "title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country", "preferredLanguage", "locale", "timezone", "userType",
+  "photo", "nickName", "profileUrl", "middleName", "honorificPrefix", "honorificSuffix",
+] as const;
 /**
  * What `true` reads: the attributes it read when it came (1.4). The four added since are named
  * (`{ timezone: "timezone" }`), so upgrading never starts sending, or clearing, what a host didn't ask for.
  */
 const TRUE_ATTRIBUTES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country"] as const;
 /** The single-valued attributes sent as they are (RFC 7643 §4.1.1). */
-const PLAIN = ["preferredLanguage", "locale", "timezone", "userType"] as const;
+const PLAIN = ["preferredLanguage", "locale", "timezone", "userType", "nickName", "profileUrl"] as const;
+/** The parts of `name` sent as they are (RFC 7643 §4.1.1), beside the given and family names mapUser sends. */
+const NAME_PARTS = ["middleName", "honorificPrefix", "honorificSuffix"] as const;
+/** An https URL (a photo, a profile): anything else is left out, not sent to be refused or shown. */
+const httpsUrl = (v: string) => {
+  try {
+    return new URL(v).protocol === "https:" && v.length <= 2048;
+  } catch {
+    return false;
+  }
+};
 /** A language tag (RFC 5646's shape, loosely): `en`, `en-CA`, `zh-Hant-TW`. */
 const LANGUAGE_TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
 /** A time zone the runtime knows by that name (its IANA data: `America/Toronto`, `UTC`, `CET`). */
@@ -118,6 +131,8 @@ const validFor: Record<(typeof PLAIN)[number], (v: string) => boolean> = {
   locale: (v) => LANGUAGE_TAG.test(v),
   timezone: validTimeZone,
   userType: (v) => v.length <= 256,
+  nickName: (v) => v.length <= 256,
+  profileUrl: httpsUrl,
 };
 export type AttributeName = (typeof ATTRIBUTE_NAMES)[number];
 
@@ -193,6 +208,32 @@ export function withAttributes(user: ProvisionedUser, fields: AttributeFields | 
     }
     out[name] = v;
     if (v === undefined) clears.push(name);
+  }
+  // The middle name and honorifics go in `name`, beside what mapUser put there.
+  if (NAME_PARTS.some((n) => fields[n])) {
+    const name = { ...scim.name };
+    for (const part of NAME_PARTS) {
+      if (!fields[part] || scim.name?.[part] !== undefined) continue;
+      const v = value(part);
+      if (v !== undefined && v.length > 256) {
+        invalid.push(part);
+        continue;
+      }
+      name[part] = v;
+      if (v === undefined) clears.push(`name.${part}`);
+    }
+    out.name = name;
+  }
+  // The photo (Better Auth's `image`, say), as SCIM's `photos`: an https URL only.
+  if (fields.photo && scim.photos === undefined) {
+    const v = value("photo");
+    if (v !== undefined && !httpsUrl(v)) {
+      invalid.push("photo");
+      delete out.photos;
+    } else {
+      out.photos = v === undefined ? undefined : [{ value: v, type: "photo", primary: true }];
+      if (v === undefined) clears.push("photos");
+    }
   }
   return { scim: out, clears, invalid };
 }

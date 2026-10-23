@@ -382,6 +382,12 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     // A change is written only over the row as read: an equality match on the long sealed text.
     await h.auth.api.scimProvisioningUpdateTarget({ body: { id: google.target.id, settings: { type: "google-workspace", name: "Workspace", google: { clientEmail: "sa@p.iam.gserviceaccount.com", adminEmail: "admin@example.com" } } }, headers });
     expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ settings: expect.objectContaining({ name: "Workspace" }) })]);
+    // A create with a requestId, twice at once: the unique target id makes it one (however the
+    // database refuses the second), and both get that target.
+    const twice = { organizationId: acme.id, enabled: false, settings: { url: "https://other.example.com/scim/v2" }, credentials: { token: remote.token }, requestId: "adapter-request-0001" };
+    const both = await Promise.all([0, 1].map(() => h.auth.api.scimProvisioningCreateTarget({ body: twice, headers })));
+    expect(both[0]!.target.id).toBe(both[1]!.target.id);
+    expect(await h.ctx.adapter.count({ model: "scimProvisioningTarget", where: [{ field: "targetId", value: both[0]!.target.id }] })).toBe(1);
   });
 
   it("the registry: an organization queued a page at a time (member id order, gt)", async () => {

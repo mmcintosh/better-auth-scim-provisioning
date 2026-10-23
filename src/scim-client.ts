@@ -43,7 +43,12 @@ export interface ScimUser {
   schemas: string[];
   externalId?: string | undefined;
   userName: string;
-  name?: { givenName?: string | undefined; familyName?: string | undefined; formatted?: string | undefined } | undefined;
+  name?:
+    | { givenName?: string | undefined; familyName?: string | undefined; formatted?: string | undefined; middleName?: string | undefined; honorificPrefix?: string | undefined; honorificSuffix?: string | undefined }
+    | undefined;
+  /** A casual name, and a profile page (RFC 7643 §4.1.1): sent by `attributes`, or by a `mapUser`. */
+  nickName?: string | undefined;
+  profileUrl?: string | undefined;
   displayName?: string | undefined;
   emails?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
   active: boolean;
@@ -51,6 +56,8 @@ export interface ScimUser {
   title?: string | undefined;
   phoneNumbers?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
   addresses?: ScimAddress[] | undefined;
+  /** Pictures of the user, by URL (RFC 7643 §4.1.2): `attributes` sends one, `type: "photo"`. */
+  photos?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
   /** The preferred language, locale, time zone and user type (RFC 7643 §4.1.1): sent by `attributes`, or by a `mapUser`. */
   preferredLanguage?: string | undefined;
   locale?: string | undefined;
