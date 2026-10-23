@@ -89,7 +89,7 @@ describe("attribute names in any case", () => {
     const o = await owner(h);
     await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers: o.headers });
     await h.settle();
-    expect((await h.jobs()).filter((j) => j.failed || j.attempts > 0)).toEqual([]);
+    expect((await h.jobs()).filter((j) => j.failed || Number(j.attempts) > 0)).toEqual([]);
     expect([...h.app.groups.values()].map((g) => g.members.length)).toEqual([1]);
     const drift = (await h.auth.api.scimProvisioningDrift({ body: { targetId: "app" } })) as { items: unknown[] };
     expect(drift.items).toEqual([]);
