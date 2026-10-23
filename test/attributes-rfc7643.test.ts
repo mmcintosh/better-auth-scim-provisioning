@@ -7,8 +7,11 @@ import { createHost } from "./support/host";
 
 const FIELDS = { preferredLanguage: { type: "string" }, locale: { type: "string" }, timezone: { type: "string" }, userType: { type: "string" }, tz: { type: "string" } } as const;
 
+/** The four by name: `true` reads only the attributes it read in 1.5. */
+const FOUR = { preferredLanguage: "preferredLanguage", locale: "locale", timezone: "timezone", userType: "userType" };
+
 async function setup(target: Record<string, unknown> = {}) {
-  const h = await createHost({ targets: [{ id: "app", attributes: true, ...target }], userFields: FIELDS });
+  const h = await createHost({ targets: [{ id: "app", attributes: FOUR, ...target }], userFields: FIELDS });
   const set = async (id: string, fields: Record<string, unknown>) => {
     await h.ctx.internalAdapter.updateUser(id, fields);
     await h.settle();
@@ -19,7 +22,15 @@ async function setup(target: Record<string, unknown> = {}) {
 }
 
 describe("RFC 7643's other user attributes", () => {
-  it("preferredLanguage, locale, timezone and userType, from fields of those names; empty ones cleared", async () => {
+  it("true doesn't read them: a host upgrading doesn't start sending (or clearing) what it didn't ask for", async () => {
+    const { h, set, remote } = await setup({ attributes: true });
+    const ada = await h.user("Ada Lovelace");
+    await set(ada.id, { preferredLanguage: "en-GB", locale: "en-GB", timezone: "Europe/London", userType: "Employee" });
+    expect(remote(ada.email)).not.toHaveProperty("timezone");
+    expect(remote(ada.email)).not.toHaveProperty("userType");
+  });
+
+  it("preferredLanguage, locale, timezone and userType, from the fields named; empty ones cleared", async () => {
     const { h, set, remote } = await setup();
     const ada = await h.user("Ada Lovelace");
     await set(ada.id, { preferredLanguage: "en-GB", locale: "en-GB", timezone: "Europe/London", userType: "Employee" });
@@ -36,8 +47,7 @@ describe("RFC 7643's other user attributes", () => {
     const ada = await h.user("Ada Lovelace");
     await set(ada.id, { tz: "America/Toronto", locale: "en-CA", preferredLanguage: "fr-CA" });
     expect(remote(ada.email)).toMatchObject({ timezone: "America/Toronto", locale: "en-CA", preferredLanguage: "fr-CA" });
-    // A zone Intl knows by an old abbreviation isn't an IANA name either.
-    await set(ada.id, { tz: "EST", locale: "English (Canada)", preferredLanguage: "French" });
+    await set(ada.id, { tz: "Eastern Time", locale: "English (Canada)", preferredLanguage: "French" });
     // PATCH: left as it was at the app, and none cleared.
     expect(remote(ada.email)).toMatchObject({ timezone: "America/Toronto", locale: "en-CA", preferredLanguage: "fr-CA" });
     expect(lastPatch()?.Operations.filter((o) => o.op === "remove")).toEqual([]);
@@ -123,7 +133,7 @@ describe("RFC 7643's other user attributes", () => {
   });
 
   it("Entra ID gets the preferred language (only: its userType means member or guest)", async () => {
-    const h = await createHost({ targets: [{ id: "entra", type: "entra-id", attributes: true }], userFields: FIELDS });
+    const h = await createHost({ targets: [{ id: "entra", type: "entra-id", attributes: FOUR }], userFields: FIELDS });
     const ada = await h.user("Ada Lovelace");
     await h.ctx.internalAdapter.updateUser(ada.id, { preferredLanguage: "en-GB", userType: "Contractor", timezone: "Europe/London" });
     await h.settle();
@@ -131,5 +141,36 @@ describe("RFC 7643's other user attributes", () => {
     expect(at.preferredLanguage).toBe("en-GB");
     expect(at.userType).not.toBe("Contractor");
     expect(at.timezone).toBeUndefined();
+  });
+
+  it("roles follow an organization's creation (its creator) and deletion", async () => {
+    const h = await createHost({ targets: [{ id: "app", roles: true }] });
+    const up = await h.auth.api.signUpEmail({ body: { email: "olive@example.com", password: "correct-horse-battery", name: "Olive" } });
+    await h.ctx.internalAdapter.updateUser(up.user.id, { emailVerified: true });
+    await h.settle();
+    const res = await h.auth.api.signInEmail({ body: { email: "olive@example.com", password: "correct-horse-battery" }, asResponse: true });
+    const headers = new Headers({ cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") });
+    const roles = () => ([...h.app.users.values()].find((u) => u.userName === "olive@example.com") as { roles?: unknown } | undefined)?.roles;
+    const acme = (await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers }))!;
+    await h.settle();
+    expect(roles()).toEqual([{ value: "owner", type: "acme" }]);
+    await h.auth.api.deleteOrganization({ body: { organizationId: acme.id }, headers });
+    await h.settle();
+    expect(roles()).toBeUndefined();
+  });
+
+  it("entitlements that don't answer in time fail the delivery, saying so; a bad value is logged once an hour, not per user", async () => {
+    const h = await createHost({ targets: [{ id: "app", timeoutMs: 100, entitlements: () => new Promise<string[]>(() => {}), attributes: FOUR }], userFields: FIELDS });
+    await h.user("Ada Lovelace");
+    const [job] = await h.jobs();
+    expect(job?.lastError).toMatch(/^entitlements: no answer within 0.1 s/);
+    const h2 = await createHost({ targets: [{ id: "app", attributes: FOUR }], userFields: FIELDS });
+    const warn2 = vi.spyOn(h2.ctx.logger, "warn");
+    for (const name of ["Ada Lovelace", "Bo Bell", "Cy Young"]) {
+      const u = await h2.user(name);
+      await h2.ctx.internalAdapter.updateUser(u.id, { timezone: "Eastern Time" });
+      await h2.settle();
+    }
+    expect(warn2.mock.calls.flat().filter((m) => String(m).includes("left out"))).toHaveLength(1);
   });
 });

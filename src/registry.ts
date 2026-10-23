@@ -4,7 +4,7 @@
 // is tied to one organization, whose members and groups are the only ones it ever receives.
 import { parseEnvelope, symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
 import * as z from "zod";
-import { type Adapter, IN_BATCH, markPaused, type TargetSource } from "./outbox";
+import { type Adapter, credentialsExpiry, IN_BATCH, isPaused, markPaused, type TargetSource } from "./outbox";
 import { attributeFieldProblems, attributesOption, DEFAULT_STORED_ATTRIBUTE_FIELDS, DEFAULT_STORED_ENTERPRISE_FIELDS, enterpriseFieldProblems, enterpriseOption, missingAttributeFields, missingEnterpriseFields } from "./mapping";
 import { profiles } from "./profiles";
 import type { ScimTarget, Target, TargetRegistryOptions } from "./types";
@@ -65,7 +65,7 @@ export const storedSettingsSchema = z.strictObject({
   // At most 30 s: the deliveries share the scheduled run with every other organization's.
   timeoutMs: z.number().int().min(100).max(30_000).optional(),
   /** When the credentials expire (an ISO date): warned about before, and shown. Replacing the credentials clears it, unless given again. */
-  credentialsExpireAt: z.iso.datetime({ offset: true }).optional(),
+  credentialsExpireAt: z.union([z.iso.datetime({ offset: true }), z.iso.date()]).optional(),
   google: z.strictObject({ clientEmail: z.string().min(1), adminEmail: z.string().min(1), orgUnitPath: z.string().startsWith("/").optional(), groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/).optional() }).optional(),
 });
 export type StoredSettings = z.infer<typeof storedSettingsSchema>;
@@ -387,6 +387,20 @@ export function registrySource(code: Target[], adapter: Adapter, key: SealKey, o
         for (const row of await rows([{ field: "organizationId", value: batch, operator: "in" }], (r) => batch.includes(r.organizationId))) stored.push(await build(row));
       }
       return [...code.filter((t) => !t.organizationId || ids.includes(t.organizationId)), ...stored];
+    },
+    async expiries() {
+      // From the settings alone (a JWT's own expiry is noted there when it's stored): nothing decrypted.
+      const out = code.flatMap((t) => {
+        const at = isPaused(t) ? null : credentialsExpiry(t);
+        return at ? [{ id: t.id, at }] : [];
+      });
+      for (const row of await rows([], () => true)) {
+        if (!truthy(row.enabled)) continue;
+        const at = (parseJson(row.config) as { credentialsExpireAt?: unknown } | null)?.credentialsExpireAt;
+        const when = typeof at === "string" ? new Date(at) : null;
+        if (when && !Number.isNaN(when.getTime())) out.push({ id: row.targetId, at: when });
+      }
+      return out;
     },
     async every() {
       const stored: Target[] = [];

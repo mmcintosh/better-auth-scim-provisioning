@@ -94,14 +94,20 @@ const textOf = (v: unknown): string | undefined => {
 
 /** The attributes `attributes` can send, each read from a user field of that name by default. */
 export const ATTRIBUTE_NAMES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country", "preferredLanguage", "locale", "timezone", "userType"] as const;
+/**
+ * What `true` reads: the attributes it read when it came (1.4). The four added since are named
+ * (`{ timezone: "timezone" }`), so upgrading never starts sending, or clearing, what a host didn't ask for.
+ */
+const TRUE_ATTRIBUTES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country"] as const;
 /** The single-valued attributes sent as they are (RFC 7643 §4.1.1). */
 const PLAIN = ["preferredLanguage", "locale", "timezone", "userType"] as const;
 /** A language tag (RFC 5646's shape, loosely): `en`, `en-CA`, `zh-Hant-TW`. */
 const LANGUAGE_TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+/** A time zone the runtime knows by that name (its IANA data: `America/Toronto`, `UTC`, `CET`). */
 const validTimeZone = (zone: string) => {
   try {
     new Intl.DateTimeFormat("en", { timeZone: zone });
-    return zone.includes("/") || zone === "UTC";
+    return true;
   } catch {
     return false;
   }
@@ -124,7 +130,7 @@ export const attributesOption = z.union([
 ]);
 
 /** The user fields organizations' stored targets may read for `attributes`, unless the host lists others (`registry.attributeFields`). */
-export const DEFAULT_STORED_ATTRIBUTE_FIELDS: readonly string[] = [...ATTRIBUTE_NAMES];
+export const DEFAULT_STORED_ATTRIBUTE_FIELDS: readonly string[] = [...TRUE_ATTRIBUTES];
 
 /** As enterpriseFieldProblems, for `attributes`. */
 export const attributeFieldProblems = (option: boolean | AttributeFields | undefined, allowed: readonly string[], known?: ReadonlySet<string>) => fieldProblems("attributes", attributeFields(option, known), allowed);
@@ -137,7 +143,7 @@ export const attributeFieldProblems = (option: boolean | AttributeFields | undef
 export function attributeFields(option: boolean | AttributeFields | undefined, known?: ReadonlySet<string>): AttributeFields | null {
   if (!option) return null;
   if (option !== true) return option;
-  const fields = Object.fromEntries(ATTRIBUTE_NAMES.filter((a) => !known || known.has(a)).map((a) => [a, a])) as AttributeFields;
+  const fields = Object.fromEntries(TRUE_ATTRIBUTES.filter((a) => !known || known.has(a)).map((a) => [a, a])) as AttributeFields;
   return Object.keys(fields).length ? fields : null;
 }
 

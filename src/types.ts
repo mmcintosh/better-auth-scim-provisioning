@@ -101,8 +101,9 @@ export interface TargetOptions {
    * organization's title, the phones and the work address, touching only what's named here. A
    * `mapUser` that sets one of these itself takes precedence for that attribute. Also the
    * preferred language, locale, time zone and user type (`preferredLanguage`, `locale`,
-   * `timezone`, `userType`), checked before they're sent: a language that isn't a language tag,
-   * or a time zone that isn't an IANA name, is left out (and logged), not sent to be refused.
+   * `timezone`, `userType`), only when named (`true` doesn't read them), checked before they're
+   * sent: a language that isn't a language tag, or a time zone the runtime doesn't know, is left
+   * out (and logged), not sent to be refused.
    */
   attributes?: boolean | AttributeFields | undefined;
   /**
@@ -159,7 +160,7 @@ export interface TargetOptions {
    */
   maxRequestsPerMinute?: number | undefined;
   /**
-   * When the target's credentials expire (an ISO date, or a Date): an AWS IAM Identity Center
+   * When the target's credentials expire (an ISO date, or date and time; or a Date): an AWS IAM Identity Center
    * token lasts a year, a GitHub token or an Entra ID client secret as long as you chose. Shown
    * in `scimProvisioningStatus`, and warned about before it comes: daily at `warn` from 30 days
    * out, and from 7 days out (or once past) at `error` and through `onFailure` (`kind:
@@ -400,6 +401,7 @@ export type AuditAction =
   | "decommission.started"
   | "decommission.cancelled"
   | "decommission.completed"
+  | "decommission.forgot"
   | "purge.started"
   | "purge.completed";
 
@@ -417,7 +419,7 @@ export interface AuditEvent {
    * `type`, `url` (as the API shows it) and `enabled`; for target.updated, `changed` (of
    * `settings`, `credentials`, `enabled`), `url` and `enabled`; for target.deleted, `abandoned`
    * (`accounts`, `groups`); for the decommission ones, `accounts` and `groups` (to go, or, after a
-   * cancel, still active), or `total` and `groupsTotal` when complete.
+   * cancel, still active), or `total` and `groupsTotal` when complete; for decommission.forgot, `userIds` and how many were `forgotten`.
    */
   detail: Record<string, unknown>;
 }

@@ -426,6 +426,50 @@ describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () =
     expect(await box.cancelDecommission("app", "server")).toBe(false);
   });
 
+  it("a decommission over several pages, and a cancel's restore walk (key ranges, in on keys)", async () => {
+    const h = await host({ decommission: true });
+    for (const name of ["Ada Lovelace", "Bo Bell", "Cy Young"]) await h.user(name);
+    const adapter = h.ctx.adapter as unknown as Adapter;
+    // Accounts made before, their users since gone: past a page of 50.
+    for (let i = 0; i < 60; i++) await adapter.create({ model: "scimProvisioningLink", data: { key: `app:old${String(i).padStart(2, "0")}`, targetId: "app", userId: `old${String(i).padStart(2, "0")}`, remoteId: `gone${i}`, userName: `old${i}@example.com`, active: true, syncedAt: new Date() } });
+    const box = outbox({ decommission: true, targets: [{ id: "app", url: h.app.url, token: h.app.token, fetch: h.app.fetch }] }, adapter, { warn() {}, error() {} });
+    await box.startDecommission("app", "server");
+    await box.runFor("app", "step", "decommission");
+    await box.runFor("app", "step", "decommission");
+    // Its groups, then the first page: 50 accounts queued, and the cursor on the 50th.
+    const users = async () => (await h.jobs()).filter((j) => (j.kind ?? "user") === "user").map((j) => j.userId);
+    expect(await users()).toHaveLength(50);
+    expect((await box.decommissionOf("app"))?.cursor).toMatch(/^l:/);
+    expect(await box.cancelDecommission("app", "server")).toBe(true);
+    for (let i = 0; i < 30 && (await h.jobs()).length > 0; i++) {
+      await box.runDue(200);
+      await adapter.updateMany({ model: "scimProvisioningJob", where: [{ field: "targetId", value: "app" }], update: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    }
+    expect(await h.jobs()).toEqual([]);
+    expect(await box.decommissionOf("app")).toMatchObject({ state: "cancelled", cursor: "" });
+    expect([...h.app.users.values()].map((u) => u.active)).toEqual([true, true, true]);
+  });
+
+  it("a run looks past a frozen target's backlog (ne), and a 429 holds the target's other jobs", async () => {
+    const h = await host({ decommission: true, targets: [] });
+    const [ada, bo] = [await h.user("Ada Lovelace"), await h.user("Bo Bell")];
+    const other = mockScim();
+    const adapter = h.ctx.adapter as unknown as Adapter;
+    const box = outbox({ decommission: true, targets: [{ id: "frozen", url: other.url, token: other.token, fetch: other.fetch, decommission: true }, { id: "app2", url: other.url, token: other.token, fetch: other.fetch }] }, adapter, { warn() {}, error() {} });
+    for (let i = 0; i < 210; i++) await box.enqueue("frozen", `f${i}`);
+    await box.enqueue("app2", ada.id);
+    expect(await box.runDue(50)).toMatchObject({ done: 1 });
+    expect(other.users.size).toBe(1);
+    await box.enqueue("app2", bo.id);
+    await h.ctx.internalAdapter.updateUser(ada.id, { name: "Ada King" });
+    await box.enqueue("app2", ada.id);
+    other.fail({ status: 429, retryAfter: "120" });
+    expect(await box.runFor("app2", ada.id)).toBe("retry");
+    const boJob = (await adapter.findOne({ model: "scimProvisioningJob", where: [{ field: "key", value: `app2:${bo.id}` }] })) as { attempts: number; lastStatus: number; nextAttemptAt: Date };
+    expect(boJob).toMatchObject({ attempts: 0, lastStatus: 429 });
+    expect(new Date(boJob.nextAttemptAt as Date).getTime()).toBeGreaterThan(Date.now() + 100_000);
+  });
+
   it("a timed ban is lifted when it runs out", async () => {
     const h = await host();
     const u = await h.user();
