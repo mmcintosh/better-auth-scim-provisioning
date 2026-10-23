@@ -89,6 +89,7 @@ const targetSchema = z.strictObject({
   roleGroupName: z.function().optional(),
   timeoutMs: z.number().int().min(100).max(120_000).optional(),
   maxRequestsPerMinute: z.number().int().min(1).max(100_000).optional(),
+  credentialsExpireAt: z.union([z.date(), z.iso.datetime({ offset: true })]).optional(),
   decommission: z.boolean().optional(),
   fetch: z.function().optional(),
 });

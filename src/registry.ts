@@ -63,6 +63,8 @@ export const storedSettingsSchema = z.strictObject({
   attributes: attributesOption.optional(),
   // At most 30 s: the deliveries share the scheduled run with every other organization's.
   timeoutMs: z.number().int().min(100).max(30_000).optional(),
+  /** When the credentials expire (an ISO date): warned about before, and shown. Replacing the credentials clears it, unless given again. */
+  credentialsExpireAt: z.iso.datetime({ offset: true }).optional(),
   google: z.strictObject({ clientEmail: z.string().min(1), adminEmail: z.string().min(1), orgUnitPath: z.string().startsWith("/").optional(), groupDomain: z.string().regex(/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/).optional() }).optional(),
 });
 export type StoredSettings = z.infer<typeof storedSettingsSchema>;

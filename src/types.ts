@@ -132,6 +132,14 @@ export interface TargetOptions {
    */
   maxRequestsPerMinute?: number | undefined;
   /**
+   * When the target's credentials expire (an ISO date, or a Date): an AWS IAM Identity Center
+   * token lasts a year, a GitHub token or an Entra ID client secret as long as you chose. Shown
+   * in `scimProvisioningStatus`, and warned about before it comes: daily at `warn` from 30 days
+   * out, and from 7 days out (or once past) at `error` and through `onFailure` (`kind:
+   * "credentials"`). Without it, a bearer token that's a JWT is read for its own expiry (`exp`).
+   */
+  credentialsExpireAt?: Date | string | undefined;
+  /**
    * Marked for decommissioning (needs the plugin's `decommission` option). Alone, it freezes the
    * target: nothing is sent to it, and changes wait. `auth.api.scimProvisioningDecommission` then
    * starts deactivating every account and emptying every group we made there. Once started, removing
@@ -278,9 +286,13 @@ export type Target = ScimTarget | GoogleWorkspaceTarget | EntraIdTarget | Webhoo
 /** A delivery that gave up, or reached `retry.maxAttempts` (it's then retried every 6 hours). */
 export interface DeliveryFailure {
   targetId: string;
-  /** What was being delivered: a user, or an organization's, team's or role's group. */
-  kind: "user" | "group" | "team" | "role";
-  /** The user's id, or the organization's, team's or role's. */
+  /**
+   * What was being delivered: a user, or an organization's, team's or role's group; or
+   * "credentials": the target's credentials expire within 7 days, or have (`subjectId` is the
+   * target's id; `failed` once they have). The list can grow in a minor release.
+   */
+  kind: "user" | "group" | "team" | "role" | "credentials";
+  /** The user's id, or the organization's, team's or role's (the target's, for "credentials"). */
   subjectId: string;
   /** The error, with the app's own message where it gave one. */
   error: string;

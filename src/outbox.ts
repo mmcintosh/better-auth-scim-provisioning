@@ -129,6 +129,35 @@ export type GroupRef = { kind: Exclude<Kind, "user">; id: string };
  * a time (its cursor is in its own row: see Decommission).
  */
 type JobKind = Kind | "resync" | "reports" | "decommission";
+/** Credentials expiring within this many days are warned about (daily, at warn)… */
+const CREDENTIALS_WARN_DAYS = 30;
+/** …and within this many (or once expired), at error and through onFailure. */
+const CREDENTIALS_ALERT_DAYS = 7;
+/** How often a process looks at its targets' credentials, at most. */
+const CREDENTIALS_CHECK_MS = 3_600_000;
+
+/** A JWT's expiry (`exp`), read, not verified: only to warn before it comes. */
+function jwtExpiry(token: string | undefined): Date | null {
+  const parts = token?.split(".");
+  if (parts?.length !== 3) return null;
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob((parts[1] as string).replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)))) as { exp?: unknown };
+    return typeof payload.exp === "number" && Number.isFinite(payload.exp) ? new Date(payload.exp * 1000) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** When a target's credentials expire: as configured (`credentialsExpireAt`), or a bearer token's own `exp`. */
+export function credentialsExpiry(target: Target): Date | null {
+  if (target.credentialsExpireAt !== undefined) {
+    const at = new Date(target.credentialsExpireAt);
+    return Number.isNaN(at.getTime()) ? null : at;
+  }
+  if (target.type !== undefined && target.type !== "scim") return null;
+  return jwtExpiry(target.token ?? (target.auth?.type === "header" ? target.auth.value.split(" ").pop() : undefined));
+}
+
 /** A purge of more accounts than this needs their number confirmed. */
 export const PURGE_CONFIRM_ABOVE = 500;
 /** The decommission job's subject: one per target. */
@@ -276,6 +305,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   const attributesOf = (target: Target) => attributeFields(target.attributes, userFields);
   const maxAttempts = options.retry?.maxAttempts ?? 8;
   const audit = auditLog(options.audit, adapter, log);
+  let credentialsCheckedAt = 0;
+  /** Targets warned about today, by day: once a day each, per process. */
+  const credentialsWarned = new Map<string, string>();
   const baseDelayMs = options.retry?.baseDelayMs ?? 30_000;
   const backoff = (attempts: number) => Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** Math.max(0, attempts - 1));
 
@@ -970,7 +1002,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * lease still keeps two deliveries for one user apart.
    */
   async function runDue(limit = 50, targetId?: string): Promise<Record<Outcome, number>> {
-    if (targetId === undefined) await audit.prune();
+    if (targetId === undefined) {
+      await audit.prune();
+      await checkCredentials();
+    }
     const due = await dueJobs(limit, targetId);
     const tally: Record<Outcome, number> = { done: 0, retry: 0, failed: 0, busy: 0 };
     let next = 0;
@@ -1499,6 +1534,44 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return links.filter((l) => l.targetId === targetId).map((l) => ({ key: l.key, ref: refOfLink(l) }));
   }
 
+  /**
+   * Credentials that expire soon, or have: warned about once a day per target (per process), at
+   * warn from 30 days out, at error and through onFailure from 7. The scheduled run calls it.
+   */
+  async function checkCredentials(): Promise<void> {
+    if (Date.now() - credentialsCheckedAt < CREDENTIALS_CHECK_MS) return;
+    credentialsCheckedAt = Date.now();
+    const today = new Date().toISOString().slice(0, 10);
+    let targets: Target[];
+    try {
+      targets = await source.every();
+    } catch (e) {
+      log.error(`[scim] couldn't list the targets to check their credentials: ${(e as Error).message}`);
+      return;
+    }
+    for (const target of targets) {
+      const expiry = credentialsExpiry(target);
+      if (!expiry || isPaused(target)) continue;
+      const days = (expiry.getTime() - Date.now()) / 86_400_000;
+      if (days > CREDENTIALS_WARN_DAYS || credentialsWarned.get(target.id) === today) continue;
+      credentialsWarned.set(target.id, today);
+      const when = expiry.toISOString().slice(0, 10);
+      const error = days <= 0 ? `its credentials expired on ${when}: give it new ones` : `its credentials expire on ${when}, in ${Math.ceil(days)} days: give it new ones before then`;
+      if (days > CREDENTIALS_ALERT_DAYS) {
+        log.warn(`[scim] ${target.id}: ${error}`);
+        continue;
+      }
+      log.error(`[scim] ${target.id}: ${error}`);
+      if (options.onFailure) {
+        try {
+          await Promise.race([options.onFailure({ targetId: target.id, kind: "credentials", subjectId: target.id, error, status: null, attempts: 0, failed: days <= 0 }), new Promise((_, reject) => setTimeout(() => reject(new Error(`no answer within ${ON_FAILURE_TIMEOUT_MS / 1000} s`)), ON_FAILURE_TIMEOUT_MS))]);
+        } catch (hookError) {
+          log.error(`[scim] onFailure threw: ${(hookError as Error).message}`);
+        }
+      }
+    }
+  }
+
   /** Per target: jobs queued, stuck (still retried past maxAttempts) and failed; accounts and groups the app confirmed. */
   async function status(targetIds: string[]) {
     const count = (model: string, where: { field: string; value: string | number | boolean | Date; operator?: "lt" | "gte" | "ne" }[]) => adapter.count({ model, where });
@@ -1518,6 +1591,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // Confirmed by the app: a pending create's link has no remoteId yet.
           accounts: await count(LINK_MODEL, [t, { field: "active", value: true }, { field: "remoteId", value: "", operator: "ne" }]),
           groups: await count(GROUP_LINK_MODEL, [t, { field: "remoteId", value: "", operator: "ne" }]),
+          // When its credentials expire, if known (see credentialsExpireAt).
+          credentialsExpireAt: await source.get(id).then((target) => (target ? (credentialsExpiry(target)?.toISOString() ?? null) : null)),
         };
       }),
     );
