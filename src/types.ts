@@ -47,6 +47,16 @@ export interface AttributeFields {
   timezone?: string | undefined;
   /** What kind of user (`Employee`, `Contractor`: the app's words): SCIM `userType`. Only to SCIM apps and webhooks (Entra ID's means member or guest). */
   userType?: string | undefined;
+  /** Their photo, an https URL (Better Auth's `image`: `{ photo: "image" }`): SCIM `photos`, type photo. Only to SCIM apps and webhooks. */
+  photo?: string | undefined;
+  /** A casual name: SCIM `nickName`. Only to SCIM apps and webhooks. */
+  nickName?: string | undefined;
+  /** Their profile page, an https URL: SCIM `profileUrl`. Only to SCIM apps and webhooks. */
+  profileUrl?: string | undefined;
+  /** The middle name and honorifics (`Dr.`, `Jr.`): SCIM `name.middleName`, `name.honorificPrefix`, `name.honorificSuffix`. Only to SCIM apps and webhooks. */
+  middleName?: string | undefined;
+  honorificPrefix?: string | undefined;
+  honorificSuffix?: string | undefined;
 }
 
 /** What every target has, whatever kind of app it is. */
@@ -103,7 +113,9 @@ export interface TargetOptions {
    * preferred language, locale, time zone and user type (`preferredLanguage`, `locale`,
    * `timezone`, `userType`), only when named (`true` doesn't read them), checked before they're
    * sent: a language that isn't a language tag, or a time zone the runtime doesn't know, is left
-   * out (and logged), not sent to be refused.
+   * out (and logged), not sent to be refused. And, also only when named, the photo (`photo`, an
+   * https URL: Better Auth's `image`), `nickName`, `profileUrl` (https), and the middle name and
+   * honorifics (`middleName`, `honorificPrefix`, `honorificSuffix`), to SCIM apps and webhooks.
    */
   attributes?: boolean | AttributeFields | undefined;
   /**

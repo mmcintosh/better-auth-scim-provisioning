@@ -124,6 +124,23 @@ interface Actor {
 }
 const may = (actor: Actor, organizationId: string) => actor.host || actor.organizations.has(organizationId);
 
+/** A create's `requestId`: the client's own, fresh for each target it means to make (a UUID, say). */
+const REQUEST_ID = /^[A-Za-z0-9._:-]{8,128}$/;
+
+/**
+ * The id of the target a create with this `requestId` makes, the same every time: a retry finds it
+ * (the id is unique, so two at once make one), with nothing more stored than the target itself.
+ */
+async function requestTargetId(organizationId: string, requestId: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${organizationId}\n${requestId}`)));
+  const hex = [...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `t-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+/** JSON with its keys sorted, so two of the same value compare equal whatever their order. */
+const canonical = (v: unknown): string =>
+  JSON.stringify(v, (_, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x));
+
 async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptions | undefined, o: { change?: boolean; roles?: string[]; freshAge?: number } = {}): Promise<Actor> {
   if (!options) throw refuse("NOT_FOUND", "the target registry isn't enabled (registry option)");
   const s = (ctx.context as { session?: { user: { id: string }; session: Record<string, unknown> } }).session;
@@ -315,29 +332,62 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
       {
         method: "POST",
         use: [sensitiveSessionMiddleware],
-        body: z.strictObject({ organizationId: z.string().min(1).max(256), settings: z.unknown(), credentials: z.unknown(), enabled: z.boolean().optional() }),
+        body: z.strictObject({
+          organizationId: z.string().min(1).max(256),
+          settings: z.unknown(),
+          credentials: z.unknown(),
+          enabled: z.boolean().optional(),
+          requestId: z.string().regex(REQUEST_ID, "8 to 128 letters, digits, and . _ : -").optional(),
+        }),
       },
       async (ctx) => {
         const actor = await actorOf(ctx, host.options, { change: true });
-        const { organizationId } = ctx.body;
+        const { organizationId, requestId } = ctx.body;
         if (!may(actor, organizationId)) throw refuse("FORBIDDEN", "not allowed");
         const adapter = adapterOf(ctx);
         const org = (await adapter.findOne({ model: "organization", where: [{ field: "id", value: organizationId }] })) as { id: string } | null;
         if (!org || org.id !== organizationId) throw refuse("BAD_REQUEST", `no organization ${organizationId}`);
+        let targetId = requestId ? await requestTargetId(organizationId, requestId) : `t-${crypto.randomUUID()}`;
+        while (!requestId && host.codeIds.some((c) => c.toLowerCase() === targetId)) targetId = `t-${crypto.randomUUID()}`;
+        if (host.codeIds.some((c) => c.toLowerCase() === targetId)) throw refuse("CONFLICT", "requestId: use another");
+        const { settings, credentials } = check({ targetId, organizationId }, ctx.body.settings, ctx.body.credentials);
+        const enabled = ctx.body.enabled ?? true;
+        /** A create with this requestId was made before: the same target again, or 409 if this asks for another. */
+        const replay = async (row: TargetRow) => {
+          const same =
+            row.organizationId === organizationId &&
+            truthy(row.enabled) === enabled &&
+            canonical(settingsOf(row)) === canonical(settings) &&
+            canonical(await readable(ctx, row)) === canonical(credentials);
+          if (!same) throw refuse("CONFLICT", "requestId: already used to create a target with other settings, credentials or enabled (or it was changed since); a new create needs a new requestId");
+          return ctx.json({ target: view(row, credentials), replayed: true as const });
+        };
+        const made = async () => ((await adapter.findMany({ model: TARGET_MODEL, where: [{ field: "targetId", value: targetId }], limit: 2 })) as TargetRow[]).find((r) => r.targetId === targetId);
+        if (requestId) {
+          const before = await made();
+          if (before) return replay(before);
+          // Removed since: making it again would give a new target the old one's id, and its history.
+          if (instance(ctx).audit.on && (await instance(ctx).audit.list({ targetId, limit: 1 })).items.length)
+            throw refuse("CONFLICT", "requestId: the target it created was removed since; a new create needs a new requestId");
+        }
         // Counted, then created: two creates at once can pass one over the cap; it's a guard against
-        // runaway use, not a quota.
+        // runaway use, not a quota. A repeat of a create (above) isn't counted again.
         const max = host.options?.maxTargetsPerOrganization ?? 10;
         const existing = ((await adapter.findMany({ model: TARGET_MODEL, where: [{ field: "organizationId", value: organizationId }], limit: max + 1 })) as TargetRow[]).filter((r) => r.organizationId === organizationId);
         if (existing.length >= max) throw refuse("CONFLICT", `an organization has at most ${max} targets`);
-        let targetId = `t-${crypto.randomUUID()}`;
-        while (host.codeIds.some((c) => c.toLowerCase() === targetId)) targetId = `t-${crypto.randomUUID()}`;
-        const { settings, credentials } = check({ targetId, organizationId }, ctx.body.settings, ctx.body.credentials);
-        const enabled = ctx.body.enabled ?? true;
         const now = new Date();
-        const row = (await adapter.create({
-          model: TARGET_MODEL,
-          data: { targetId, organizationId, type: settings.type ?? "scim", config: JSON.stringify(settings), sealed: await seal(key(ctx), targetId, organizationId, credentials, settings), enabled, createdAt: now, updatedAt: now },
-        })) as TargetRow;
+        let row: TargetRow;
+        try {
+          row = (await adapter.create({
+            model: TARGET_MODEL,
+            data: { targetId, organizationId, type: settings.type ?? "scim", config: JSON.stringify(settings), sealed: await seal(key(ctx), targetId, organizationId, credentials, settings), enabled, createdAt: now, updatedAt: now },
+          })) as TargetRow;
+        } catch (e) {
+          // Two at once with one requestId: the id is unique, so one is made, and the other is a repeat of it.
+          const winner = requestId ? await made() : undefined;
+          if (!winner) throw e;
+          return replay(winner);
+        }
         await record(ctx, actor, { targetId, organizationId }, "target.created", { type: settings.type ?? "scim", url: settings.url !== undefined ? shownUrl(settings.type ?? "scim", settings.url) : (settings.google?.adminEmail.split("@")[1] ?? null), enabled });
         audit(ctx, actor, `created target ${targetId} (${settings.type ?? "scim"}, ${settings.url !== undefined ? new URL(settings.url).host : (settings.google?.adminEmail.split("@")[1] ?? "")}) for organization ${organizationId}`);
         // The organization's members and groups, queued (a disabled target's wait).
