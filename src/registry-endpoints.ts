@@ -10,7 +10,7 @@
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthEndpoint, sensitiveSessionMiddleware } from "better-auth/api";
 import * as z from "zod";
-import { type Adapter, clientFor, DECOMMISSION_MODEL, GROUP_LINK_MODEL, JOB_MODEL, LINK_MODEL, PURGE_CONFIRM_ABOVE } from "./outbox";
+import { type Adapter, clientFor, credentialsMarkerKey, DECOMMISSION_MODEL, jwtExpiry, GROUP_LINK_MODEL, JOB_MODEL, LINK_MODEL, PURGE_CONFIRM_ABOVE } from "./outbox";
 import {
   assemble,
   credentialsKind,
@@ -28,7 +28,8 @@ import {
   destination,
 } from "./registry";
 import { ScimError } from "./scim-client";
-import type { Target, TargetRegistryOptions } from "./types";
+import type { AuditAction, AuditEvent, Target, TargetRegistryOptions } from "./types";
+import { AUDIT_PAGE_MAX, type AuditInput } from "./audit";
 
 const MAX_CONFIG_BYTES = 16 * 1024;
 
@@ -46,7 +47,7 @@ export interface RegistryHost {
   instance(ctx: GenericEndpointContext):
     | {
         resync(targetId: string, o: { resume: boolean }): Promise<void>;
-        status(targetId: string): Promise<{ queued: number; waiting: number; stuck: number; failed: number; accounts: number; groups: number }>;
+        status(targetId: string): Promise<{ queued: number; waiting: number; stuck: number; failed: number; rateLimited: number; accounts: number; groups: number; credentialsExpireAt: string | null }>;
         failures(targetId: string): Promise<{ kind: string; subjectId: string; failed: boolean; status: number | null; nextAttemptAt: string }[]>;
         drift(targetId: string, after: string | null, limit: number): Promise<{ items: unknown[]; scanned: number; next: string | null }>;
         accounts(targetId: string, after: string | null, limit: number): Promise<{ items: { userId: string; userName: string; remoteId: string | null; active: boolean; adopted: boolean }[]; next: string | null }>;
@@ -54,15 +55,23 @@ export interface RegistryHost {
         kick(targetId: string): void;
         /** What a target still has at the app: accounts active there (for a purge, not adopted), and groups. */
         counts(targetId: string, phase?: "deactivate" | "purge"): Promise<{ accounts: number; groups: number }>;
+        /** The audit history (recording is a no-op without the plugin's `audit` option). */
+        audit: {
+          on: boolean;
+          record(e: AuditInput): Promise<void>;
+          list(q: { targetId?: string | undefined; organizationId?: string | undefined; after?: string | undefined; limit?: number | undefined }): Promise<{ items: AuditEvent[]; next: string | null }>;
+        };
         /** Undefined without the plugin's `decommission` option. */
         decommission:
           | {
               state(targetId: string): Promise<"running" | "complete" | "cancelled" | null>;
               status(targetId: string): Promise<unknown>;
-              start(targetId: string, by: string): Promise<void>;
-              purge(targetId: string, by: string): Promise<void>;
+              /** True if this call started it (not one that was already under way). */
+              start(targetId: string, by: string): Promise<boolean>;
+              purge(targetId: string, by: string): Promise<boolean>;
               row(targetId: string): Promise<{ phase: "deactivate" | "purge"; state: "running" | "complete" | "cancelled" } | null>;
               cancel(targetId: string, by: string): Promise<boolean>;
+              forget(targetId: string, userIds: string[], by: string): Promise<{ forgotten: string[]; skipped: string[] } | null>;
             }
           | undefined;
       }
@@ -178,6 +187,9 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
   const adapterOf = (ctx: GenericEndpointContext) => ctx.context.adapter as unknown as Adapter;
   // At warn, Better Auth's default level: who connected what, and where, must not be dropped.
   const audit = (ctx: GenericEndpointContext, actor: Actor, what: string) => ctx.context.logger.warn(`[scim] registry: user ${actor.userId}${actor.host ? " (host administrator)" : ""} ${what}`);
+  /** The same, in the audit history (with the plugin's `audit`). */
+  const record = (ctx: GenericEndpointContext, actor: Actor, row: { targetId: string; organizationId: string }, action: AuditAction, detail: Record<string, unknown>) =>
+    instance(ctx).audit.record({ targetId: row.targetId, organizationId: row.organizationId, actor: `user:${actor.userId}`, action, detail: { ...(actor.host ? { hostAdministrator: true } : {}), ...detail } });
   const instance = (ctx: GenericEndpointContext) => {
     const i = host.instance(ctx);
     if (!i) throw new Error("[scim] not initialised");
@@ -260,7 +272,11 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
       }
     }
     if (issues.length) throw refuse("BAD_REQUEST", "invalid target", issues);
-    return { settings: settings.data as StoredSettings, credentials: credentials.data as StoredCredentials };
+    const c = credentials.data as StoredCredentials;
+    // A token that's a JWT says when it expires: kept in the settings, so the scheduled run's
+    // check reads it there instead of decrypting every target's credentials.
+    const own = (settings.data as StoredSettings).credentialsExpireAt === undefined ? jwtExpiry("token" in c ? c.token : "auth" in c && c.auth.type === "header" ? c.auth.value.split(" ").pop() : undefined) : null;
+    return { settings: { ...(settings.data as StoredSettings), ...(own ? { credentialsExpireAt: own.toISOString() } : {}) }, credentials: c };
   }
 
   const page = z.object({ organizationId: z.string().min(1).max(256).optional(), limit: z.coerce.number().int().min(1).max(500).optional(), offset: z.coerce.number().int().min(0).optional() }).optional();
@@ -320,6 +336,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           model: TARGET_MODEL,
           data: { targetId, organizationId, type: settings.type ?? "scim", config: JSON.stringify(settings), sealed: await seal(key(ctx), targetId, organizationId, credentials, settings), enabled, createdAt: now, updatedAt: now },
         })) as TargetRow;
+        await record(ctx, actor, { targetId, organizationId }, "target.created", { type: settings.type ?? "scim", url: settings.url !== undefined ? shownUrl(settings.type ?? "scim", settings.url) : (settings.google?.adminEmail.split("@")[1] ?? null), enabled });
         audit(ctx, actor, `created target ${targetId} (${settings.type ?? "scim"}, ${settings.url !== undefined ? new URL(settings.url).host : (settings.google?.adminEmail.split("@")[1] ?? "")}) for organization ${organizationId}`);
         // The organization's members and groups, queued (a disabled target's wait).
         await instance(ctx).resync(targetId, { resume: false });
@@ -349,7 +366,9 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const before = settingsOf(row);
         let after = before;
         if (ctx.body.settings !== undefined || ctx.body.credentials !== undefined) {
-          const settings = ctx.body.settings !== undefined ? ctx.body.settings : before;
+          // New credentials come with their own expiry: the old one goes, unless the settings give it.
+          const { credentialsExpireAt: _old, ...kept } = before;
+          const settings = ctx.body.settings !== undefined ? ctx.body.settings : ctx.body.credentials !== undefined ? kept : before;
           const type = (settings as { type?: unknown } | null)?.type ?? "scim";
           if (type !== row.type) throw refuse("BAD_REQUEST", `a target's type can't change (it's ${row.type}): remove it and connect a new one`);
           const parsed = storedSettingsSchema.safeParse(settings);
@@ -383,12 +402,17 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         });
         if (written === 0) throw refuse("CONFLICT", "the target was changed meanwhile: read it again and retry");
         const saved = { ...row, ...update } as TargetRow;
+        // Settings are written again with new credentials: changed only if they differ.
+        const changed = Object.keys(update)
+          .filter((k) => k !== "updatedAt" && (k !== "config" || update.config !== row.config))
+          .map((k) => (k === "sealed" ? "credentials" : k === "config" ? "settings" : k));
+        await record(ctx, actor, row, "target.updated", { changed, ...(changed.includes("settings") && after.url !== undefined ? { url: shownUrl(row.type, after.url) } : {}), enabled: truthy(saved.enabled) });
         audit(ctx, actor, `updated target ${row.targetId} (${Object.keys(update).filter((k) => k !== "updatedAt").map((k) => (k === "sealed" ? "credentials" : k === "config" ? "settings" : k)).join(", ") || "nothing"})`);
         // What's to be sent changed (settings beyond the label, new credentials, enabled): queued
         // again for everyone, and what was waiting or failed goes again (new credentials or a
         // re-enabled target). Pausing, or renaming the label, sends nothing new.
-        const { name: _a, ...sendsBefore } = before;
-        const { name: _b, ...sendsAfter } = after;
+        const { name: _a, credentialsExpireAt: _c, ...sendsBefore } = before;
+        const { name: _b, credentialsExpireAt: _d, ...sendsAfter } = after;
         const settingsChanged = JSON.stringify(sendsBefore) !== JSON.stringify(sendsAfter);
         const resume = ctx.body.credentials !== undefined || (ctx.body.enabled === true && !truthy(row.enabled));
         if (settingsChanged || resume) await instance(ctx).resync(row.targetId, { resume });
@@ -420,6 +444,8 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         // only in case, so these can't reach another's rows on a case-insensitive database.
         await adapter.deleteMany({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }] });
         for (const model of [JOB_MODEL, LINK_MODEL, GROUP_LINK_MODEL, ...(instance(ctx).decommission ? [DECOMMISSION_MODEL] : [])]) await adapter.deleteMany({ model, where: [{ field: "targetId", value: row.targetId }] });
+        await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "key", value: credentialsMarkerKey(row.targetId) }] });
+        await record(ctx, actor, row, "target.deleted", { abandoned });
         audit(ctx, actor, `deleted target ${row.targetId} of organization ${row.organizationId}${abandoned.accounts || abandoned.groups ? `, leaving ${abandoned.accounts} active accounts and ${abandoned.groups} groups at the app` : ""}`);
         return ctx.json({ deleted: true, abandoned });
       },
@@ -478,8 +504,16 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         method: "POST",
         use: [sensitiveSessionMiddleware],
         body: z
-          .strictObject({ id: z.string().min(1).max(100), phase: z.enum(["deactivate", "purge"]).optional(), preview: z.literal(true).optional(), confirm: z.number().int().min(0).optional(), cancel: z.literal(true).optional() })
-          .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both"),
+          .strictObject({
+            id: z.string().min(1).max(100),
+            phase: z.enum(["deactivate", "purge"]).optional(),
+            preview: z.literal(true).optional(),
+            confirm: z.number().int().min(0).optional(),
+            cancel: z.literal(true).optional(),
+            forget: z.array(z.string().min(1).max(256)).min(1).max(100).optional(),
+          })
+          .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both")
+          .refine((b) => !b.forget || (!b.preview && !b.cancel && b.confirm === undefined), "forget goes alone"),
       },
       async (ctx) => {
         const preview = ctx.body.preview === true;
@@ -489,9 +523,20 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const d = i.decommission;
         if (!d) throw refuse("BAD_REQUEST", "decommissioning isn't enabled (the plugin's decommission option)");
         const by = `user:${actor.userId}`;
+        if (ctx.body.forget) {
+          const done = await d.forget(row.targetId, ctx.body.forget, by);
+          if (done === null) throw refuse("BAD_REQUEST", "accounts are forgotten only while a decommission runs, or once it's complete");
+          if (done.forgotten.length) {
+            await record(ctx, actor, row, "decommission.forgot", { userIds: done.forgotten, skipped: done.skipped.length });
+            audit(ctx, actor, `forgot ${done.forgotten.length} accounts of target ${row.targetId} of organization ${row.organizationId}, left at the app as they are: ${done.forgotten.join(", ")}`);
+          }
+          i.kick(row.targetId);
+          return ctx.json({ forgotten: done.forgotten.length, skipped: done.skipped, decommission: await d.status(row.targetId) });
+        }
         if (ctx.body.cancel) {
           if (!(await d.cancel(row.targetId, by))) throw refuse("BAD_REQUEST", "no decommission is running that can be cancelled (a complete one, or a purge, can't be)");
           const left = await i.counts(row.targetId);
+          await record(ctx, actor, row, "decommission.cancelled", left);
           audit(ctx, actor, `cancelled the decommission of target ${row.targetId} of organization ${row.organizationId}: ${left.accounts} accounts still active there; every account and group queued again`);
           i.kick(row.targetId);
           return ctx.json({ decommission: await d.status(row.targetId) });
@@ -506,8 +551,10 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
             if (!truthy(row.enabled)) throw refuse("BAD_REQUEST", "the target is disabled: enable it first");
             if (!(await readable(ctx, row))) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give them again first");
             if (counts.accounts > PURGE_CONFIRM_ABOVE && ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)`);
-            await d.purge(row.targetId, by);
-            audit(ctx, actor, `started purging target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts and ${counts.groups} groups to delete`);
+            if (await d.purge(row.targetId, by)) {
+              await record(ctx, actor, row, "purge.started", counts);
+              audit(ctx, actor, `started purging target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts and ${counts.groups} groups to delete`);
+            }
           } else await d.purge(row.targetId, by);
           i.kick(row.targetId);
           return ctx.json({ decommission: await d.status(row.targetId) });
@@ -521,11 +568,43 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           if (!truthy(row.enabled)) throw refuse("BAD_REQUEST", "the target is disabled: enable it first");
           if (!(await readable(ctx, row))) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give them again first");
           if (ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)`);
-          await d.start(row.targetId, by);
-          audit(ctx, actor, `started decommissioning target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
+          if (await d.start(row.targetId, by)) {
+            await record(ctx, actor, row, "decommission.started", counts);
+            audit(ctx, actor, `started decommissioning target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
+          }
         } else await d.start(row.targetId, by);
         i.kick(row.targetId);
         return ctx.json({ decommission: await d.status(row.targetId) });
+      },
+    ),
+
+    /**
+     * The audit history of an organization's targets (with the plugin's `audit`), removed ones'
+     * included, newest first: `id` for one target's; `limit` (100, at most 500), then `after: next`.
+     * Who connected, changed, removed or decommissioned what, and when; never secrets.
+     */
+    scimProvisioningTargetEvents: createAuthEndpoint(
+      "/scim-provisioning/targets/events",
+      {
+        method: "POST",
+        use: [sensitiveSessionMiddleware],
+        body: z.strictObject({ organizationId: z.string().min(1).max(256).optional(), id: z.string().min(1).max(100).optional(), after: z.string().max(64).optional(), limit: z.number().int().min(1).max(AUDIT_PAGE_MAX).optional() }),
+      },
+      async (ctx) => {
+        const actor = await actorOf(ctx, host.options);
+        const i = instance(ctx);
+        if (!i.audit.on) throw refuse("BAD_REQUEST", "the audit history isn't enabled (the plugin's audit option)");
+        let organizationId = ctx.body.organizationId;
+        if (!actor.host && organizationId === undefined) {
+          if (actor.organizations.size > 1) throw refuse("BAD_REQUEST", "organizationId: required (you administer several organizations)");
+          organizationId = [...actor.organizations][0];
+        }
+        if (organizationId !== undefined && !may(actor, organizationId)) throw refuse("FORBIDDEN", "not allowed");
+        try {
+          return ctx.json(await i.audit.list({ organizationId, targetId: ctx.body.id, after: ctx.body.after, limit: ctx.body.limit }));
+        } catch (e) {
+          throw refuse("BAD_REQUEST", (e as Error).message);
+        }
       },
     ),
 

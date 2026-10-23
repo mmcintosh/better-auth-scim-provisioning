@@ -36,6 +36,17 @@ export interface AttributeFields {
   region?: string | undefined;
   postalCode?: string | undefined;
   country?: string | undefined;
+  /**
+   * The user's preferred language, a language tag (`en`, `en-CA`): SCIM `preferredLanguage`; at
+   * Entra ID `preferredLanguage`. Not sent to Google Workspace.
+   */
+  preferredLanguage?: string | undefined;
+  /** Their locale, a language tag (`en-CA`): SCIM `locale`. Only to SCIM apps and webhooks. */
+  locale?: string | undefined;
+  /** Their time zone, an IANA name (`America/Toronto`): SCIM `timezone`. Only to SCIM apps and webhooks. */
+  timezone?: string | undefined;
+  /** What kind of user (`Employee`, `Contractor`: the app's words): SCIM `userType`. Only to SCIM apps and webhooks (Entra ID's means member or guest). */
+  userType?: string | undefined;
 }
 
 /** What every target has, whatever kind of app it is. */
@@ -88,9 +99,26 @@ export interface TargetOptions {
    * send. An empty field clears that attribute at the app. At Entra ID they're `jobTitle`,
    * `businessPhones`, `mobilePhone` and the address fields; at Google Workspace the primary
    * organization's title, the phones and the work address, touching only what's named here. A
-   * `mapUser` that sets one of these itself takes precedence for that attribute.
+   * `mapUser` that sets one of these itself takes precedence for that attribute. Also the
+   * preferred language, locale, time zone and user type (`preferredLanguage`, `locale`,
+   * `timezone`, `userType`), only when named (`true` doesn't read them), checked before they're
+   * sent: a language that isn't a language tag, or a time zone the runtime doesn't know, is left
+   * out (and logged), not sent to be refused.
    */
   attributes?: boolean | AttributeFields | undefined;
+  /**
+   * The user's roles in your organizations, as SCIM `roles` (`{ value, type }`): at an
+   * organization's target, their roles there (`type: "organization"`); at another, their roles
+   * in every organization they're in, each with the organization's slug as `type`. For apps
+   * that grant access by role. SCIM apps and webhooks only.
+   */
+  roles?: boolean | undefined;
+  /**
+   * The user's entitlements, as SCIM `entitlements` (`{ value }`): what your code says they're
+   * entitled to (a licence, a plan). Return [] for none, which clears them at the app. SCIM apps
+   * and webhooks only; not for organizations' stored targets (a function can't be stored).
+   */
+  entitlements?: ((user: ProvisionedUser) => string[] | Promise<string[]>) | undefined;
   /**
    * Organizations (Better Auth's organization plugin) as groups at the app, their provisioned
    * members as the group's members. Every organization (or only `organizationId`'s), or those a
@@ -131,6 +159,14 @@ export interface TargetOptions {
    * Retry-After (a minute if it gives none), and rate limits never count toward `retry.maxAttempts`.
    */
   maxRequestsPerMinute?: number | undefined;
+  /**
+   * When the target's credentials expire (an ISO date, or date and time; or a Date): an AWS IAM Identity Center
+   * token lasts a year, a GitHub token or an Entra ID client secret as long as you chose. Shown
+   * in `scimProvisioningStatus`, and warned about before it comes: daily at `warn` from 30 days
+   * out, and from 7 days out (or once past) at `error` and through `onFailure` (`kind:
+   * "credentials"`). Without it, a bearer token that's a JWT is read for its own expiry (`exp`).
+   */
+  credentialsExpireAt?: Date | string | undefined;
   /**
    * Marked for decommissioning (needs the plugin's `decommission` option). Alone, it freezes the
    * target: nothing is sent to it, and changes wait. `auth.api.scimProvisioningDecommission` then
@@ -278,9 +314,13 @@ export type Target = ScimTarget | GoogleWorkspaceTarget | EntraIdTarget | Webhoo
 /** A delivery that gave up, or reached `retry.maxAttempts` (it's then retried every 6 hours). */
 export interface DeliveryFailure {
   targetId: string;
-  /** What was being delivered: a user, or an organization's, team's or role's group. */
-  kind: "user" | "group" | "team" | "role";
-  /** The user's id, or the organization's, team's or role's. */
+  /**
+   * What was being delivered: a user, or an organization's, team's or role's group; or
+   * "credentials": the target's credentials expire within 7 days, or have (`subjectId` is the
+   * target's id; `failed` once they have). The list can grow in a minor release.
+   */
+  kind: "user" | "group" | "team" | "role" | "credentials";
+  /** The user's id, or the organization's, team's or role's (the target's, for "credentials"). */
   subjectId: string;
   /** The error, with the app's own message where it gave one. */
   error: string;
@@ -330,6 +370,58 @@ export interface ScimProvisioningOptions {
    * exists only with this option: migrate after turning it on).
    */
   decommission?: boolean | undefined;
+  /**
+   * An audit history: who connected, changed, removed or decommissioned which target, and when,
+   * kept in its own table (`scimProvisioningAuditEvent`, which exists only with this option:
+   * migrate after turning it on) and listed newest first (`scimProvisioningAuditEvents`; with the
+   * registry, organizations' administrators get their own at `targets/events`). Never secrets.
+   */
+  audit?: boolean | AuditOptions | undefined;
+}
+
+export interface AuditOptions {
+  /** Remove events older than this many days (the scheduled run does, hourly). Kept for good by default. */
+  keepDays?: number | undefined;
+  /**
+   * Also hand each event to your own code as it's recorded: to forward it to a SIEM, say. It gets
+   * a few seconds; an error it throws is logged, never in the way.
+   */
+  onEvent?: ((event: AuditEvent) => void | Promise<void>) | undefined;
+}
+
+/**
+ * What an audit event records. The list can grow in a minor release (handle a value you don't
+ * know). `target.*` events are organizations' stored targets'; the decommission ones are for every
+ * target.
+ */
+export type AuditAction =
+  | "target.created"
+  | "target.updated"
+  | "target.deleted"
+  | "decommission.started"
+  | "decommission.cancelled"
+  | "decommission.completed"
+  | "decommission.forgot"
+  | "purge.started"
+  | "purge.completed";
+
+export interface AuditEvent {
+  /** When, as an ISO date. */
+  at: string;
+  targetId: string;
+  /** The target's organization; null for a target in code. */
+  organizationId: string | null;
+  /** Who: `user:<id>` (through the registry's routes), `server` (`auth.api`, from your code) or `system` (the plugin itself). */
+  actor: string;
+  action: AuditAction;
+  /**
+   * What, in a few fields: `hostAdministrator` (acting as one, `canManage`); for target.created,
+   * `type`, `url` (as the API shows it) and `enabled`; for target.updated, `changed` (of
+   * `settings`, `credentials`, `enabled`), `url` and `enabled`; for target.deleted, `abandoned`
+   * (`accounts`, `groups`); for the decommission ones, `accounts` and `groups` (to go, or, after a
+   * cancel, still active), or `total` and `groupsTotal` when complete; for decommission.forgot, `userIds` and how many were `forgotten`.
+   */
+  detail: Record<string, unknown>;
 }
 
 export interface TargetRegistryOptions {

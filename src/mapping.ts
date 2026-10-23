@@ -93,7 +93,32 @@ const textOf = (v: unknown): string | undefined => {
 };
 
 /** The attributes `attributes` can send, each read from a user field of that name by default. */
-export const ATTRIBUTE_NAMES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country"] as const;
+export const ATTRIBUTE_NAMES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country", "preferredLanguage", "locale", "timezone", "userType"] as const;
+/**
+ * What `true` reads: the attributes it read when it came (1.4). The four added since are named
+ * (`{ timezone: "timezone" }`), so upgrading never starts sending, or clearing, what a host didn't ask for.
+ */
+const TRUE_ATTRIBUTES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country"] as const;
+/** The single-valued attributes sent as they are (RFC 7643 §4.1.1). */
+const PLAIN = ["preferredLanguage", "locale", "timezone", "userType"] as const;
+/** A language tag (RFC 5646's shape, loosely): `en`, `en-CA`, `zh-Hant-TW`. */
+const LANGUAGE_TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+/** A time zone the runtime knows by that name (its IANA data: `America/Toronto`, `UTC`, `CET`). */
+const validTimeZone = (zone: string) => {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+};
+/** Is this a value the attribute can take? (A wrong one is left out, not sent to be refused.) */
+const validFor: Record<(typeof PLAIN)[number], (v: string) => boolean> = {
+  preferredLanguage: (v) => LANGUAGE_TAG.test(v),
+  locale: (v) => LANGUAGE_TAG.test(v),
+  timezone: validTimeZone,
+  userType: (v) => v.length <= 256,
+};
 export type AttributeName = (typeof ATTRIBUTE_NAMES)[number];
 
 /** `attributes`: true, or which user field holds each attribute. Data only, so stored targets can have it too. */
@@ -105,7 +130,7 @@ export const attributesOption = z.union([
 ]);
 
 /** The user fields organizations' stored targets may read for `attributes`, unless the host lists others (`registry.attributeFields`). */
-export const DEFAULT_STORED_ATTRIBUTE_FIELDS: readonly string[] = [...ATTRIBUTE_NAMES];
+export const DEFAULT_STORED_ATTRIBUTE_FIELDS: readonly string[] = [...TRUE_ATTRIBUTES];
 
 /** As enterpriseFieldProblems, for `attributes`. */
 export const attributeFieldProblems = (option: boolean | AttributeFields | undefined, allowed: readonly string[], known?: ReadonlySet<string>) => fieldProblems("attributes", attributeFields(option, known), allowed);
@@ -118,7 +143,7 @@ export const attributeFieldProblems = (option: boolean | AttributeFields | undef
 export function attributeFields(option: boolean | AttributeFields | undefined, known?: ReadonlySet<string>): AttributeFields | null {
   if (!option) return null;
   if (option !== true) return option;
-  const fields = Object.fromEntries(ATTRIBUTE_NAMES.filter((a) => !known || known.has(a)).map((a) => [a, a])) as AttributeFields;
+  const fields = Object.fromEntries(TRUE_ATTRIBUTES.filter((a) => !known || known.has(a)).map((a) => [a, a])) as AttributeFields;
   return Object.keys(fields).length ? fields : null;
 }
 
@@ -132,8 +157,9 @@ export const missingAttributeFields = (option: boolean | AttributeFields | undef
  * and Google Workspace and Entra ID read as "ours, and empty"; `clears` lists them, for a PATCH
  * to remove by path.
  */
-export function withAttributes(user: ProvisionedUser, fields: AttributeFields | null, scim: ScimUser): { scim: ScimUser; clears: string[] } {
-  if (!fields) return { scim, clears: [] };
+export function withAttributes(user: ProvisionedUser, fields: AttributeFields | null, scim: ScimUser): { scim: ScimUser; clears: string[]; invalid: string[] } {
+  if (!fields) return { scim, clears: [], invalid: [] };
+  const invalid: string[] = [];
   const out: ScimUser = { ...scim };
   const clears: string[] = [];
   const value = (name: AttributeName) => (fields[name] ? textOf(user[fields[name] as string]) : undefined);
@@ -156,7 +182,19 @@ export function withAttributes(user: ProvisionedUser, fields: AttributeFields | 
     out.addresses = Object.keys(parts).length ? [{ type: "work", primary: true, ...parts }] : undefined;
     if (!out.addresses) clears.push("addresses");
   }
-  return { scim: out, clears };
+  for (const name of PLAIN) {
+    if (!fields[name] || scim[name] !== undefined) continue;
+    const v = value(name);
+    if (v !== undefined && !validFor[name](v)) {
+      // Not this attribute's kind of value: left out (a PATCH leaves the app's as it is), and said why.
+      invalid.push(name);
+      delete out[name];
+      continue;
+    }
+    out[name] = v;
+    if (v === undefined) clears.push(name);
+  }
+  return { scim: out, clears, invalid };
 }
 
 /** The user's Enterprise User values (manager aside), and their manager's Better Auth user id. */
