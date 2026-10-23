@@ -170,4 +170,22 @@ describe("decommissioning an organization's target", () => {
     const { admin, decommission } = await setup({ organizationRoles: ["owner"], decommissionRoles: ["owner", "admin"] });
     expect(await status(decommission(admin.headers, { preview: true }))).toBe(403);
   });
+
+  it("an owner can forget an account it can't get through (only such a one); an admin can't", async () => {
+    const { h, remote, owner, admin, target, decommission, statusOf } = await setup();
+    const ann = [...remote.users.values()].find((u) => u.userName === "ann@example.com")!;
+    for (let i = 0; i < 20; i++) for (const method of ["PATCH", "PUT"]) remote.failOn(method, new RegExp(`^/Users/${ann.id}$`), { status: 400, detail: "can't" });
+    await decommission(owner.headers, { confirm: 2 });
+    // Olive's went through, and a job that isn't a user's isn't anyone's to forget: skipped.
+    await h.settle();
+    expect(await decommission(owner.headers, { forget: [owner.id, "decommission:step"] })).toMatchObject({ forgotten: 0, skipped: [owner.id, "decommission:step"] });
+    for (let i = 0; i < 30 && (await statusOf()).decommission?.state !== "blocked"; i++) {
+      await h.auth.api.scimProvisioningRun({ body: { limit: 200 } });
+      await h.ctx.adapter.updateMany({ model: "scimProvisioningJob", where: [{ field: "targetId", value: target.id }], update: { nextAttemptAt: new Date(Date.now() - 1000) } });
+      await h.settle();
+    }
+    expect(await statusOf()).toMatchObject({ decommission: { state: "blocked" } });
+    expect(await status(decommission(admin.headers, { forget: [admin.id] }))).toBe(403);
+    expect(await decommission(owner.headers, { forget: [admin.id] })).toMatchObject({ forgotten: 1, skipped: [] });
+  });
 });

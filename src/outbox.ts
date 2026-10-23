@@ -129,6 +129,38 @@ export type GroupRef = { kind: Exclude<Kind, "user">; id: string };
  * a time (its cursor is in its own row: see Decommission).
  */
 type JobKind = Kind | "resync" | "reports" | "decommission";
+/** Credentials expiring within this many days are warned about (daily, at warn)… */
+const CREDENTIALS_WARN_DAYS = 30;
+/** …and within this many (or once expired), at error and through onFailure. */
+const CREDENTIALS_ALERT_DAYS = 7;
+/** How often a process looks at its targets' credentials, at most. */
+const CREDENTIALS_CHECK_MS = 3_600_000;
+
+/** The job that notes a target's latest credentials alert (see claimCredentialsAlert). */
+export const credentialsMarkerKey = (targetId: string) => `${targetId}:credentials:alert`;
+
+/** A JWT's expiry (`exp`), read, not verified: only to warn before it comes. */
+export function jwtExpiry(token: string | undefined): Date | null {
+  const parts = token?.split(".");
+  if (parts?.length !== 3) return null;
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob((parts[1] as string).replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)))) as { exp?: unknown };
+    return typeof payload.exp === "number" && Number.isFinite(payload.exp) ? new Date(payload.exp * 1000) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** When a target's credentials expire: as configured (`credentialsExpireAt`), or a bearer token's own `exp`. */
+export function credentialsExpiry(target: Target): Date | null {
+  if (target.credentialsExpireAt !== undefined) {
+    const at = new Date(target.credentialsExpireAt);
+    return Number.isNaN(at.getTime()) ? null : at;
+  }
+  if (target.type !== undefined && target.type !== "scim") return null;
+  return jwtExpiry(target.token ?? (target.auth?.type === "bearer" ? target.auth.token : target.auth?.type === "header" ? target.auth.value.split(" ").pop() : undefined));
+}
+
 /** A purge of more accounts than this needs their number confirmed. */
 export const PURGE_CONFIRM_ABOVE = 500;
 /** The decommission job's subject: one per target. */
@@ -256,6 +288,11 @@ export interface TargetSource {
   forOrganizations(organizationIds: readonly string[]): Promise<Target[]>;
   /** Every target, for the host's own endpoints (status, reconcile). */
   every(): Promise<Target[]>;
+  /**
+   * When each target's credentials expire, where known, without building every target (a stored
+   * one's credentials would each have to be decrypted): from its settings. Paused ones left out.
+   */
+  expiries?(): Promise<{ id: string; at: Date }[]>;
 }
 
 /** The targets given in code, fixed at startup. */
@@ -266,6 +303,10 @@ export function staticTargets(list: Target[]): TargetSource {
     get: async (id) => byId.get(id) ?? null,
     forOrganizations: async (ids) => list.filter((t) => !t.organizationId || ids.includes(t.organizationId)),
     every: async () => list,
+    expiries: async () => list.flatMap((t) => {
+      const at = isPaused(t) ? null : credentialsExpiry(t);
+      return at ? [{ id: t.id, at }] : [];
+    }),
   };
 }
 
@@ -276,6 +317,9 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   const attributesOf = (target: Target) => attributeFields(target.attributes, userFields);
   const maxAttempts = options.retry?.maxAttempts ?? 8;
   const audit = auditLog(options.audit, adapter, log);
+  /** Targets in code: their audit events have no organization, whatever `organizationId` limits them to. */
+  const inCode = new Set(options.targets.map((t) => t.id));
+  let credentialsCheckedAt = 0;
   const baseDelayMs = options.retry?.baseDelayMs ?? 30_000;
   const backoff = (attempts: number) => Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** Math.max(0, attempts - 1));
 
@@ -472,6 +516,74 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * the attributes it no longer has, which a PATCH removes. The manager is their id at this app,
    * or their address at Google Workspace, and only once they're provisioned and active there.
    */
+  /** Attribute values left out as invalid, logged once an hour per target and attribute (a reconcile mustn't log one line per user). */
+  const invalidNoted = new Map<string, number>();
+  function noteInvalid(targetId: string, userId: string, names: string[]) {
+    const fresh = names.filter((n) => Date.now() - (invalidNoted.get(`${targetId}|${n}`) ?? 0) > 3_600_000);
+    if (!fresh.length) return;
+    for (const n of fresh) invalidNoted.set(`${targetId}|${n}`, Date.now());
+    log.warn(`[scim] ${targetId}: user ${userId}: ${fresh.join(", ")} left out, not a valid value (a language tag such as en-CA; an IANA time zone such as America/Toronto); said once an hour per attribute`);
+  }
+
+  /**
+   * The user's roles (`roles`: in the target's organization, or in each of theirs) and
+   * entitlements (`entitlements`), unless `mapUser` set them. None is a key holding undefined, so
+   * a PUT clears them; `clears` lists them for a PATCH.
+   */
+  async function withAccess(target: Target, user: ProvisionedUser, scim: ScimUser): Promise<{ scim: ScimUser; clears: string[] }> {
+    const out: ScimUser = { ...scim };
+    const clears: string[] = [];
+    if (target.roles && scim.roles === undefined) {
+      const roles = await scimRolesOf(target, user.id);
+      out.roles = roles.length ? roles : undefined;
+      if (!roles.length) clears.push("roles");
+    }
+    if (target.entitlements && scim.entitlements === undefined) {
+      // Your code, with the target's timeout: a hang mustn't hold the job past its lease.
+      const limit = target.timeoutMs ?? 10_000;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let given: string[];
+      try {
+        given = await Promise.race([Promise.resolve(target.entitlements(user)), new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`no answer within ${limit / 1000} s`)), limit)))]);
+      } catch (e) {
+        // Your code's error, as mapUser's and include's: retried, and failed at maxAttempts.
+        throw new Error(`entitlements: ${(e as Error).message}`);
+      } finally {
+        clearTimeout(timer);
+      }
+      const values = [...new Set((Array.isArray(given) ? given : []).filter((v): v is string => typeof v === "string" && v.trim() !== "").map((v) => v.trim()))];
+      out.entitlements = values.length ? values.map((value) => ({ value })) : undefined;
+      if (!values.length) clears.push("entitlements");
+    }
+    return { scim: out, clears };
+  }
+
+  /** A user's organization roles: at an organization's target, there; otherwise in each organization, typed by its slug. */
+  async function scimRolesOf(target: Target, userId: string): Promise<NonNullable<ScimUser["roles"]>> {
+    const where: Where[] = [{ field: "userId", value: userId }];
+    if (target.organizationId) where.push({ field: "organizationId", value: target.organizationId });
+    const members = ((await adapter.findMany({ model: "member", where, limit: 1000 })) as { userId: string; organizationId: string; role?: string | null }[]).filter(
+      (m) => m.userId === userId && (!target.organizationId || m.organizationId === target.organizationId),
+    );
+    const slugs = new Map<string, string>();
+    if (!target.organizationId) {
+      const ids = [...new Set(members.map((m) => m.organizationId))];
+      for (let i = 0; i < ids.length; i += IN_BATCH) {
+        const batch = ids.slice(i, i + IN_BATCH);
+        for (const o of (await adapter.findMany({ model: "organization", where: [{ field: "id", value: batch, operator: "in" }], limit: batch.length })) as { id: string; slug?: string | null }[]) if (batch.includes(o.id)) slugs.set(o.id, o.slug ?? o.id);
+      }
+    }
+    const roles = members.flatMap((m) =>
+      String(m.role ?? "")
+        .split(",")
+        .map((r) => r.trim())
+        .filter(Boolean)
+        .map((value) => ({ value, type: target.organizationId ? "organization" : (slugs.get(m.organizationId) ?? m.organizationId) })),
+    );
+    const seen = new Set<string>();
+    return roles.filter((r) => !seen.has(`${r.type}|${r.value}`) && seen.add(`${r.type}|${r.value}`)).sort((a, b) => `${a.type}|${a.value}`.localeCompare(`${b.type}|${b.value}`));
+  }
+
   async function withEnterprise(target: Target, user: ProvisionedUser, scim: ScimUser): Promise<{ scim: ScimUser; clears: string[] }> {
     const fields = fieldsOf(target);
     if (!fields || scim[SCIM_ENTERPRISE_USER_SCHEMA] !== undefined) return { scim, clears: [] };
@@ -547,8 +659,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     // A target being decommissioned wants nobody.
     if (retiring === "none" && (await wanted(target, user))) {
       const core = withAttributes(user as ProvisionedUser, attributesOf(target), (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
-      const { scim, clears: enterpriseClears } = await withEnterprise(target, user as ProvisionedUser, core.scim);
-      const clears = [...core.clears, ...enterpriseClears];
+      if (core.invalid.length) noteInvalid(target.id, userId, core.invalid);
+      const access = await withAccess(target, user as ProvisionedUser, core.scim);
+      const { scim, clears: enterpriseClears } = await withEnterprise(target, user as ProvisionedUser, access.scim);
+      const clears = [...core.clears, ...access.clears, ...enterpriseClears];
       const externalId = scim.externalId ?? null;
       // Back after the plugin deactivated them (a ban, a removal): only then is a Google suspension
       // (or a disabled Entra account) lifted, never an admin's own or one of Google's.
@@ -970,7 +1084,6 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * lease still keeps two deliveries for one user apart.
    */
   async function runDue(limit = 50, targetId?: string): Promise<Record<Outcome, number>> {
-    if (targetId === undefined) await audit.prune();
     const due = await dueJobs(limit, targetId);
     const tally: Record<Outcome, number> = { done: 0, retry: 0, failed: 0, busy: 0 };
     let next = 0;
@@ -978,6 +1091,11 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       while (next < due.length) tally[await run(due[next++] as Job)]++;
     };
     await Promise.all(Array.from({ length: Math.min(options.concurrency ?? 4, due.length) }, worker));
+    // Housekeeping, after the deliveries: never in their way.
+    if (targetId === undefined) {
+      await audit.prune();
+      await checkCredentials();
+    }
     return tally;
   }
 
@@ -1499,6 +1617,80 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return links.filter((l) => l.targetId === targetId).map((l) => ({ key: l.key, ref: refOfLink(l) }));
   }
 
+  /**
+   * Credentials that expire soon, or have: warned about once a day per target (per process), at
+   * warn from 30 days out, at error and through onFailure from 7. The scheduled run calls it.
+   */
+  async function checkCredentials(): Promise<void> {
+    if (Date.now() - credentialsCheckedAt < CREDENTIALS_CHECK_MS) return;
+    credentialsCheckedAt = Date.now();
+    const today = new Date().toISOString().slice(0, 10);
+    let expiries: { id: string; at: Date }[];
+    try {
+      expiries = source.expiries ? await source.expiries() : [];
+    } catch (e) {
+      log.error(`[scim] couldn't list the targets to check their credentials: ${(e as Error).message}`);
+      return;
+    }
+    const alerts: DeliveryFailure[] = [];
+    for (const { id, at } of expiries) {
+      const days = (at.getTime() - Date.now()) / 86_400_000;
+      if (days > CREDENTIALS_WARN_DAYS) continue;
+      const level = days <= 0 ? "expired" : days <= CREDENTIALS_ALERT_DAYS ? "alert" : "warn";
+      // Once a day per target and level, across every process: a higher level the same day still goes.
+      if (!(await claimCredentialsAlert(id, `${today}|${level}`))) continue;
+      const when = at.toISOString().slice(0, 10);
+      const error = days <= 0 ? `its credentials expired on ${when}: give it new ones` : `its credentials expire on ${when}, in ${Math.ceil(days)} days: give it new ones before then`;
+      if (level === "warn") {
+        log.warn(`[scim] ${id}: ${error}`);
+        continue;
+      }
+      log.error(`[scim] ${id}: ${error}`);
+      alerts.push({ targetId: id, kind: "credentials", subjectId: id, error, status: null, attempts: 0, failed: days <= 0 });
+    }
+    // A few at a time, each with its few seconds.
+    const onFailure = options.onFailure;
+    if (!onFailure) return;
+    for (let i = 0; i < alerts.length; i += 10) {
+      await Promise.all(
+        alerts.slice(i, i + 10).map(async (failure) => {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([onFailure(failure), new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`no answer within ${ON_FAILURE_TIMEOUT_MS / 1000} s`)), ON_FAILURE_TIMEOUT_MS)))]);
+          } catch (hookError) {
+            log.error(`[scim] onFailure threw: ${(hookError as Error).message}`);
+          } finally {
+            clearTimeout(timer);
+          }
+        }),
+      );
+    }
+  }
+
+  /**
+   * Note that a target's credentials were alerted about (`mark`: the day and level): true if this
+   * call is the one that did, so every process together alerts once. Kept as a job that's never
+   * due, under the target's id with "~credentials" (no target's: target ids have no "~"), so it's in
+   * no target's counts.
+   */
+  async function claimCredentialsAlert(targetId: string, mark: string): Promise<boolean> {
+    const key = credentialsMarkerKey(targetId);
+    const [marker] = await jobsFor(key);
+    if (marker) {
+      if (marker.lastError === mark) return false;
+      return (await adapter.updateMany({ model: JOB_MODEL, where: [{ field: "id", value: marker.id }, { field: "version", value: marker.version }], update: { lastError: mark, version: marker.version + 1, updatedAt: new Date() } })) > 0;
+    }
+    const now = new Date();
+    try {
+      await adapter.create({ model: JOB_MODEL, data: { key, targetId: `${targetId}~credentials`, userId: "alert", kind: "credentials", version: 1, attempts: 0, nextAttemptAt: PAUSED_UNTIL, lockedUntil: RELEASED, failed: false, lastError: mark, lastStatus: null, createdAt: now, updatedAt: now } });
+      return true;
+    } catch {
+      // Another process noted it first (the UNIQUE key).
+      return false;
+    }
+  }
+
+
   /** Per target: jobs queued, stuck (still retried past maxAttempts) and failed; accounts and groups the app confirmed. */
   async function status(targetIds: string[]) {
     const count = (model: string, where: { field: string; value: string | number | boolean | Date; operator?: "lt" | "gte" | "ne" }[]) => adapter.count({ model, where });
@@ -1518,6 +1710,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
           // Confirmed by the app: a pending create's link has no remoteId yet.
           accounts: await count(LINK_MODEL, [t, { field: "active", value: true }, { field: "remoteId", value: "", operator: "ne" }]),
           groups: await count(GROUP_LINK_MODEL, [t, { field: "remoteId", value: "", operator: "ne" }]),
+          // When its credentials expire, if known (see credentialsExpireAt).
+          credentialsExpireAt: await source.get(id).then((target) => (target ? (credentialsExpiry(target)?.toISOString() ?? null) : null)),
         };
       }),
     );
@@ -1719,7 +1913,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     // step (one that outlived its hold), which may have set when it looks again. This job stays.
     if (moved === 0) return new Date(Date.now() + 5_000);
     if (complete)
-      await audit.record({ targetId: target.id, organizationId: target.organizationId ?? null, actor: "system", action: purge ? "purge.completed" : "decommission.completed", detail: { total: row.total, groupsTotal: row.groupsTotal } });
+      await audit.record({ targetId: target.id, organizationId: inCode.has(target.id) ? null : (target.organizationId ?? null), actor: "system", action: purge ? "purge.completed" : "decommission.completed", detail: { total: row.total, groupsTotal: row.groupsTotal } });
     if (complete)
       log.warn(`[scim] ${target.id}: ${purge ? `purge complete: none of its accounts (but adopted ones) or groups left there; ${row.total} accounts and ${row.groupsTotal} groups when it started` : `decommission complete: none of its accounts active there, its groups emptied; ${row.total} accounts and ${row.groupsTotal} groups when it started`}`);
     // The next step, in the next run: this one's deliveries go first.
@@ -1753,13 +1947,13 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * or null if there's no complete decommission to purge. A purge under way is queued again (a
    * nudge, if its step was lost).
    */
-  async function startPurge(targetId: string, by: string): Promise<Decommission | null> {
+  async function startPurge(targetId: string, by: string): Promise<(Decommission & { started: boolean }) | null> {
     const target = await targetFor(targetId);
     for (let i = 0; i < 5; i++) {
       const row = await decommissionOf(target.id);
       if (row?.phase === "purge") {
         if (row.state === "running") await enqueue(target.id, STEP, { kind: "decommission", now: true });
-        return row;
+        return { ...row, started: false };
       }
       if (row?.state !== "complete") return null;
       const counts = await decommissionCounts(target.id, "purge");
@@ -1771,7 +1965,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       });
       if (moved > 0) {
         await enqueue(target.id, STEP, { kind: "decommission", now: true });
-        return decommissionOf(target.id);
+        const started = await decommissionOf(target.id);
+        return started ? { ...started, started: true } : null;
       }
     }
     throw new Error(`[scim] ${target.id}: could not start the purge (its decommission kept changing); try again`);
@@ -1782,18 +1977,19 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * under way is queued again (a nudge, if its step was lost); a complete one is left as it is. The
    * caller checks that it may, and the confirmation.
    */
-  async function startDecommission(targetId: string, by: string): Promise<Decommission> {
+  async function startDecommission(targetId: string, by: string): Promise<Decommission & { started: boolean }> {
     const target = await targetFor(targetId);
     for (let i = 0; i < 5; i++) {
       const row = await decommissionOf(target.id);
-      if (row?.state === "complete") return row;
+      if (row?.state === "complete") return { ...row, started: false };
       if (row?.state === "running") {
         await enqueue(target.id, STEP, { kind: "decommission", now: true });
-        return row;
+        return { ...row, started: false };
       }
       const counts = await decommissionCounts(target.id);
       const now = new Date();
       const fields = { phase: "deactivate", state: "running", cursor: "G:", total: counts.accounts, groupsTotal: counts.groups, startedAt: now, startedBy: by, completedAt: null, cancelledAt: null, cancelledBy: null, destination: appOf(target), updatedAt: now };
+      let mine = true;
       if (row) {
         // A cancel's restore steps move it on meanwhile: read again, and retry.
         if ((await adapter.updateMany({ model: DECOMMISSION_MODEL, where: [{ field: "id", value: row.id }, { field: "revision", value: row.revision }], update: { ...fields, revision: row.revision + 1 } })) === 0) continue;
@@ -1803,11 +1999,12 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         } catch (e) {
           // Started meanwhile (the UNIQUE targetId): that one stands.
           if (!(await decommissionOf(target.id))) throw e;
+          mine = false;
         }
       }
       const started = (await decommissionOf(target.id)) as Decommission;
       if (started.state === "running") await enqueue(target.id, STEP, { kind: "decommission", now: true });
-      return started;
+      return { ...started, started: mine };
     }
     throw new Error(`[scim] ${target.id}: could not start the decommission (it kept changing); try again`);
   }
@@ -1843,7 +2040,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     if (!row && target.decommission !== true) return null;
     const { accounts, groups } = await decommissionCounts(target.id, row?.phase);
     if (!row || row.state === "cancelled") {
-      if (target.decommission === true) return { phase: null, state: "frozen" as const, accounts, groups, total: null, groupsTotal: null, startedAt: null, startedBy: null, completedAt: null, cancelledAt: row?.cancelledAt ? new Date(row.cancelledAt).toISOString() : null };
+      if (target.decommission === true) return { phase: null, state: "frozen" as const, accounts, groups, total: null, groupsTotal: null, startedAt: null, startedBy: null, completedAt: null, cancelledAt: row?.cancelledAt ? new Date(row.cancelledAt).toISOString() : null, estimatedCompletionAt: null };
     }
     if (!row) return null;
     let state: "running" | "blocked" | "paused" | "complete" | "cancelled" = row.state;
@@ -1856,7 +2053,53 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       else if (moved(row, target) || (bad > 0 && bad >= others)) state = "blocked";
     }
     const iso = (d: unknown) => (d ? new Date(d as string).toISOString() : null);
-    return { phase: row.phase, state, accounts, groups, total: row.total, groupsTotal: row.groupsTotal, startedAt: iso(row.startedAt), startedBy: row.startedBy, completedAt: iso(row.completedAt), cancelledAt: iso(row.cancelledAt) };
+    // At the pace so far: the accounts done since it started, and those left.
+    let estimatedCompletionAt: string | null = null;
+    const done = row.total - accounts;
+    const elapsed = Date.now() - new Date(row.startedAt).getTime();
+    if (state === "running" && done > 0 && accounts > 0 && elapsed > 0) estimatedCompletionAt = new Date(Date.now() + (accounts * elapsed) / done).toISOString();
+    return { phase: row.phase, state, accounts, groups, total: row.total, groupsTotal: row.groupsTotal, startedAt: iso(row.startedAt), startedBy: row.startedBy, completedAt: iso(row.completedAt), cancelledAt: iso(row.cancelledAt), estimatedCompletionAt };
+  }
+
+  /**
+   * Accounts a decommission (or purge) can't get through, and that someone has dealt with at the
+   * app by hand (an account the app won't deactivate, or delete): forgotten here, their links and
+   * jobs at this target removed, so it can complete. Only while one is running or complete, and
+   * only accounts it's stuck on: linked here, their job failed or past maxAttempts, and not being
+   * delivered right now. The others are `skipped`. Null if there's no such decommission. The caller
+   * records it.
+   */
+  async function forgetAccounts(targetId: string, userIds: string[], by: string): Promise<{ forgotten: string[]; skipped: string[] } | null> {
+    const row = await decommissionOf(targetId);
+    if (row?.state !== "running" && row?.state !== "complete") return null;
+    const ids = [...new Set(userIds)];
+    const forgotten: string[] = [];
+    const skipped: string[] = [];
+    const now = Date.now();
+    for (let i = 0; i < ids.length; i += IN_BATCH) {
+      const batch = ids.slice(i, i + IN_BATCH);
+      const keys = batch.map((u) => keyOf(targetId, u));
+      const links = new Set(((await adapter.findMany({ model: LINK_MODEL, where: [{ field: "key", value: keys, operator: "in" }], limit: keys.length * 2 })) as Link[]).filter((l) => l.targetId === targetId).map((l) => l.key));
+      const jobs = ((await adapter.findMany({ model: JOB_MODEL, where: [{ field: "key", value: keys, operator: "in" }], limit: keys.length * 2 })) as Job[]).filter((j) => j.targetId === targetId && (j.kind ?? "user") === "user");
+      const gone: string[] = [];
+      for (const [n, userId] of batch.entries()) {
+        const key = keys[n] as string;
+        const own = jobs.filter((j) => j.key === key);
+        const stuck = own.length > 0 && own.every((j) => (j.failed || j.attempts >= maxAttempts) && new Date(j.lockedUntil).getTime() < now);
+        if (!links.has(key) || !stuck) {
+          skipped.push(userId);
+          continue;
+        }
+        forgotten.push(userId);
+        gone.push(key);
+      }
+      if (gone.length) {
+        await adapter.deleteMany({ model: LINK_MODEL, where: [{ field: "key", value: gone, operator: "in" }] });
+        await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "key", value: gone, operator: "in" }] });
+      }
+    }
+    if (forgotten.length) log.warn(`[scim] ${targetId}: ${forgotten.length} accounts forgotten by ${by}, left at the app as they are: ${forgotten.join(", ")}`);
+    return { forgotten, skipped };
   }
 
   /** A target's accounts, a page at a time in user id order (`after`: the last page's `next`). */
@@ -1873,5 +2116,5 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return adapter.updateMany({ model: JOB_MODEL, where: [{ field: "targetId", value: targetId }], update: { nextAttemptAt: new Date(), failed: false } });
   }
 
-  return { audit, enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, startPurge, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
+  return { audit, forgetAccounts, enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, startPurge, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
 }
