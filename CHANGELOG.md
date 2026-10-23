@@ -11,6 +11,7 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Added
 
+- **The user's photo, and the rest of RFC 7643's single-valued user attributes**: `attributes` can also name `photo` (sent as `photos`, type `photo`: Better Auth's own `image` is `{ photo: "image" }`), `nickName`, `profileUrl`, and `middleName`, `honorificPrefix` and `honorificSuffix` (in `name`). Only when named, so nothing new is sent on upgrade; the photo and profile URL only as https URLs (others are left out and logged); each cleared when empty. SCIM apps and webhooks only. `ScimUser` gains `photos`, `nickName`, `profileUrl` and the three name parts.
 - **`check` reports RFC 9865's paging and RFC 9967's asynchronous requests** when the ServiceProviderConfig gives them, and says when a create is answered 202.
 
 ## [1.7.0] - 2026-10-23
