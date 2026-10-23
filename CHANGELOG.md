@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-23
+
+An audit history of target changes, warnings before credentials expire, more of RFC 7643's user attributes with roles and entitlements, and a decommission's estimated completion and forget.
+
 ### Added
 
 - **Audit history (`audit`)**: who connected, changed, removed or decommissioned which target, and when, kept in its own table (`scimProvisioningAuditEvent`, which exists only with the option: migrate after turning it on) and listed newest first: `auth.api.scimProvisioningAuditEvents({ targetId?, organizationId?, after?, limit? })`, and for organizations' administrators, their own organization's at `POST /scim-provisioning/targets/events { organizationId?, id?, after?, limit? }` (`auth.api.scimProvisioningTargetEvents`), removed targets included. Each event has `at`, `targetId`, `organizationId`, `actor` (`user:<id>`, `server` or `system`), `action` (`target.created`, `target.updated`, `target.deleted`, `decommission.started`, `decommission.cancelled`, `decommission.completed`, `decommission.forgot`, `purge.started`, `purge.completed`; the list can grow) and a `detail` that never holds a secret. `audit: { keepDays }` removes older events; `audit: { onEvent }` hands each one to your code as it's recorded (a SIEM, say). Exports the `AuditEvent`, `AuditAction` and `AuditOptions` types.
