@@ -215,14 +215,7 @@ const { items, next } = await auth.api.scimProvisioningAuditEvents({ body: { tar
 
 `action` is `target.created`, `target.updated` or `target.deleted` (organizations' stored targets), `decommission.started`, `decommission.cancelled`, `decommission.completed`, `decommission.forgot`, `purge.started` or `purge.completed`; the list can grow in a minor release. `actor` is `user:<id>` for the registry's routes (with `detail.hostAdministrator` for a host administrator), `server` for `auth.api` calls from your code, and `system` for the plugin itself (a decommission completing). `detail` says what: the URL (as the API shows it) and `enabled` of a new target; which of `settings`, `credentials` and `enabled` changed; what a delete left at the app (`abandoned`); a decommission's counts. With the registry, an organization's administrators read their own organization's at `targets/events` (see [Organizations' own targets](#organizations-own-targets)). `keepDays` has the scheduled run remove older events, hourly. `onEvent` gets each event as it's recorded, with a few seconds to take it; an error it throws is logged, never in the way. An event is written just after the change it records: if that write fails, it's logged as an error (the change's own `warn` line is still there), and the change stands.
 
-**A long history.** The table's fields are indexed one by one (Better Auth's schema can't declare an index on two fields), so listing one target's or one organization's events reads all of them to sort by time. Once a target or an organization has tens of thousands, add an index on each with `key`, in a migration of your own (with your table's names, if your adapter renames them):
-
-```sql
-CREATE INDEX "scimProvisioningAuditEvent_targetId_key" ON "scimProvisioningAuditEvent" ("targetId", "key");
-CREATE INDEX "scimProvisioningAuditEvent_organizationId_key" ON "scimProvisioningAuditEvent" ("organizationId", "key");
--- MySQL: the same, with `backticks` for the double quotes.
--- MongoDB: db.scimProvisioningAuditEvent.createIndex({ targetId: 1, key: -1 }), and the same for organizationId.
-```
+**A long history.** The table has an index on each of `targetId` and `organizationId` with `key`, so one target's or organization's events are read a page at a time in order, however many there are. Migrate after upgrading to add them (MongoDB's adapter makes them on first use).
 
 ## Who is provisioned, and what's sent
 
@@ -667,6 +660,7 @@ const { target } = await authClient.$fetch("/scim-provisioning/targets/create", 
     organizationId,
     settings: { name: "Slack", url: "https://api.slack.com/scim/v2", profile: "slack", groups: true },
     credentials: { token: "xoxp-…" },
+    requestId: crypto.randomUUID(), // optional: makes the create safe to retry (see below)
   },
 });
 // The organization's members and groups are queued, a page at a time; later changes follow as for any target.
@@ -691,6 +685,7 @@ On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`,
 - **Changes** to a target's settings or credentials, or enabling it, queue its organization again (members, those with an account there, and its groups), and new credentials or enabling make what was waiting or failed go again, so a fixed token or a new setting applies to everyone. Renaming (`name`) changes nothing to send. The organization is queued as one job that the deliveries expand a page at a time (the first pages at once, in the background; the rest by the scheduled run), so creating a target for an organization of thousands stays a small request, on Workers too.
 - **Sharing the queue**: a scheduled run gives no target more than half its batch while others' deliveries are due, so one slow or busy app doesn't hold everyone else's up.
 - **Disabling** (`enabled: false`) pauses a target: changes are still queued for it, and wait, out of the scheduled run's way, until it's enabled again. **Deleting** removes the target, its queued jobs and its record of the accounts and groups it made; the accounts at the app stay as they are, and nothing tells the app any more. The answer says how many it left there (`abandoned`: accounts still active, and groups); decommission the target first for them to go (see [Retiring an app](#retiring-an-app)). With `deleteRequiresDecommission: true`, a delete that would leave active accounts is refused (409) unless it says `abandon: true`, for an app that's gone; `targets/accounts` lists them, to keep a record first. Deleting the organization deprovisions its members through its targets as usual (a disabled target's wait); its targets then belong to no one's organization, so only a host administrator (`canManage`) can enable or remove them.
+- **Safe to retry** with a `requestId` (8 to 128 letters, digits and `. _ : -`; one per target you mean to make, a UUID say): the target's id is derived from it and the organization, so a create sent again after a timeout, or twice at once, makes one target, and the repeat answers with it (`replayed: true`) without queuing the organization again or recording another audit event. A repeat that asks for something else (other settings, credentials or `enabled`), or comes after the target was changed, is refused (409); so is one after the target was removed, with the audit history on (without it, it makes a new target with the old id). A repeat is answered even when the organization is at its limit. Without a `requestId`, each create makes a new target, as before. It relies on the target id being unique, which the table's unique index enforces (on MongoDB too, where the adapter makes it on first use).
 - **Every server sees a change at once**: targets are read from the database when they're used (by organization for a change, by id for a delivery), nothing is kept as a list. `maxTargetsPerOrganization` (default 10) limits each organization.
 
 ## Databases and runtimes
