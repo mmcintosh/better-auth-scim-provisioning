@@ -5,6 +5,7 @@ import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import * as z from "zod";
 import { targetUrl } from "./scim-client";
+import { AUDIT_MODEL, AUDIT_PAGE_MAX } from "./audit";
 import { type Adapter, DECOMMISSION_MODEL, PURGE_CONFIRM_ABOVE, GROUP_LINK_MODEL, type GroupRef, IN_BATCH, isPaused, JOB_MODEL, LINK_MODEL, outbox, pauseReason, staticTargets, type TargetSource } from "./outbox";
 import { attributesOption, enterpriseOption, missingAttributeFields, missingEnterpriseFields } from "./mapping";
 import { registrySource, secretText, TARGET_MODEL } from "./registry";
@@ -18,7 +19,7 @@ export type { ScimAuth } from "./credentials";
 export { type CheckId, type CheckOptions, type CheckResult, checkScimTarget } from "./doctor";
 export { verifyWebhookSignature, WEBHOOK_EVENT_HEADER, WEBHOOK_SCHEMA_VERSION, WEBHOOK_SIGNATURE_HEADER, type WebhookEvent, WebhookSignatureError, webhookSignature } from "./webhook";
 export type { StoredTargetView } from "./registry-endpoints";
-export type { AttributeFields, DeliveryFailure, EnterpriseFields, EntraIdTarget, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
+export type { AttributeFields, AuditAction, AuditEvent, AuditOptions, DeliveryFailure, EnterpriseFields, EntraIdTarget, GoogleWorkspaceTarget, ProvisionedUser, ScimProvisioningOptions, ScimTarget, Target, TargetOptions, TargetRegistryOptions, WebhookTarget } from "./types";
 
 
 const targetSchema = z.strictObject({
@@ -114,6 +115,7 @@ const optionsSchema = z.strictObject({
   concurrency: z.number().int().min(1).max(32).optional(),
   onFailure: z.function().optional(),
   decommission: z.boolean().optional(),
+  audit: z.union([z.boolean(), z.strictObject({ keepDays: z.number().int().min(1).max(36500).optional(), onEvent: z.function().optional() })]).optional(),
   registry: z
     .strictObject({
       canManage: z.function().optional(),
@@ -471,6 +473,24 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             },
           }
         : {}),
+      // Only with the option: the audit history, one row per event.
+      ...(options.audit
+        ? {
+            [AUDIT_MODEL]: {
+              fields: {
+                /** The time, then randomness: sorts newest first, and pages by it. */
+                key: { type: "string", required: true, unique: true },
+                createdAt: { type: "date", required: true, index: true },
+                targetId: { type: "string", required: true, index: true },
+                organizationId: { type: "string", required: false, index: true },
+                actor: { type: "string", required: true },
+                action: { type: "string", required: true },
+                /** A few fields, as JSON: never secrets. */
+                detail: { type: "string", required: false },
+              },
+            },
+          }
+        : {}),
       // Only with the registry: a table nobody uses would still have to be migrated.
       ...(options.registry
         ? {
@@ -673,6 +693,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                     cancel: (targetId, by) => s.box.cancelDecommission(targetId, by),
                   }
                 : undefined,
+              audit: s.box.audit,
               drift: async (targetId, after, limit) => {
                 const target = await s.source.get(targetId);
                 if (!target) throw new APIError("NOT_FOUND", { message: `[scim] no target ${targetId}` });
@@ -818,6 +839,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             if (!(await s.box.cancelDecommission(targetId, "server")))
               throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: no decommission is running that can be cancelled (a complete one, or a purge, can't be)` });
             ctx.context.logger.warn(`[scim] ${targetId}: decommission cancelled (by the server); queueing its accounts and groups again`);
+            await s.box.audit.record({ targetId, organizationId: null, actor: "server", action: "decommission.cancelled", detail: await s.box.decommissionCounts(targetId) });
             kick(s, targetId, DECOMMISSION_KICK);
             return ctx.json({ decommission: await s.box.decommissionStatus(target) });
           }
@@ -832,6 +854,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                 throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)` });
               await s.box.startPurge(targetId, "server");
               ctx.context.logger.warn(`[scim] ${targetId}: purge started (by the server): ${counts.accounts} accounts and ${counts.groups} groups to delete`);
+              await s.box.audit.record({ targetId, organizationId: null, actor: "server", action: "purge.started", detail: counts });
             } else await s.box.startPurge(targetId, "server");
             kick(s, targetId, DECOMMISSION_KICK);
             return ctx.json({ decommission: await s.box.decommissionStatus(target) });
@@ -846,12 +869,33 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)` });
             await s.box.startDecommission(targetId, "server");
             ctx.context.logger.warn(`[scim] ${targetId}: decommission started (by the server): ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
+            await s.box.audit.record({ targetId, organizationId: null, actor: "server", action: "decommission.started", detail: counts });
           } else await s.box.startDecommission(targetId, "server");
           kick(s, targetId, DECOMMISSION_KICK);
           return ctx.json({ decommission: await s.box.decommissionStatus(target) });
         },
       ),
       /** Deliver what's due (retries included). Call it from a scheduled job, e.g. every minute. */
+      /**
+       * The audit history (with `audit`), newest first: one target's (a removed one's too), one
+       * organization's, or every one; `limit` (100, at most 500), then `after: next`.
+       */
+      scimProvisioningAuditEvents: createAuthEndpoint.serverOnly(
+        {
+          method: "POST",
+          body: z.strictObject({ targetId: z.string().min(1).max(100).optional(), organizationId: z.string().min(1).max(256).optional(), after: z.string().max(64).optional(), limit: z.number().int().min(1).max(AUDIT_PAGE_MAX).optional() }).optional(),
+        },
+        async (ctx) => {
+          const s = stateOf(ctx.context);
+          if (!s) throw new Error("[scim] not initialised");
+          if (!options.audit) throw new APIError("BAD_REQUEST", { message: "[scim] the audit history needs the plugin's `audit` option (and its table)" });
+          try {
+            return ctx.json(await s.box.audit.list(ctx.body ?? {}));
+          } catch (e) {
+            throw new APIError("BAD_REQUEST", { message: `[scim] ${(e as Error).message}` });
+          }
+        },
+      ),
       scimProvisioningRun: createAuthEndpoint.serverOnly({ method: "POST", body: z.strictObject({ limit: z.number().int().min(1).max(500).optional() }).optional() }, async (ctx) => {
         const s = stateOf(ctx.context);
         if (!s) throw new Error("[scim] not initialised");

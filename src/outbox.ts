@@ -8,6 +8,7 @@
 //
 // A link is written before an account is created at the app (remoteId empty: "pending"), so an
 // account whose create reply was lost can still be found, and undone, later.
+import { auditLog } from "./audit";
 import { attributeFields, defaultScimUser, ENTERPRISE_VALUES, enterpriseFields, enterpriseValues, isBanned, withAttributes } from "./mapping";
 import { type EntraIdClient, entraIdClient } from "./entra";
 import { googleWorkspaceClient } from "./google";
@@ -274,6 +275,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
   /** A target's `attributes` fields, likewise. */
   const attributesOf = (target: Target) => attributeFields(target.attributes, userFields);
   const maxAttempts = options.retry?.maxAttempts ?? 8;
+  const audit = auditLog(options.audit, adapter, log);
   const baseDelayMs = options.retry?.baseDelayMs ?? 30_000;
   const backoff = (attempts: number) => Math.min(MAX_DELAY_MS, baseDelayMs * 2 ** Math.max(0, attempts - 1));
 
@@ -968,6 +970,7 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * lease still keeps two deliveries for one user apart.
    */
   async function runDue(limit = 50, targetId?: string): Promise<Record<Outcome, number>> {
+    if (targetId === undefined) await audit.prune();
     const due = await dueJobs(limit, targetId);
     const tally: Record<Outcome, number> = { done: 0, retry: 0, failed: 0, busy: 0 };
     let next = 0;
@@ -1716,6 +1719,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     // step (one that outlived its hold), which may have set when it looks again. This job stays.
     if (moved === 0) return new Date(Date.now() + 5_000);
     if (complete)
+      await audit.record({ targetId: target.id, organizationId: target.organizationId ?? null, actor: "system", action: purge ? "purge.completed" : "decommission.completed", detail: { total: row.total, groupsTotal: row.groupsTotal } });
+    if (complete)
       log.warn(`[scim] ${target.id}: ${purge ? `purge complete: none of its accounts (but adopted ones) or groups left there; ${row.total} accounts and ${row.groupsTotal} groups when it started` : `decommission complete: none of its accounts active there, its groups emptied; ${row.total} accounts and ${row.groupsTotal} groups when it started`}`);
     // The next step, in the next run: this one's deliveries go first.
     return next && !later ? now : later;
@@ -1868,5 +1873,5 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return adapter.updateMany({ model: JOB_MODEL, where: [{ field: "targetId", value: targetId }], update: { nextAttemptAt: new Date(), failed: false } });
   }
 
-  return { enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, startPurge, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
+  return { audit, enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, startPurge, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
 }

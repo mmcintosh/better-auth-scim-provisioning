@@ -330,6 +330,57 @@ export interface ScimProvisioningOptions {
    * exists only with this option: migrate after turning it on).
    */
   decommission?: boolean | undefined;
+  /**
+   * An audit history: who connected, changed, removed or decommissioned which target, and when,
+   * kept in its own table (`scimProvisioningAuditEvent`, which exists only with this option:
+   * migrate after turning it on) and listed newest first (`scimProvisioningAuditEvents`; with the
+   * registry, organizations' administrators get their own at `targets/events`). Never secrets.
+   */
+  audit?: boolean | AuditOptions | undefined;
+}
+
+export interface AuditOptions {
+  /** Remove events older than this many days (the scheduled run does, hourly). Kept for good by default. */
+  keepDays?: number | undefined;
+  /**
+   * Also hand each event to your own code as it's recorded: to forward it to a SIEM, say. It gets
+   * a few seconds; an error it throws is logged, never in the way.
+   */
+  onEvent?: ((event: AuditEvent) => void | Promise<void>) | undefined;
+}
+
+/**
+ * What an audit event records. The list can grow in a minor release (handle a value you don't
+ * know). `target.*` events are organizations' stored targets'; the decommission ones are for every
+ * target.
+ */
+export type AuditAction =
+  | "target.created"
+  | "target.updated"
+  | "target.deleted"
+  | "decommission.started"
+  | "decommission.cancelled"
+  | "decommission.completed"
+  | "purge.started"
+  | "purge.completed";
+
+export interface AuditEvent {
+  /** When, as an ISO date. */
+  at: string;
+  targetId: string;
+  /** The target's organization; null for a target in code. */
+  organizationId: string | null;
+  /** Who: `user:<id>` (through the registry's routes), `server` (`auth.api`, from your code) or `system` (the plugin itself). */
+  actor: string;
+  action: AuditAction;
+  /**
+   * What, in a few fields: `hostAdministrator` (acting as one, `canManage`); for target.created,
+   * `type`, `url` (as the API shows it) and `enabled`; for target.updated, `changed` (of
+   * `settings`, `credentials`, `enabled`), `url` and `enabled`; for target.deleted, `abandoned`
+   * (`accounts`, `groups`); for the decommission ones, `accounts` and `groups` (to go, or, after a
+   * cancel, still active), or `total` and `groupsTotal` when complete.
+   */
+  detail: Record<string, unknown>;
 }
 
 export interface TargetRegistryOptions {

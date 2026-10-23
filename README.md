@@ -31,6 +31,9 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 - 🏢 **Organizations' own targets**: with `registry`, each organization connects its own SCIM app, Google Workspace or webhook at runtime, through an API its owners and admins use, with credentials encrypted and never shown again, and only its own members sent there.
 - 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
 - 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports, the Enterprise User extension included.
+- 🧹 **Retiring an app**: decommission a target to deactivate every account and empty every group made there before removing it, with a preview, a confirmed count, cancel, an optional purge, and accounts another target still uses left alone (see [Retiring an app](#retiring-an-app)).
+- 🚦 **Rate limits**: an app's 429 holds the whole target for its `Retry-After` without counting a failed attempt, and `maxRequestsPerMinute` keeps under an app's published limit (the `githubEnterprise` profile sets 30).
+- 🧾 **Audit history**: with `audit`, who connected, changed, removed or decommissioned which target, and when, kept in the database, listed newest first, and handed to your own code (a SIEM) as it happens (see [Audit history](#audit-history)).
 - 🔍 **Drift detection**: `scimProvisioningDrift` reads an app's own list of accounts and reports the ones nobody manages, ours without a link, and linked ones that differ, page by page, changing nothing.
 - 📈 **You can see it**: `scimProvisioningStatus` counts what's queued, stuck and failed at each target (or shows one user's state), `onFailure` tells you when a delivery gives up or keeps failing, and failures are logged with the app's own message.
 - ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger; the whole suite on Node.js 22 and 24, and the database suite on SQLite, D1, PostgreSQL, MySQL and MongoDB, with Drizzle and Prisma too ([which combinations](#databases-and-runtimes)).
@@ -191,6 +194,23 @@ await auth.api.scimProvisioningQueue({ body: { userId, organizationId } });
 ```
 
 For a removal, pass the organization as well: the user isn't in its groups any more, so queueing only the user can't find the group they left.
+
+### Audit history
+
+`audit: true` keeps a record of who connected, changed, removed or decommissioned which target, and when, in its own table (`scimProvisioningAuditEvent`: run your migration after turning it on). It never holds a secret: a credentials change is recorded as `changed: ["credentials"]`.
+
+```ts
+scimProvisioning({
+  targets: [/* … */],
+  // Or just `audit: true`: kept for good, and nothing forwarded.
+  audit: { keepDays: 400, onEvent: (event) => siem.send(event) },
+});
+// Newest first: one target's (a removed one's too), one organization's, or all; then { after: next }.
+const { items, next } = await auth.api.scimProvisioningAuditEvents({ body: { targetId: "app", limit: 100 } });
+// [{ at, targetId, organizationId, actor, action, detail }, …]
+```
+
+`action` is `target.created`, `target.updated` or `target.deleted` (organizations' stored targets), `decommission.started`, `decommission.cancelled`, `decommission.completed`, `purge.started` or `purge.completed`; the list can grow in a minor release. `actor` is `user:<id>` for the registry's routes (with `detail.hostAdministrator` for a host administrator), `server` for `auth.api` calls from your code, and `system` for the plugin itself (a decommission completing). `detail` says what: the URL (as the API shows it) and `enabled` of a new target; which of `settings`, `credentials` and `enabled` changed; what a delete left at the app (`abandoned`); a decommission's counts. With the registry, an organization's administrators read their own organization's at `targets/events` (see [Organizations' own targets](#organizations-own-targets)). `keepDays` has the scheduled run remove older events, hourly. `onEvent` gets each event as it's recorded, with a few seconds to take it; an error it throws is logged, never in the way. An event is written just after the change it records: if that write fails, it's logged as an error (the change's own `warn` line is still there), and the change stands.
 
 ## Who is provisioned, and what's sent
 
@@ -622,9 +642,10 @@ POST /scim-provisioning/targets/drift   { id, after?, limit? }   // what's at th
 POST /scim-provisioning/targets/accounts { id, after?, limit? }  // the accounts made through it: userName, remoteId, active
 POST /scim-provisioning/targets/decommission { id, phase?, preview?, confirm?, cancel? }  // see Retiring an app
 POST /scim-provisioning/targets/delete  { id, abandon? }  // says what it leaves at the app: { abandoned: { accounts, groups } }
+POST /scim-provisioning/targets/events  { organizationId?, id?, after?, limit? }  // the audit history (with `audit`): see Audit history
 ```
 
-On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget`, `…TargetStatus`, `…TargetDrift`, `…TargetAccounts`, `…DecommissionTarget` and `…DeleteTarget`, with the user's headers.
+On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget`, `…TargetStatus`, `…TargetDrift`, `…TargetAccounts`, `…DecommissionTarget`, `…DeleteTarget` and `…TargetEvents`, with the user's headers.
 
 - **Settings** are the target options that are data: `type`, `url`, `profile` (by name: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`), `update`, `compat`, `groups`, `teamGroups`, `roleGroups`, `adopt`, `deprovision`, `requireVerifiedEmail`, `enterprise`, `attributes`, `timeoutMs` (at most 30 s), and for Google Workspace `google: { clientEmail, adminEmail, orgUnitPath?, groupDomain? }`; plus a `name` for people. Functions (`mapUser`, `include`, the group name functions) and `organizationId` can't be stored: the organization is always the owner.
 - **Credentials** are one of `{ token }`, `{ auth: { type: "basic" | "header" | "oauth2", … } }` (as in [Targets](#targets)), `{ secret }` for a webhook and `{ privateKey }` for Google Workspace. They're encrypted with Better Auth's secret, tied to the target, its organization and where it sends, and never shown: a target shows only their `kind`, and a webhook URL only its origin (Slack's and Azure's carry secrets in the path or query). They never go anywhere new either: changing a target's URL (or Google's `clientEmail` or `adminEmail`) needs the credentials given again, and a URL changed in the database rather than through the API doesn't get them (the target pauses). Two changes to one target at once can't mix: the second is refused (409) and is made again on what the first left. When you rotate Better Auth's secret (`secrets`), stored credentials are sealed again with the new one as they're used; keep the old secret until every target has been used once. If the secret changes without rotation, they can't be read: those targets pause (logged), and their deliveries are tried again every 15 minutes, so they go once the right secret is back or new credentials are given.
