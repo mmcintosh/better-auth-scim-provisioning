@@ -93,7 +93,26 @@ const textOf = (v: unknown): string | undefined => {
 };
 
 /** The attributes `attributes` can send, each read from a user field of that name by default. */
-export const ATTRIBUTE_NAMES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country"] as const;
+export const ATTRIBUTE_NAMES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country", "preferredLanguage", "locale", "timezone", "userType"] as const;
+/** The single-valued attributes sent as they are (RFC 7643 §4.1.1). */
+const PLAIN = ["preferredLanguage", "locale", "timezone", "userType"] as const;
+/** A language tag (RFC 5646's shape, loosely): `en`, `en-CA`, `zh-Hant-TW`. */
+const LANGUAGE_TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+const validTimeZone = (zone: string) => {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: zone });
+    return zone.includes("/") || zone === "UTC";
+  } catch {
+    return false;
+  }
+};
+/** Is this a value the attribute can take? (A wrong one is left out, not sent to be refused.) */
+const validFor: Record<(typeof PLAIN)[number], (v: string) => boolean> = {
+  preferredLanguage: (v) => LANGUAGE_TAG.test(v),
+  locale: (v) => LANGUAGE_TAG.test(v),
+  timezone: validTimeZone,
+  userType: (v) => v.length <= 256,
+};
 export type AttributeName = (typeof ATTRIBUTE_NAMES)[number];
 
 /** `attributes`: true, or which user field holds each attribute. Data only, so stored targets can have it too. */
@@ -132,8 +151,9 @@ export const missingAttributeFields = (option: boolean | AttributeFields | undef
  * and Google Workspace and Entra ID read as "ours, and empty"; `clears` lists them, for a PATCH
  * to remove by path.
  */
-export function withAttributes(user: ProvisionedUser, fields: AttributeFields | null, scim: ScimUser): { scim: ScimUser; clears: string[] } {
-  if (!fields) return { scim, clears: [] };
+export function withAttributes(user: ProvisionedUser, fields: AttributeFields | null, scim: ScimUser): { scim: ScimUser; clears: string[]; invalid: string[] } {
+  if (!fields) return { scim, clears: [], invalid: [] };
+  const invalid: string[] = [];
   const out: ScimUser = { ...scim };
   const clears: string[] = [];
   const value = (name: AttributeName) => (fields[name] ? textOf(user[fields[name] as string]) : undefined);
@@ -156,7 +176,19 @@ export function withAttributes(user: ProvisionedUser, fields: AttributeFields | 
     out.addresses = Object.keys(parts).length ? [{ type: "work", primary: true, ...parts }] : undefined;
     if (!out.addresses) clears.push("addresses");
   }
-  return { scim: out, clears };
+  for (const name of PLAIN) {
+    if (!fields[name] || scim[name] !== undefined) continue;
+    const v = value(name);
+    if (v !== undefined && !validFor[name](v)) {
+      // Not this attribute's kind of value: left out (a PATCH leaves the app's as it is), and said why.
+      invalid.push(name);
+      delete out[name];
+      continue;
+    }
+    out[name] = v;
+    if (v === undefined) clears.push(name);
+  }
+  return { scim: out, clears, invalid };
 }
 
 /** The user's Enterprise User values (manager aside), and their manager's Better Auth user id. */

@@ -61,6 +61,7 @@ export const storedSettingsSchema = z.strictObject({
   requireVerifiedEmail: z.boolean().optional(),
   enterprise: enterpriseOption.optional(),
   attributes: attributesOption.optional(),
+  roles: z.boolean().optional(),
   // At most 30 s: the deliveries share the scheduled run with every other organization's.
   timeoutMs: z.number().int().min(100).max(30_000).optional(),
   /** When the credentials expire (an ISO date): warned about before, and shown. Replacing the credentials clears it, unless given again. */
@@ -290,6 +291,7 @@ export function storedProblems(settings: StoredSettings, credentials: StoredCred
     }
   }
   if (type !== "scim") for (const k of ["profile", "update", "compat"] as const) if (settings[k] !== undefined) issues.push(`settings.${k}: for scim targets only`);
+  if (type === "google-workspace" && settings.roles) issues.push("settings.roles: for scim and webhook targets");
   if ("auth" in credentials && credentials.auth.type === "oauth2") {
     const problem = publicUrl(credentials.auth.tokenUrl, allowHosts);
     if (problem) issues.push(`credentials.auth.tokenUrl: ${problem}`);

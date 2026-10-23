@@ -71,6 +71,8 @@ const targetSchema = z.strictObject({
   mapUser: z.function().optional(),
   enterprise: enterpriseOption.optional(),
   attributes: attributesOption.optional(),
+  roles: z.boolean().optional(),
+  entitlements: z.function().optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
   update: z.enum(["put", "patch"]).optional(),
   compat: z
@@ -109,7 +111,8 @@ const optionsSchema = z.strictObject({
         .refine((t) => t.type === "entra-id" || t.entra === undefined, { message: "entra is for entra-id targets", path: ["entra"] })
         .refine((t) => t.type !== "entra-id" || (!t.groups && !t.teamGroups && !t.roleGroups), "groups aren't supported for entra-id targets yet (groups, teamGroups, roleGroups)")
         .refine((t) => t.type === undefined || t.type === "scim" || t.update === undefined, { message: "update is for scim targets only", path: ["update"] })
-        .refine((t) => t.type === undefined || t.type === "scim" || t.compat === undefined, { message: "compat is for scim targets only", path: ["compat"] }),
+        .refine((t) => t.type === undefined || t.type === "scim" || t.compat === undefined, { message: "compat is for scim targets only", path: ["compat"] })
+        .refine((t) => t.type === undefined || t.type === "scim" || t.type === "webhook" || (!t.roles && t.entitlements === undefined), "roles and entitlements are for scim and webhook targets"),
     )
     .refine((t) => new Set(t.map((x) => x.id)).size === t.length, "target ids must be unique"),
   retry: z.strictObject({ maxAttempts: z.number().int().min(1).max(50).optional(), baseDelayMs: z.number().int().min(0).optional() }).optional(),
@@ -598,7 +601,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           // targets of that organization.
           matcher: (ctx) =>
             // Stored targets come and go at runtime, and all belong to an organization.
-            (!!options.registry || options.targets.some((t) => t.organizationId || t.groups || t.teamGroups || t.roleGroups)) &&
+            (!!options.registry || options.targets.some((t) => t.organizationId || t.groups || t.teamGroups || t.roleGroups || t.roles)) &&
             (ctx.path === undefined || MEMBERSHIP_WRITES.has(ctx.path) || ORGANIZATION_WRITES.has(ctx.path) || TEAM_WRITES.has(ctx.path)),
           handler: createAuthMiddleware(async (ctx) => {
             const returned = (ctx.context as { returned?: unknown }).returned;
@@ -615,7 +618,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             };
             const members = membersIn(returned);
             for (const m of members) {
-              await attempt(`user ${m.userId}`, async () => changed(s, m.userId, (await s.source.forOrganizations([m.organizationId])).filter((t) => t.organizationId === m.organizationId)));
+              // The organization's targets; and any other that sends roles, which just changed.
+              await attempt(`user ${m.userId}`, async () => changed(s, m.userId, (await s.source.forOrganizations([m.organizationId])).filter((t) => t.organizationId === m.organizationId || (!t.organizationId && t.roles === true))));
             }
             // Groups: the organization whose membership, roles, name or existence changed, and the
             // team that changed.

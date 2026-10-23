@@ -504,6 +504,54 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * the attributes it no longer has, which a PATCH removes. The manager is their id at this app,
    * or their address at Google Workspace, and only once they're provisioned and active there.
    */
+  /**
+   * The user's roles (`roles`: in the target's organization, or in each of theirs) and
+   * entitlements (`entitlements`), unless `mapUser` set them. None is a key holding undefined, so
+   * a PUT clears them; `clears` lists them for a PATCH.
+   */
+  async function withAccess(target: Target, user: ProvisionedUser, scim: ScimUser): Promise<{ scim: ScimUser; clears: string[] }> {
+    const out: ScimUser = { ...scim };
+    const clears: string[] = [];
+    if (target.roles && scim.roles === undefined) {
+      const roles = await scimRolesOf(target, user.id);
+      out.roles = roles.length ? roles : undefined;
+      if (!roles.length) clears.push("roles");
+    }
+    if (target.entitlements && scim.entitlements === undefined) {
+      const given = await target.entitlements(user);
+      const values = [...new Set((Array.isArray(given) ? given : []).filter((v): v is string => typeof v === "string" && v.trim() !== "").map((v) => v.trim()))];
+      out.entitlements = values.length ? values.map((value) => ({ value })) : undefined;
+      if (!values.length) clears.push("entitlements");
+    }
+    return { scim: out, clears };
+  }
+
+  /** A user's organization roles: at an organization's target, there; otherwise in each organization, typed by its slug. */
+  async function scimRolesOf(target: Target, userId: string): Promise<NonNullable<ScimUser["roles"]>> {
+    const where: Where[] = [{ field: "userId", value: userId }];
+    if (target.organizationId) where.push({ field: "organizationId", value: target.organizationId });
+    const members = ((await adapter.findMany({ model: "member", where, limit: 1000 })) as { userId: string; organizationId: string; role?: string | null }[]).filter(
+      (m) => m.userId === userId && (!target.organizationId || m.organizationId === target.organizationId),
+    );
+    const slugs = new Map<string, string>();
+    if (!target.organizationId) {
+      const ids = [...new Set(members.map((m) => m.organizationId))];
+      for (let i = 0; i < ids.length; i += IN_BATCH) {
+        const batch = ids.slice(i, i + IN_BATCH);
+        for (const o of (await adapter.findMany({ model: "organization", where: [{ field: "id", value: batch, operator: "in" }], limit: batch.length })) as { id: string; slug?: string | null }[]) if (batch.includes(o.id)) slugs.set(o.id, o.slug ?? o.id);
+      }
+    }
+    const roles = members.flatMap((m) =>
+      String(m.role ?? "")
+        .split(",")
+        .map((r) => r.trim())
+        .filter(Boolean)
+        .map((value) => ({ value, type: target.organizationId ? "organization" : (slugs.get(m.organizationId) ?? m.organizationId) })),
+    );
+    const seen = new Set<string>();
+    return roles.filter((r) => !seen.has(`${r.type}|${r.value}`) && seen.add(`${r.type}|${r.value}`)).sort((a, b) => `${a.type}|${a.value}`.localeCompare(`${b.type}|${b.value}`));
+  }
+
   async function withEnterprise(target: Target, user: ProvisionedUser, scim: ScimUser): Promise<{ scim: ScimUser; clears: string[] }> {
     const fields = fieldsOf(target);
     if (!fields || scim[SCIM_ENTERPRISE_USER_SCHEMA] !== undefined) return { scim, clears: [] };
@@ -579,8 +627,10 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     // A target being decommissioned wants nobody.
     if (retiring === "none" && (await wanted(target, user))) {
       const core = withAttributes(user as ProvisionedUser, attributesOf(target), (target.mapUser ?? defaultScimUser)(user as ProvisionedUser));
-      const { scim, clears: enterpriseClears } = await withEnterprise(target, user as ProvisionedUser, core.scim);
-      const clears = [...core.clears, ...enterpriseClears];
+      if (core.invalid.length) log.warn(`[scim] ${target.id}: user ${userId}: ${core.invalid.join(", ")} left out, not a valid value (a language tag such as en-CA; an IANA time zone such as America/Toronto)`);
+      const access = await withAccess(target, user as ProvisionedUser, core.scim);
+      const { scim, clears: enterpriseClears } = await withEnterprise(target, user as ProvisionedUser, access.scim);
+      const clears = [...core.clears, ...access.clears, ...enterpriseClears];
       const externalId = scim.externalId ?? null;
       // Back after the plugin deactivated them (a ban, a removal): only then is a Google suspension
       // (or a disabled Entra account) lifted, never an admin's own or one of Google's.

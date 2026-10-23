@@ -51,6 +51,14 @@ export interface ScimUser {
   title?: string | undefined;
   phoneNumbers?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
   addresses?: ScimAddress[] | undefined;
+  /** The preferred language, locale, time zone and user type (RFC 7643 §4.1.1): sent by `attributes`, or by a `mapUser`. */
+  preferredLanguage?: string | undefined;
+  locale?: string | undefined;
+  timezone?: string | undefined;
+  userType?: string | undefined;
+  /** Roles and entitlements (RFC 7643 §4.1.2): sent by `roles` and `entitlements`, or by a `mapUser`. */
+  roles?: { value: string; display?: string | undefined; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
+  entitlements?: { value: string; display?: string | undefined; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
   /** The Enterprise User extension's attributes (with its URN in `schemas`). */
   "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"?: ScimEnterpriseUser | undefined;
 }

@@ -36,6 +36,17 @@ export interface AttributeFields {
   region?: string | undefined;
   postalCode?: string | undefined;
   country?: string | undefined;
+  /**
+   * The user's preferred language, a language tag (`en`, `en-CA`): SCIM `preferredLanguage`; at
+   * Entra ID `preferredLanguage`. Not sent to Google Workspace.
+   */
+  preferredLanguage?: string | undefined;
+  /** Their locale, a language tag (`en-CA`): SCIM `locale`. Only to SCIM apps and webhooks. */
+  locale?: string | undefined;
+  /** Their time zone, an IANA name (`America/Toronto`): SCIM `timezone`. Only to SCIM apps and webhooks. */
+  timezone?: string | undefined;
+  /** What kind of user (`Employee`, `Contractor`: the app's words): SCIM `userType`. Only to SCIM apps and webhooks (Entra ID's means member or guest). */
+  userType?: string | undefined;
 }
 
 /** What every target has, whatever kind of app it is. */
@@ -88,9 +99,25 @@ export interface TargetOptions {
    * send. An empty field clears that attribute at the app. At Entra ID they're `jobTitle`,
    * `businessPhones`, `mobilePhone` and the address fields; at Google Workspace the primary
    * organization's title, the phones and the work address, touching only what's named here. A
-   * `mapUser` that sets one of these itself takes precedence for that attribute.
+   * `mapUser` that sets one of these itself takes precedence for that attribute. Also the
+   * preferred language, locale, time zone and user type (`preferredLanguage`, `locale`,
+   * `timezone`, `userType`), checked before they're sent: a language that isn't a language tag,
+   * or a time zone that isn't an IANA name, is left out (and logged), not sent to be refused.
    */
   attributes?: boolean | AttributeFields | undefined;
+  /**
+   * The user's roles in your organizations, as SCIM `roles` (`{ value, type }`): at an
+   * organization's target, their roles there (`type: "organization"`); at another, their roles
+   * in every organization they're in, each with the organization's slug as `type`. For apps
+   * that grant access by role. SCIM apps and webhooks only.
+   */
+  roles?: boolean | undefined;
+  /**
+   * The user's entitlements, as SCIM `entitlements` (`{ value }`): what your code says they're
+   * entitled to (a licence, a plan). Return [] for none, which clears them at the app. SCIM apps
+   * and webhooks only; not for organizations' stored targets (a function can't be stored).
+   */
+  entitlements?: ((user: ProvisionedUser) => string[] | Promise<string[]>) | undefined;
   /**
    * Organizations (Better Auth's organization plugin) as groups at the app, their provisioned
    * members as the group's members. Every organization (or only `organizationId`'s), or those a
