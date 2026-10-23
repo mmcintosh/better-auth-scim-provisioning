@@ -388,18 +388,6 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           if (!winner) throw e;
           return replay(winner);
         }
-        if (requestId) {
-          // A database that doesn't enforce the id's uniqueness (MongoDB, whose Better Auth adapter
-          // makes only table-level indexes) can hold both: the first made stays, and a later one
-          // removes itself and answers as a repeat.
-          const all = ((await adapter.findMany({ model: TARGET_MODEL, where: [{ field: "targetId", value: targetId }], limit: 10 })) as TargetRow[]).filter((r) => r.targetId === targetId);
-          const order = (r: TargetRow) => `${new Date(r.createdAt).toISOString()}|${r.id}`;
-          const first = all.sort((a, b) => (order(a) < order(b) ? -1 : order(a) > order(b) ? 1 : 0))[0];
-          if (first && first.id !== row.id) {
-            await adapter.deleteMany({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }] });
-            return replay(first);
-          }
-        }
         await record(ctx, actor, { targetId, organizationId }, "target.created", { type: settings.type ?? "scim", url: settings.url !== undefined ? shownUrl(settings.type ?? "scim", settings.url) : (settings.google?.adminEmail.split("@")[1] ?? null), enabled });
         audit(ctx, actor, `created target ${targetId} (${settings.type ?? "scim"}, ${settings.url !== undefined ? new URL(settings.url).host : (settings.google?.adminEmail.split("@")[1] ?? "")}) for organization ${organizationId}`);
         // The organization's members and groups, queued (a disabled target's wait).
