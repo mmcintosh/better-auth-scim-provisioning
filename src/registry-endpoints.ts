@@ -184,6 +184,28 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
     return i;
   };
 
+  /**
+   * Who may decommission: `registry.decommissionRoles` (owners, by default) among those who may
+   * manage targets at all (organizationRoles), and the host's administrators; signed in within
+   * `decommissionFreshAge` to change anything.
+   */
+  const decommissionActor = (ctx: GenericEndpointContext, change: boolean) => {
+    const managing = host.options?.organizationRoles ?? ["owner", "admin"];
+    const roles = (host.options?.decommissionRoles ?? ["owner"]).filter((r) => managing.includes(r));
+    return actorOf(ctx, host.options, change ? { change: true, roles, freshAge: host.options?.decommissionFreshAge ?? 900 } : { roles });
+  };
+
+  /**
+   * A target being decommissioned, or decommissioned: removing it (or pausing it) would undo or stop
+   * that, so only those who may decommission may, freshly signed in.
+   */
+  async function guardRetiring(ctx: GenericEndpointContext, row: TargetRow, what: string) {
+    const state = await instance(ctx).decommission?.state(row.targetId);
+    if (state !== "running" && state !== "complete") return;
+    const actor = await decommissionActor(ctx, true).catch(() => null);
+    if (!actor || !may(actor, row.organizationId)) throw refuse("FORBIDDEN", `its decommission is ${state}: only those who may decommission it may ${what} it (registry.decommissionRoles)`);
+  }
+
   /** The row with this id, if the actor may see it; otherwise 404, so others' targets aren't confirmed to exist. */
   async function rowFor(ctx: GenericEndpointContext, actor: Actor, id: string): Promise<TargetRow> {
     const rows = (await adapterOf(ctx).findMany({ model: TARGET_MODEL, where: [{ field: "targetId", value: id }], limit: 2 })) as TargetRow[];
@@ -346,6 +368,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           update.config = JSON.stringify(checked.settings);
           if (ctx.body.credentials !== undefined) update.sealed = await seal(key(ctx), row.targetId, row.organizationId, checked.credentials, checked.settings);
         }
+        if (ctx.body.enabled === false && truthy(row.enabled)) await guardRetiring(ctx, row, "pause");
         if (ctx.body.enabled !== undefined) update.enabled = ctx.body.enabled;
         // Only over the row as read: two changes at once mustn't mix one's URL with the other's
         // credentials. The loser is told to try again.
@@ -386,6 +409,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
       async (ctx) => {
         const actor = await actorOf(ctx, host.options, { change: true });
         const row = await rowFor(ctx, actor, ctx.body.id);
+        await guardRetiring(ctx, row, "remove");
         const adapter = adapterOf(ctx);
         const abandoned = await instance(ctx).counts(row.targetId);
         if (host.options?.deleteRequiresDecommission && abandoned.accounts > 0 && !ctx.body.abandon)
@@ -459,7 +483,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
       },
       async (ctx) => {
         const preview = ctx.body.preview === true;
-        const actor = await actorOf(ctx, host.options, preview ? { roles: host.options?.decommissionRoles ?? ["owner"] } : { change: true, roles: host.options?.decommissionRoles ?? ["owner"], freshAge: host.options?.decommissionFreshAge ?? 900 });
+        const actor = await decommissionActor(ctx, !preview);
         const row = await rowFor(ctx, actor, ctx.body.id);
         const i = instance(ctx);
         const d = i.decommission;
@@ -467,7 +491,8 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         const by = `user:${actor.userId}`;
         if (ctx.body.cancel) {
           if (!(await d.cancel(row.targetId, by))) throw refuse("BAD_REQUEST", "no decommission is running that can be cancelled (a complete one, or a purge, can't be)");
-          audit(ctx, actor, `cancelled the decommission of target ${row.targetId} of organization ${row.organizationId}`);
+          const left = await i.counts(row.targetId);
+          audit(ctx, actor, `cancelled the decommission of target ${row.targetId} of organization ${row.organizationId}: ${left.accounts} accounts still active there; every account and group queued again`);
           i.kick(row.targetId);
           return ctx.json({ decommission: await d.status(row.targetId) });
         }
@@ -483,7 +508,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
             if (counts.accounts > PURGE_CONFIRM_ABOVE && ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)`);
             await d.purge(row.targetId, by);
             audit(ctx, actor, `started purging target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts and ${counts.groups} groups to delete`);
-          }
+          } else await d.purge(row.targetId, by);
           i.kick(row.targetId);
           return ctx.json({ decommission: await d.status(row.targetId) });
         }
@@ -498,7 +523,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           if (ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)`);
           await d.start(row.targetId, by);
           audit(ctx, actor, `started decommissioning target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
-        }
+        } else await d.start(row.targetId, by);
         i.kick(row.targetId);
         return ctx.json({ decommission: await d.status(row.targetId) });
       },

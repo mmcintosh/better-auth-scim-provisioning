@@ -48,11 +48,22 @@ describe("an app's rate limit", () => {
     for (let i = 0; i < 3; i++) {
       app.fail({ status: 429, retryAfter: "0" });
       expect(await box.runFor("app2", ada.id)).toBe("retry");
+      // Retry-After: 0 still waits a little, so a target that keeps refusing isn't asked every run.
+      expect(at((await jobOf(h, "app2", ada.id)).nextAttemptAt)).toBeGreaterThan(Date.now() + 5_000);
+      await h.ctx.adapter.updateMany({ model: "scimProvisioningJob", where: [{ field: "targetId", value: "app2" }], update: { nextAttemptAt: new Date(Date.now() - 1000) } });
     }
     expect(await jobOf(h, "app2", ada.id)).toMatchObject({ attempts: 0, failed: false });
     expect(onFailure).not.toHaveBeenCalled();
     expect(await box.runFor("app2", ada.id)).toBe("done");
     expect(app.users.size).toBe(1);
+  });
+
+  it("the status says how many jobs a rate limit holds", async () => {
+    const h = await createHost({ targets: [{ id: "app" }] });
+    h.app.fail({ status: 429, retryAfter: "120" });
+    await h.user();
+    await h.settle();
+    expect(((await h.auth.api.scimProvisioningStatus({ body: { targetId: "app" } })) as { targets: unknown[] }).targets[0]).toMatchObject({ waiting: 1, rateLimited: 1 });
   });
 
   it("waits a minute when the app gives no Retry-After", async () => {
@@ -130,6 +141,18 @@ describe("maxRequestsPerMinute", () => {
     // One of slow's (its pace; a second would only wait its turn), all of fast's.
     expect(await box.runDue()).toEqual({ done: 4, retry: 0, failed: 0, busy: 0 });
     expect([slow.users.size, fast.users.size]).toEqual([1, 3]);
+  });
+
+  it("a paced target's backlog doesn't hold up the others' jobs", async () => {
+    const h = await createHost();
+    const ada = await h.user();
+    const slow = mockScim();
+    const fast = mockScim();
+    const box = outbox({ targets: [target("slow", slow, { maxRequestsPerMinute: 2 }), target("fast", fast)] }, h.ctx.adapter as unknown as Adapter, quiet);
+    for (let i = 0; i < 250; i++) await box.enqueue("slow", `u${i}`);
+    await box.enqueue("fast", ada.id);
+    await box.runDue(50);
+    expect(fast.users.size).toBe(1);
   });
 
   it("the githubEnterprise profile sets 30, unless the target says otherwise; it must be a positive integer", () => {

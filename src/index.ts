@@ -124,7 +124,7 @@ const optionsSchema = z.strictObject({
       attributeFields: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field")).optional(),
       fetch: z.function().optional(),
       decommissionRoles: z.array(z.string().min(1)).optional(),
-      decommissionFreshAge: z.number().int().min(0).optional(),
+      decommissionFreshAge: z.number().int().min(60).optional(),
       deleteRequiresDecommission: z.boolean().optional(),
     })
     .optional(),
@@ -201,6 +201,13 @@ function membersIn(returned: unknown): { userId: string; organizationId: string 
   const wrapped = (returned as { member?: unknown } | null)?.member;
   return isMember(wrapped) ? [wrapped] : [];
 }
+
+/**
+ * Runs after a decommission's start or cancel: its groups, its first page of accounts, and their
+ * deliveries (a step a run). Within what D1 allows an invocation (1,000 queries); the scheduled
+ * run carries on.
+ */
+const DECOMMISSION_KICK = 3;
 
 export function scimProvisioning(options: ScimProvisioningOptions) {
   const parsed = optionsSchema.safeParse(options);
@@ -369,10 +376,15 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
   }
 
   /** A few batches of a target's due jobs now, in the background; what's left is the scheduled run's. */
-  function kick(s: State, targetId: string) {
+  /**
+   * Deliver a target's due jobs in the background, a few runs in a row (`rounds`). A paced
+   * target's run already takes about a minute, so it gets one (Workers cut background work sooner).
+   */
+  function kick(s: State, targetId: string, rounds = 5) {
     s.background(
       (async () => {
-        for (let i = 0; i < 5; i++) {
+        const n = (await s.source.get(targetId))?.maxRequestsPerMinute ? 1 : rounds;
+        for (let i = 0; i < n; i++) {
           const t = await s.box.runDue(50, targetId);
           if (t.done + t.retry + t.failed === 0) break;
         }
@@ -452,6 +464,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
                 completedAt: { type: "date", required: false },
                 cancelledAt: { type: "date", required: false },
                 cancelledBy: { type: "string", required: false },
+                /** The app it was started at: pointed elsewhere since, it stops there. */
+                destination: { type: "string", required: false },
                 updatedAt: { type: "date", required: true },
               },
             },
@@ -641,7 +655,7 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               failures: async (targetId) =>
                 (await s.box.failures({ targetId, limit: 20 })).items.map((f) => ({ kind: f.kind, subjectId: f.subjectId, failed: f.failed, status: f.lastStatus, nextAttemptAt: f.nextAttemptAt })),
               accounts: (targetId, after, limit) => s.box.accounts(targetId, after, limit),
-              kick: (targetId) => kick(s, targetId),
+              kick: (targetId) => kick(s, targetId, DECOMMISSION_KICK),
               counts: (targetId, phase) => s.box.decommissionCounts(targetId, phase),
               decommission: options.decommission
                 ? {
@@ -803,8 +817,8 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
           if (cancel) {
             if (!(await s.box.cancelDecommission(targetId, "server")))
               throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: no decommission is running that can be cancelled (a complete one, or a purge, can't be)` });
-            ctx.context.logger.info(`[scim] ${targetId}: decommission cancelled (by the server); queueing its accounts and groups again`);
-            kick(s, targetId);
+            ctx.context.logger.warn(`[scim] ${targetId}: decommission cancelled (by the server); queueing its accounts and groups again`);
+            kick(s, targetId, DECOMMISSION_KICK);
             return ctx.json({ decommission: await s.box.decommissionStatus(target) });
           }
           if (ctx.body.phase === "purge") {
@@ -817,9 +831,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
               if (counts.accounts > PURGE_CONFIRM_ABOVE && confirm !== counts.accounts)
                 throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)` });
               await s.box.startPurge(targetId, "server");
-              ctx.context.logger.info(`[scim] ${targetId}: purge started (by the server): ${counts.accounts} accounts and ${counts.groups} groups to delete`);
-            }
-            kick(s, targetId);
+              ctx.context.logger.warn(`[scim] ${targetId}: purge started (by the server): ${counts.accounts} accounts and ${counts.groups} groups to delete`);
+            } else await s.box.startPurge(targetId, "server");
+            kick(s, targetId, DECOMMISSION_KICK);
             return ctx.json({ decommission: await s.box.decommissionStatus(target) });
           }
           const counts = await s.box.decommissionCounts(targetId);
@@ -831,9 +845,9 @@ export function scimProvisioning(options: ScimProvisioningOptions) {
             if (confirm !== counts.accounts)
               throw new APIError("BAD_REQUEST", { message: `[scim] target ${targetId}: confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)` });
             await s.box.startDecommission(targetId, "server");
-            ctx.context.logger.info(`[scim] ${targetId}: decommission started (by the server): ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
-          }
-          kick(s, targetId);
+            ctx.context.logger.warn(`[scim] ${targetId}: decommission started (by the server): ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
+          } else await s.box.startDecommission(targetId, "server");
+          kick(s, targetId, DECOMMISSION_KICK);
           return ctx.json({ decommission: await s.box.decommissionStatus(target) });
         },
       ),

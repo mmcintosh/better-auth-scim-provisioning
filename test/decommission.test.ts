@@ -8,6 +8,7 @@ import { type Adapter, outbox } from "../src/outbox";
 import { scimClient } from "../src/scim-client";
 import type { ScimTarget } from "../src/types";
 import { createHost } from "./support/host";
+import { mockScim } from "./support/mock-scim";
 
 type Host = Awaited<ReturnType<typeof createHost>>;
 const quiet = { warn() {}, error() {} };
@@ -30,6 +31,16 @@ async function drive(h: Host, run: () => Promise<unknown>, done: () => Promise<b
     await dueNow(h);
   }
   throw new Error(`didn't finish: ${JSON.stringify({ state: await stateOf(h), jobs: (await h.jobs()).map((j) => [j.kind ?? "user", j.userId, j.failed, j.attempts, j.lastStatus, j.lastError, j.nextAttemptAt]) })}`);
+}
+
+/** Run until every account at the app (but `except`) is off, with nothing made due early: its sweep, a minute later, hasn't looked yet. */
+async function untilOff(h: Host, box: ReturnType<typeof outbox>, except?: string) {
+  const off = () => appUsers(h).every((u) => !u.active || u.externalId === except);
+  for (let i = 0; i < 10 && !off(); i++) {
+    await box.runDue(200);
+    await h.settle();
+  }
+  expect(off()).toBe(true);
 }
 
 const noJobs = (h: Host) => async () => (await h.jobs()).length === 0;
@@ -59,6 +70,23 @@ async function marked() {
   expect(appUsers(h).filter((u) => u.active)).toHaveLength(3);
   expect([...h.app.groups.values()][0]?.members).toHaveLength(1);
   return { h, ada, bo, box };
+}
+
+/** The adapter, with every call counted and `updateMany` open to a test's interference. */
+function wrapped(a: Adapter, o: { before?: (x: Parameters<Adapter["updateMany"]>[0]) => Promise<void> } = {}) {
+  const calls = { n: 0 };
+  const proxy = new Proxy(a, {
+    get(t, p) {
+      const v = Reflect.get(t, p);
+      if (typeof v !== "function") return v;
+      return async (x: Parameters<Adapter["updateMany"]>[0]) => {
+        calls.n++;
+        if (p === "updateMany" && o.before) await o.before(x);
+        return v.call(t, x);
+      };
+    },
+  });
+  return { adapter: proxy, calls };
 }
 
 const start = (h: Host, confirm?: number) => h.auth.api.scimProvisioningDecommission({ body: { targetId: "app", ...(confirm === undefined ? {} : { confirm }) } });
@@ -115,28 +143,32 @@ describe("decommissioning a target", () => {
   });
 
   it("cancelled before it completes, it switches back on those still wanted and refills the groups", async () => {
-    const { h, bo } = await marked();
+    const { h, ada, bo } = await marked();
     await h.ctx.internalAdapter.updateUser(bo.id, { banned: true });
-    await start(h, 3);
-    await h.settle();
+    // Ada's account can't be reached for now: it isn't complete.
+    const adaAt = appUsers(h).find((u) => u.externalId === ada.id)!;
+    for (let i = 0; i < 10; i++) for (const method of ["PATCH", "PUT"]) h.app.failOn(method, new RegExp(`^/Users/${adaAt.id}$`), { status: 503 });
     const unmarked = unmarkedBox(h);
-    // Everyone deactivated, but it isn't complete until its sweep looks again.
-    await drive(h, () => unmarked.runDue(200), async () => appUsers(h).every((u) => !u.active));
+    await unmarked.startDecommission("app", "server");
+    await untilOff(h, unmarked, ada.id);
     expect(await stateOf(h)).toMatchObject({ state: "running" });
     // Cancelled once the mark is gone (with it, the target would stay frozen): at once, not at the sweep's next look.
     expect(await unmarked.cancelDecommission("app", "server")).toBe(true);
-    for (let i = 0; i < 3; i++) await unmarked.runDue(200);
+    // A step a run: its groups, its accounts, their deliveries, and the groups refilled after.
+    for (let i = 0; i < 6; i++) await unmarked.runDue(200);
     // Bo is banned: still off. The others are back, and so is the owner in the group.
     expect(appUsers(h).filter((u) => u.active).map((u) => u.userName).sort()).toEqual(["owner@example.com", "user1@example.com"]);
     expect([...h.app.groups.values()][0]?.members).toHaveLength(1);
   });
 
   it("finds an account written behind its walk, and waits for it", async () => {
-    const { h } = await marked();
-    await start(h, 3);
-    await h.settle();
+    const { h, ada } = await marked();
+    // Ada's account can't be reached for a while: it isn't complete yet.
+    const adaAt = appUsers(h).find((u) => u.externalId === ada.id)!;
+    for (let i = 0; i < 3; i++) for (const method of ["PATCH", "PUT"]) h.app.failOn(method, new RegExp(`^/Users/${adaAt.id}$`), { status: 503 });
     const unmarked = unmarkedBox(h);
-    await drive(h, () => unmarked.runDue(200), async () => appUsers(h).every((u) => !u.active));
+    await unmarked.startDecommission("app", "server");
+    await untilOff(h, unmarked, ada.id);
     // A delivery that was under way when it started: an account made, its link written after the walk passed.
     const late = await h.ctx.internalAdapter.createUser({ email: "late@example.com", name: "Late Comer", emailVerified: true }, { method: "admin" });
     await h.settle();
@@ -197,6 +229,30 @@ describe("decommissioning a target", () => {
     expect(appUsers(h).find((u) => u.userName === "late@example.com")?.active).toBe(false);
   });
 
+  it("a group being made as it starts is emptied straight after", async () => {
+    const h = await createHost({ decommission: true, targets: [{ id: "app", groups: true }] });
+    const box = unmarkedBox(h, { deprovision: "deactivate" });
+    await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers: await owner(h) });
+    await h.settle();
+    const org = ((await adapterOf(h).findMany({ model: "organization" })) as { id: string }[])[0]!;
+    // The organization's group, its delivery under way (made, its link not yet written) as it starts.
+    await adapterOf(h).deleteMany({ model: "scimProvisioningGroupLink", where: [{ field: "targetId", value: "app" }] });
+    h.app.groups.clear();
+    await box.enqueue("app", org.id, { kind: "group", now: true });
+    const release = h.app.hold();
+    const delivery = box.runFor("app", org.id, "group");
+    await new Promise((r) => setTimeout(r, 50));
+    await box.startDecommission("app", "server");
+    // Its walk of the groups passes before the link is written.
+    await box.runFor("app", "step", "decommission");
+    release();
+    await delivery;
+    await h.settle();
+    const statusOf = async () => box.decommissionStatus((await box.source.get("app"))!);
+    await drive(h, () => box.runDue(200), async () => (await statusOf())?.state === "complete");
+    expect([...h.app.groups.values()].map((g) => g.members ?? [])).toEqual([[]]);
+  });
+
   it("a purge, after it completes, deletes every account but adopted ones, and the groups; it can't be cancelled", async () => {
     const { h, ada } = await marked();
     const purge = (body: Record<string, unknown> = {}) => h.auth.api.scimProvisioningDecommission({ body: { targetId: "app", phase: "purge", ...body } as never });
@@ -240,5 +296,112 @@ describe("decommissioning a target", () => {
     await Promise.all([box.startDecommission("app", "a"), box.startDecommission("app", "b")]);
     expect(await adapterOf(h).count({ model: "scimProvisioningDecommission" })).toBe(1);
     expect((await h.jobs()).filter((j) => j.kind === "decommission")).toHaveLength(1);
+  });
+
+  it("a step that loses its race to another run of it keeps its job; a start queues again a step that was lost", async () => {
+    const { h } = await marked();
+    await unmarkedBox(h).startDecommission("app", "server");
+    // Another run of the step (this one outlived its hold) moved the row on while this one ran.
+    const a = adapterOf(h);
+    let race = true;
+    const { adapter } = wrapped(a, {
+      before: async (x) => {
+        if (!race || x.model !== "scimProvisioningDecommission") return;
+        race = false;
+        const row = (await a.findOne({ model: "scimProvisioningDecommission", where: [{ field: "targetId", value: "app" }] })) as { revision: number };
+        await a.updateMany({ model: "scimProvisioningDecommission", where: [{ field: "targetId", value: "app" }], update: { revision: row.revision + 1 } });
+      },
+    });
+    const racing = outbox({ decommission: true, targets: [{ id: "app", url: h.app.url, token: h.app.token, fetch: h.app.fetch, groups: true }] }, adapter, quiet);
+    await dueNow(h);
+    await racing.runFor("app", "step", "decommission");
+    expect(race).toBe(false);
+    const step = async () => (await h.jobs()).filter((j) => j.kind === "decommission");
+    expect(await step()).toHaveLength(1);
+    // Lost all the same (a deploy without the target): starting again queues it.
+    await a.deleteMany({ model: "scimProvisioningJob", where: [{ field: "kind", value: "decommission" }] });
+    expect(await start(h)).toMatchObject({ decommission: { state: "running" } });
+    expect(await step()).toHaveLength(1);
+    await drive(h, () => unmarkedBox(h).runDue(200), reaches(h, "complete"));
+  });
+
+  it("a ban's recheck for an account it no longer has, or a group's job that failed, doesn't hold it open", async () => {
+    const { h, bo } = await marked();
+    const unmarked = unmarkedBox(h);
+    // deprovision: "delete": Bo's account and link go, and the job waits for the ban to end.
+    await h.ctx.internalAdapter.updateUser(bo.id, { banned: true, banExpires: new Date(Date.now() + 30 * 86_400_000) });
+    await drive(h, () => unmarked.runDue(200), async () => !appUsers(h).some((u) => u.externalId === bo.id));
+    expect((await h.jobs()).map((j) => j.userId)).toEqual([bo.id]);
+    // A group's create refused earlier: failed, with no link.
+    const now = new Date();
+    await adapterOf(h).create({ model: "scimProvisioningJob", data: { key: "app:group:gone", targetId: "app", userId: "gone", kind: "group", version: 1, attempts: 1, nextAttemptAt: now, lockedUntil: new Date("2000-01-01"), failed: true, lastError: "refused", lastStatus: 409, createdAt: now, updatedAt: now } });
+    await start(h, 2);
+    await drive(h, () => unmarked.runDue(200), reaches(h, "complete"));
+  });
+
+  it("a frozen target's backlog doesn't hold up the others' jobs", async () => {
+    const h = await createHost({ decommission: true, targets: [] });
+    const ada = await h.user();
+    const other = mockScim();
+    const box = outbox({ decommission: true, targets: [{ id: "frozen", url: h.app?.url ?? other.url, token: "t", fetch: other.fetch, decommission: true }, { id: "app2", url: other.url, token: other.token, fetch: other.fetch }] }, adapterOf(h), quiet);
+    for (let i = 0; i < 250; i++) await box.enqueue("frozen", `u${i}`);
+    await box.enqueue("app2", ada.id);
+    expect(await box.runDue(50)).toMatchObject({ done: 1 });
+    expect(other.users.size).toBe(1);
+  });
+
+  it("pointed at another app after it started, it stops: nothing is sent there, and it's blocked", async () => {
+    const { h } = await marked();
+    await unmarkedBox(h).startDecommission("app", "server");
+    const elsewhere = mockScim();
+    const moved = outbox({ decommission: true, targets: [{ id: "app", url: "https://elsewhere.test/tenant/scim/v2", token: elsewhere.token, fetch: elsewhere.fetch, groups: true }] }, adapterOf(h), quiet);
+    for (let i = 0; i < 3; i++) {
+      await moved.runDue(200);
+      await dueNow(h);
+    }
+    expect(elsewhere.requests).toEqual([]);
+    expect(await moved.decommissionStatus((await moved.source.get("app"))!)).toMatchObject({ state: "blocked" });
+  });
+
+  it("an account or group another target at the same app still has is left there, by the decommission and the purge", async () => {
+    const h = await createHost({ decommission: true, targets: [{ id: "app", groups: true }] });
+    const ada = await h.user("Ada Lovelace");
+    await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers: await owner(h) });
+    await h.settle();
+    const at = (id: string) => ({ id, url: h.app.url, token: h.app.token, fetch: h.app.fetch, groups: true });
+    const box = outbox({ decommission: true, targets: [at("app"), at("app2")] }, adapterOf(h), quiet);
+    // app2 reaches the same app: the owner's account and the organization's group are both targets' now.
+    const olive = ((await adapterOf(h).findMany({ model: "user" })) as { id: string; email: string }[]).find((u) => u.email === "owner@example.com")!;
+    const org = (await adapterOf(h).findMany({ model: "organization" })) as { id: string }[];
+    await box.enqueue("app2", olive.id);
+    await box.enqueue("app2", org[0]!.id, { kind: "group" });
+    await drive(h, () => box.runDue(200), noJobs(h));
+    expect(await adapterOf(h).count({ model: "scimProvisioningGroupLink" })).toBe(2);
+    expect([...h.app.groups.values()].map((g) => g.members?.length)).toEqual([1]);
+    const statusOf = async () => box.decommissionStatus((await box.source.get("app"))!);
+    await box.startDecommission("app", "server");
+    await drive(h, () => box.runDue(200), async () => (await statusOf())?.state === "complete");
+    // Ada was only app's: deactivated. The owner and the group, app2's too: as they were.
+    const accounts = () => appUsers(h).map((u) => [u.externalId === ada.id ? "ada" : u.externalId === olive.id ? "olive" : u.externalId, u.active]).sort();
+    expect(accounts()).toEqual([["ada", false], ["olive", true]]);
+    expect([...h.app.groups.values()].map((g) => g.members?.length)).toEqual([1]);
+    await box.startPurge("app", "server");
+    await drive(h, () => box.runDue(200), async () => (await statusOf())?.state === "complete");
+    expect(accounts()).toEqual([["olive", true]]);
+    expect(h.app.groups.size).toBe(1);
+  });
+
+  it("a step is a page of 50 and about 60 queries (D1 allows 1,000 an invocation)", async () => {
+    const { h } = await marked();
+    for (let i = 0; i < 200; i++) await adapterOf(h).create({ model: "scimProvisioningLink", data: { key: `app:old${i}`, targetId: "app", userId: `old${i}`, remoteId: `r${i}`, userName: `old${i}@example.com`, active: true, syncedAt: new Date() } });
+    const { adapter, calls } = wrapped(adapterOf(h));
+    const box = outbox({ decommission: true, targets: [{ id: "app", url: h.app.url, token: h.app.token, fetch: h.app.fetch, groups: true }] }, adapter, quiet);
+    await box.startDecommission("app", "server");
+    // Its groups, then a page of accounts.
+    await box.runFor("app", "step", "decommission");
+    calls.n = 0;
+    await box.runFor("app", "step", "decommission");
+    expect(calls.n).toBeLessThan(75);
+    expect((await h.jobs()).filter((j) => (j.kind ?? "user") === "user")).toHaveLength(50);
   });
 });

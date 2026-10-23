@@ -374,10 +374,13 @@ export interface TargetRegistryOptions {
   fetch?: typeof fetch | undefined;
   /**
    * The organization roles whose holders may decommission their organization's targets (with the
-   * plugin's `decommission`); default ["owner"]. The host's administrators (`canManage`) always may.
+   * plugin's `decommission`); default ["owner"]. Only roles also in `organizationRoles` count: one
+   * that may not manage targets may not decommission them. The host's administrators
+   * (`canManage`) always may. While a decommission is running or complete, only they may also
+   * remove or pause the target, which would undo or stop it.
    */
   decommissionRoles?: string[] | undefined;
-  /** How recently they must have signed in to start or cancel one, in seconds; default 900 (15 minutes). */
+  /** How recently they must have signed in to start, cancel or purge one (or remove or pause the target meanwhile), in seconds; at least 60; default 900 (15 minutes). */
   decommissionFreshAge?: number | undefined;
   /**
    * Refuse to delete a target while accounts we made there are still active, unless the delete
