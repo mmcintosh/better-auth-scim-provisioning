@@ -2,7 +2,7 @@
 // a second at once) gets that target back, marked `replayed`; a request that asks for something
 // else with the same id is refused, as is one whose target was removed since (with `audit`).
 import { describe, expect, it } from "vitest";
-import type { TargetRegistryOptions } from "../src";
+import { scimProvisioning, type TargetRegistryOptions } from "../src";
 import { createHost } from "./support/host";
 import { mockScim } from "./support/mock-scim";
 
@@ -28,7 +28,7 @@ async function setup(o: { audit?: boolean; registry?: Omit<TargetRegistryOptions
 const status = (p: Promise<unknown>) => p.then(() => 200, (e: { statusCode?: number }) => e.statusCode);
 
 describe("a create with a requestId", () => {
-  it("made twice is one target: the second is the first, replayed, with no second resync or audit event", async () => {
+  it("made twice is one target: the second is the first, replayed, with no second account or audit event", async () => {
     const { h, remote, create, rows } = await setup();
     const first = await create();
     await h.settle();
@@ -41,6 +41,26 @@ describe("a create with a requestId", () => {
     expect(remote.requests.filter((r) => r.method === "POST").length).toBe(posts);
     const { items } = await h.auth.api.scimProvisioningAuditEvents({ body: {} });
     expect(items.map((e) => e.action)).toEqual(["target.created"]);
+  });
+
+  it("repeated after a create cut short (the target made, its members not queued), queues them", async () => {
+    // Paused, so the queued resync waits to be seen.
+    const { h, create } = await setup();
+    const { target } = await create({ enabled: false });
+    const resyncs = async () => (await h.jobs()).filter((j) => j.targetId === target.id && j.kind === "resync").length;
+    expect(await resyncs()).toBe(1);
+    await h.ctx.adapter.deleteMany({ model: "scimProvisioningJob", where: [{ field: "targetId", value: target.id }] });
+    expect(await create({ enabled: false })).toMatchObject({ replayed: true });
+    expect(await resyncs()).toBe(1);
+    await create({ enabled: false });
+    expect(await resyncs()).toBe(1);
+  });
+
+  it("whose credentials can't be read any more (Better Auth's secret changed) is refused, and says why", async () => {
+    const { h, create } = await setup();
+    const { target } = await create();
+    await h.ctx.adapter.update({ model: "scimProvisioningTarget", where: [{ field: "targetId", value: target.id }], update: { sealed: "not-sealed" } });
+    await expect(create()).rejects.toMatchObject({ statusCode: 409, body: { message: expect.stringContaining("secret") } });
   });
 
   it("two at once make one target, and both get it", async () => {
@@ -98,4 +118,12 @@ describe("a create with a requestId", () => {
     await create({ requestId: undefined });
     expect(await rows()).toBe(2);
   });
+});
+
+it("the target id's table-level unique index isn't named as Drizzle names the field's own constraint", () => {
+  const schema = scimProvisioning({ targets: [], registry: {} }).schema as Record<string, { indexes?: { fields: string[]; unique?: boolean; name?: string }[] }>;
+  const index = schema.scimProvisioningTarget?.indexes?.find((i) => i.fields.join() === "targetId");
+  expect(index).toMatchObject({ unique: true, name: "scimProvisioningTarget_targetId_unique_idx" });
+  // Drizzle's `.unique()` on the column is `<table>_<column>_unique`: the same name would clash.
+  expect(index?.name).not.toBe("scimProvisioningTarget_targetId_unique");
 });

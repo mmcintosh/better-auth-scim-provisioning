@@ -106,10 +106,14 @@ const TRUE_ATTRIBUTES = ["title", "phone", "mobile", "streetAddress", "locality"
 const PLAIN = ["preferredLanguage", "locale", "timezone", "userType", "nickName", "profileUrl"] as const;
 /** The parts of `name` sent as they are (RFC 7643 §4.1.1), beside the given and family names mapUser sends. */
 const NAME_PARTS = ["middleName", "honorificPrefix", "honorificSuffix"] as const;
-/** An https URL (a photo, a profile): anything else is left out, not sent to be refused or shown. */
+/**
+ * An https URL (a photo, a profile): anything else is left out, not sent to be refused or shown.
+ * Written out in full (`https://`, no spaces or backslashes), since it's sent as written, not as
+ * the URL parser would mend it.
+ */
 const httpsUrl = (v: string) => {
   try {
-    return new URL(v).protocol === "https:" && v.length <= 2048;
+    return /^https:\/\/[^\s\\]+$/i.test(v) && new URL(v).protocol === "https:" && v.length <= 2048;
   } catch {
     return false;
   }
@@ -222,7 +226,8 @@ export function withAttributes(user: ProvisionedUser, fields: AttributeFields | 
       name[part] = v;
       if (v === undefined) clears.push(`name.${part}`);
     }
-    out.name = name;
+    // No `name: {}` where there was none: an empty complex attribute is refused by some apps.
+    if (scim.name !== undefined || Object.values(name).some((v) => v !== undefined)) out.name = name;
   }
   // The photo (Better Auth's `image`, say), as SCIM's `photos`: an https URL only.
   if (fields.photo && scim.photos === undefined) {

@@ -86,14 +86,14 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   const spc = await call("GET", "/ServiceProviderConfig");
   if (spc.status === 200 && spc.json) {
     const flag = (k: string) => (spc.json?.[k] as { supported?: unknown } | undefined)?.supported === true;
-    const schemes = Array.isArray(spc.json.authenticationSchemes) ? (spc.json.authenticationSchemes as { type?: unknown }[]).map((s) => String(s.type)).join(", ") : "";
+    const schemes = Array.isArray(spc.json.authenticationSchemes) ? (spc.json.authenticationSchemes as ({ type?: unknown } | null)[]).map((s) => String(s?.type).slice(0, 50)).join(", ") : "";
     // RFC 9865's paging and RFC 9967's asynchronous requests, when the app says.
     const paging = spc.json.pagination as { cursor?: unknown; index?: unknown; defaultPaginationMethod?: unknown; maxPageSize?: unknown } | undefined;
     const pages = paging && typeof paging === "object" ? [paging.cursor === true && "cursor", paging.index === true && "index"].filter(Boolean).join(" and ") : "";
     const events = spc.json.securityEvents as { asyncRequest?: unknown } | undefined;
     const extra = [
-      pages && `paging by ${pages}${typeof paging?.defaultPaginationMethod === "string" ? ` (default ${paging.defaultPaginationMethod})` : ""}${typeof paging?.maxPageSize === "number" ? `, at most ${paging.maxPageSize} a page` : ""}`,
-      events && typeof events === "object" && typeof events.asyncRequest === "string" && `asynchronous requests: ${events.asyncRequest}${events.asyncRequest.toLowerCase() === "long" ? " (it may answer a slow create with 202; a create is then looked for again)" : ""}`,
+      pages && `paging by ${pages}${typeof paging?.defaultPaginationMethod === "string" ? ` (default ${paging.defaultPaginationMethod.slice(0, 50)})` : ""}${typeof paging?.maxPageSize === "number" ? `, at most ${paging.maxPageSize} a page` : ""}`,
+      events && typeof events === "object" && typeof events.asyncRequest === "string" && `asynchronous requests: ${events.asyncRequest.slice(0, 50)}${events.asyncRequest.toLowerCase() === "long" ? " (it may answer a slow create with 202; a create is then looked for again)" : ""}`,
     ].filter(Boolean);
     note("service-provider-config", "ServiceProviderConfig", true, `patch ${flag("patch")}, filter ${flag("filter")}, bulk ${flag("bulk")}, etag ${flag("etag")}, sort ${flag("sort")}${schemes ? `; auth: ${schemes}` : ""}${extra.length ? `; ${extra.join("; ")}` : ""}`);
   } else note("service-provider-config", "ServiceProviderConfig", null, `not available (${why(spc)}); fine, it's optional in practice`);

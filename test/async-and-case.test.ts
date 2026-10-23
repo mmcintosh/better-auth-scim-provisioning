@@ -31,6 +31,29 @@ describe("a create answered 202 (accepted, done later)", () => {
     await expect(client.createGroup({ schemas: [], displayName: "Acme", members: [] })).rejects.toMatchObject({ status: 202, retryable: true });
   });
 
+  it("a 202 that gives the new id is taken as made; a group accepted with members still to add is retried", async () => {
+    const reply = (body: unknown) => async () => new Response(JSON.stringify(body), { status: 202 });
+    const made = scimClient({ url: "https://app.example.com/scim/v2", token: "t", fetch: reply({ id: "new-1" }) });
+    expect(await made.create({ schemas: [SCIM_USER_SCHEMA], userName: "ada@example.com", active: true })).toBe("new-1");
+    expect(await made.createGroup({ schemas: [], displayName: "Acme", members: [] })).toBe("new-1");
+    await expect(made.createGroupInBatches({ schemas: [], displayName: "Acme", members: [{ value: "a" }, { value: "b" }] }, 1)).rejects.toMatchObject({ status: 202, retryable: true });
+    const blank = scimClient({ url: "https://app.example.com/scim/v2", token: "t", fetch: reply({ id: "" }) });
+    await expect(blank.create({ schemas: [SCIM_USER_SCHEMA], userName: "ada@example.com", active: true })).rejects.toMatchObject({ status: 202, retryable: true });
+  });
+
+  it("an app still making the account (202, then 409 with nothing to find yet) is asked again, not failed", async () => {
+    const h = await createHost({ retry: { baseDelayMs: 0 } });
+    h.app.failOn("POST", /^\/Users$/, { status: 202 });
+    h.app.failOn("POST", /^\/Users$/, { status: 409, detail: "userName taken" });
+    const ada = await h.user("Ada Lovelace");
+    await h.settle();
+    expect((await h.jobs()).filter((j) => j.failed)).toEqual([]);
+    await h.auth.api.scimProvisioningRun({ body: {} });
+    await h.auth.api.scimProvisioningRun({ body: {} });
+    expect([...h.app.users.values()].map((u) => u.userName)).toEqual([ada.email]);
+    expect((await h.jobs()).filter((j) => j.failed)).toEqual([]);
+  });
+
   it("a user's account is found on the retry and linked: one account, one create", async () => {
     const h = await createHost({ retry: { baseDelayMs: 0 } });
     h.app.failOn("POST", /^\/Users$/, { accepted: true });
@@ -82,6 +105,10 @@ describe("attribute names in any case", () => {
     expect(scimKeys({ resources: [{ ID: "1", USERNAME: "a", custom: { Nested: 1 } }], TOTALRESULTS: 1 })).toEqual({ Resources: [{ id: "1", userName: "a", custom: { Nested: 1 } }], totalResults: 1 });
     expect(scimKeys({ resources: ["lower"], Resources: ["exact"] })).toEqual({ Resources: ["exact"] });
     expect(scimKeys({ Resources: ["exact"], resources: ["lower"] })).toEqual({ Resources: ["exact"] });
+    // A `__proto__` key (JSON.parse keeps it as a plain key) never becomes the copy's prototype.
+    const hostile = scimKeys(JSON.parse('{"__proto__":{"id":"evil"},"userName":"a"}')) as Record<string, unknown>;
+    expect(hostile.id).toBeUndefined();
+    expect(Object.getPrototypeOf(hostile)).toBe(Object.prototype);
   });
 
   it("an app that lowercases everything is provisioned as any other", async () => {

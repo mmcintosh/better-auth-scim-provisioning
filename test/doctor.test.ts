@@ -91,6 +91,10 @@ it("reports RFC 9865's paging and RFC 9967's asynchronous requests from the Serv
     ok: true,
     detail: expect.stringContaining("paging by cursor and index (default cursor), at most 200 a page; asynchronous requests: long (it may answer a slow create with 202"),
   });
+  // An odd list of schemes (a null in it) is no crash.
+  const odd: typeof globalThis.fetch = async (input, init) =>
+    String(input).endsWith("/ServiceProviderConfig") ? new Response(JSON.stringify({ ...spc, authenticationSchemes: [null, { type: "oauthbearertoken" }] }), { status: 200 }) : app.fetch(input, init);
+  expect((await checkScimTarget({ url: app.url, token: app.token, fetch: odd }))[0]).toMatchObject({ ok: true });
   app.failOn("POST", /^\/Users$/, { accepted: true });
   const accepted = await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch });
   expect(accepted.at(-1)).toMatchObject({ name: "create a user", ok: false, detail: expect.stringContaining("202: accepted, to be done later") });

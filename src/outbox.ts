@@ -518,13 +518,26 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
    * the attributes it no longer has, which a PATCH removes. The manager is their id at this app,
    * or their address at Google Workspace, and only once they're provisioned and active there.
    */
+  /** What each attribute takes, for the line saying a value was left out. */
+  const VALID_HINT: Record<string, string> = {
+    preferredLanguage: "a language tag such as en-CA",
+    locale: "a language tag such as en-CA",
+    timezone: "an IANA time zone such as America/Toronto",
+    userType: "at most 256 characters",
+    nickName: "at most 256 characters",
+    profileUrl: "an https URL",
+    photo: "an https URL",
+    middleName: "at most 256 characters",
+    honorificPrefix: "at most 256 characters",
+    honorificSuffix: "at most 256 characters",
+  };
   /** Attribute values left out as invalid, logged once an hour per target and attribute (a reconcile mustn't log one line per user). */
   const invalidNoted = new Map<string, number>();
   function noteInvalid(targetId: string, userId: string, names: string[]) {
     const fresh = names.filter((n) => Date.now() - (invalidNoted.get(`${targetId}|${n}`) ?? 0) > 3_600_000);
     if (!fresh.length) return;
     for (const n of fresh) invalidNoted.set(`${targetId}|${n}`, Date.now());
-    log.warn(`[scim] ${targetId}: user ${userId}: ${fresh.join(", ")} left out, not a valid value (a language tag such as en-CA; an IANA time zone such as America/Toronto); said once an hour per attribute`);
+    log.warn(`[scim] ${targetId}: user ${userId}: ${fresh.map((n) => `${n} (${VALID_HINT[n] ?? "not valid"})`).join(", ")} left out; said once an hour per attribute`);
   }
 
   /**
@@ -749,6 +762,8 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
         if (!found) {
           // Google's directory (and Graph's replicas) take a moment to show a new account: retried, with the link kept.
           if (target.type === "google-workspace" || target.type === "entra-id") throw new ScimError(`${scim.userName}: ${target.type === "entra-id" ? "Microsoft" : "Google"} says the account exists but can't find it yet; retrying`, 409, true);
+          // A create of ours accepted (202) or unanswered may still be under way: retried, with the link kept.
+          if (pendingBefore) throw new ScimError(`${scim.userName}: the app says the account exists but can't find it yet (a create of ours may still be under way); retrying`, 409, true);
           return refuse("the app says it exists but can't find it");
         }
         const ours = found.externalId !== null && found.externalId === externalId;

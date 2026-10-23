@@ -52,11 +52,31 @@ describe("the photo, nickName, profileUrl, and the middle name and honorifics", 
     expect(remote(ada.email)).toMatchObject({ photos: [{ value: "https://cdn.example.com/ada.png" }], profileUrl: "https://example.com/u/ada" });
     expect(remote(ada.email)).not.toHaveProperty("nickName");
     expect(remote(ada.email).name).not.toHaveProperty("middleName");
-    expect(warn.mock.calls.flat().join(" ")).toMatch(/profileUrl, photo left out, not a valid value/);
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/profileUrl \(an https URL\), photo \(an https URL\) left out/);
     // Cleared: the photo too.
     await set(ada.id, { image: null });
     expect(lastPatch()?.Operations.filter((o) => o.op === "remove").map((o) => o.path)).toContain("photos");
     expect(remote(ada.email)).not.toHaveProperty("photos");
+  });
+
+  it("a URL not written out in full is left out; no empty name where there was none", async () => {
+    const { h, set, remote } = await setup();
+    const ada = await h.user("Ada Lovelace");
+    await set(ada.id, { image: "https:cdn.example.com/ada.png", profile: "https://exam\tple.com/u/ada" });
+    expect(remote(ada.email)).not.toHaveProperty("photos");
+    expect(remote(ada.email)).not.toHaveProperty("profileUrl");
+    await set(ada.id, { image: "https://cdn.example.com/a\\b.png" });
+    expect(remote(ada.email)).not.toHaveProperty("photos");
+    // A mapUser that sends no name, and an empty middle name: still no name.
+    const bare = await createHost({
+      targets: [{ id: "app", attributes: { middleName: "middle" }, mapUser: (u) => ({ schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"], userName: u.email, externalId: u.id, active: true }) }],
+      userFields: FIELDS,
+    });
+    await bare.user("Ada Lovelace");
+    await bare.settle();
+    const post = bare.app.requests.find((r) => r.method === "POST" && r.path === "/Users")?.body;
+    expect(post).toBeDefined();
+    expect(post).not.toHaveProperty("name");
   });
 
   it("a mapUser's own take precedence", async () => {

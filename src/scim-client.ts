@@ -200,7 +200,8 @@ export function scimKeys(json: unknown, depth = 0): unknown {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(json)) {
     const name = CANONICAL.get(k.toLowerCase()) ?? k;
-    if (name !== k && Object.hasOwn(json, name)) continue;
+    // A key that would set the copy's prototype (JSON.parse keeps it as a plain key): dropped.
+    if (name === "__proto__" || (name !== k && Object.hasOwn(json, name))) continue;
     out[name] = scimKeys(v, depth + 1);
   }
   return out;
@@ -209,6 +210,7 @@ export function scimKeys(json: unknown, depth = 0): unknown {
 /**
  * A create the app accepted but hasn't done yet (202, RFC 9967's asynchronous requests): retried,
  * and the retry finds the account (or group) by name once it's there, rather than making another.
+ * A 202 that gives the new resource's id anyway is taken as made (see `madeOrAccepted`).
  */
 const accepted = (what: string, res: { status: number; txn: string | null; retryAfter: number | undefined }) =>
   new ScimError(`${what}: accepted (202) but not done yet${res.txn ? ` (transaction ${res.txn.slice(0, 100)})` : ""}; looked for again`, 202, true, res.retryAfter);
@@ -311,6 +313,12 @@ export function scimClient(endpoint: ScimEndpoint) {
     if (typeof id !== "string" || !id) throw new ScimError(`${what}: the response has no id`, null, false);
     return id;
   };
+  /** The id a create's reply gives; a 202 without one is accepted, not done, and retried. */
+  const madeOrAccepted = (what: string, res: { status: number; json: unknown; txn: string | null; retryAfter: number | undefined }) => {
+    const id = (res.json as { id?: unknown } | null)?.id;
+    if (res.status === 202 && !(typeof id === "string" && id)) throw accepted(what, res);
+    return idOf(res.json, what);
+  };
 
   return {
     /** The user with this userName (its id and externalId), or null. */
@@ -365,9 +373,7 @@ export function scimClient(endpoint: ScimEndpoint) {
       return { users, next: more ? `i:${startIndex + resources.length}:${users.at(-1)?.id ?? lastId}` : null };
     },
     async create(user: ScimUser): Promise<string> {
-      const res = await request("POST", "/Users", onTheWire(user));
-      if (res.status === 202) throw accepted("POST /Users", res);
-      return idOf(res.json, "POST /Users");
+      return madeOrAccepted("POST /Users", await request("POST", "/Users", onTheWire(user)));
     },
     async replace(id: string, user: ScimUser): Promise<void> {
       await request("PUT", `/Users/${encodeURIComponent(id)}`, { ...onTheWire(user), id });
@@ -422,9 +428,7 @@ export function scimClient(endpoint: ScimEndpoint) {
       return groupMemberIds(id, "group");
     },
     async createGroup(group: ScimGroup): Promise<string> {
-      const res = await request("POST", "/Groups", group);
-      if (res.status === 202) throw accepted("POST /Groups", res);
-      return idOf(res.json, "POST /Groups");
+      return madeOrAccepted("POST /Groups", await request("POST", "/Groups", group));
     },
     async replaceGroup(id: string, group: ScimGroup): Promise<void> {
       await request("PUT", `/Groups/${encodeURIComponent(id)}`, { ...group, id });
@@ -456,8 +460,9 @@ export function scimClient(endpoint: ScimEndpoint) {
     async createGroupInBatches(group: ScimGroup, batch?: number): Promise<string> {
       const [first = [], ...rest] = batches(group.members.map((m) => m.value), batch);
       const res = await request("POST", "/Groups", { ...group, members: first.map((value) => ({ value })) });
-      if (res.status === 202) throw accepted("POST /Groups", res);
-      const id = idOf(res.json, "POST /Groups");
+      // Accepted with members still to add: retried, as the group may not be there to add them to.
+      if (res.status === 202 && rest.length) throw accepted("POST /Groups", res);
+      const id = madeOrAccepted("POST /Groups", res);
       for (const more of rest) {
         await request("PATCH", `/Groups/${encodeURIComponent(id)}`, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "add", path: "members", value: more.map((value) => ({ value })) }] });
       }
