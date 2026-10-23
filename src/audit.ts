@@ -1,7 +1,7 @@
 // The audit history (the `audit` option): who connected, changed, removed or decommissioned which
 // target, and when, kept in the database and listed newest first. Written after the change it
 // records, never in its way: a write that fails is logged (the change's own warn line stays).
-import type { Adapter } from "./outbox";
+import { type Adapter, IN_BATCH } from "./outbox";
 import type { AuditAction, AuditEvent, AuditOptions } from "./types";
 
 /** The audit history, one row per event (only with the `audit` option). */
@@ -12,6 +12,25 @@ export const AUDIT_PAGE_MAX = 500;
 const ON_EVENT_TIMEOUT_MS = 5_000;
 /** How often old events are removed (with `keepDays`), at most: by the scheduled run. */
 const PRUNE_EVERY_MS = 3_600_000;
+/** Events removed per batch, and batches per prune: the rest go an hour later. */
+const PRUNE_BATCH = 500;
+const PRUNE_BATCHES = 10;
+/** The most of an event's detail kept: a list past this many items keeps the first ones and says how many more. */
+const DETAIL_ITEMS = 20;
+const DETAIL_MAX = 4000;
+
+/** An event's detail, short enough to keep whole: long lists cut to their first items (with `<key>More`: how many more). */
+function bounded(detail: Record<string, unknown>): Record<string, unknown> {
+  if (JSON.stringify(detail).length <= DETAIL_MAX) return detail;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(detail)) {
+    if (Array.isArray(v) && v.length > DETAIL_ITEMS) {
+      out[k] = v.slice(0, DETAIL_ITEMS);
+      out[`${k}More`] = v.length - DETAIL_ITEMS;
+    } else out[k] = typeof v === "string" && v.length > 256 ? `${v.slice(0, 256)}…` : v;
+  }
+  return JSON.stringify(out).length <= DETAIL_MAX ? out : { truncated: true };
+}
 
 interface Row {
   key: string;
@@ -45,16 +64,19 @@ export function auditLog(options: boolean | AuditOptions | undefined, adapter: A
     try {
       await adapter.create({
         model: AUDIT_MODEL,
-        data: { key: keyAt(at), createdAt: at, targetId: e.targetId, organizationId: e.organizationId, actor: e.actor, action: e.action, detail: JSON.stringify(e.detail).slice(0, 4000) },
+        data: { key: keyAt(at), createdAt: at, targetId: e.targetId, organizationId: e.organizationId, actor: e.actor, action: e.action, detail: JSON.stringify(bounded(e.detail)) },
       });
     } catch (err) {
       log.error(`[scim] audit: couldn't record ${e.action} of target ${e.targetId}: ${(err as Error).message}`);
     }
     if (o.onEvent) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await Promise.race([o.onEvent(event), new Promise((_, reject) => setTimeout(() => reject(new Error(`no answer within ${ON_EVENT_TIMEOUT_MS / 1000} s`)), ON_EVENT_TIMEOUT_MS))]);
+        await Promise.race([o.onEvent(event), new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`no answer within ${ON_EVENT_TIMEOUT_MS / 1000} s`)), ON_EVENT_TIMEOUT_MS)))]);
       } catch (err) {
         log.error(`[scim] audit.onEvent threw: ${(err as Error).message}`);
+      } finally {
+        clearTimeout(timer);
       }
     }
   }
@@ -90,7 +112,13 @@ export function auditLog(options: boolean | AuditOptions | undefined, adapter: A
     if (!on || !o.keepDays || Date.now() - prunedAt < PRUNE_EVERY_MS) return;
     prunedAt = Date.now();
     try {
-      await adapter.deleteMany({ model: AUDIT_MODEL, where: [{ field: "createdAt", value: new Date(Date.now() - o.keepDays * 86_400_000), operator: "lt" }] });
+      // In batches, so a large first prune doesn't become one long statement (D1's time limit, MySQL's locks).
+      const before = new Date(Date.now() - o.keepDays * 86_400_000);
+      for (let i = 0; i < PRUNE_BATCHES; i++) {
+        const old = (await adapter.findMany({ model: AUDIT_MODEL, where: [{ field: "createdAt", value: before, operator: "lt" }], limit: PRUNE_BATCH })) as Row[];
+        for (let j = 0; j < old.length; j += IN_BATCH) await adapter.deleteMany({ model: AUDIT_MODEL, where: [{ field: "key", value: old.slice(j, j + IN_BATCH).map((r) => r.key), operator: "in" }] });
+        if (old.length < PRUNE_BATCH) break;
+      }
     } catch (err) {
       log.error(`[scim] audit: couldn't remove old events: ${(err as Error).message}`);
     }
