@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-23
+
+A decommission's preview says how many accounts and groups it will leave on; roles warn past a user's first 1,000 organizations; and how to index a long audit history.
+
 ### Added
 
 - **A decommission's preview says how many accounts and groups it will leave on**: `preview: true` (on `scimProvisioningDecommission` and the registry's `targets/decommission`, for a purge too) gains `shared: { accounts, groups }`, those of its counts that another target still in use at the same app shares, and so are left there. `null` past 10,000 accounts, which aren't counted. `confirm` is unchanged.
