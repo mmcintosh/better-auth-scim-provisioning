@@ -133,6 +133,8 @@ describe("decommissioning an organization's target", () => {
     await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: globex.id, settings, credentials: { token: remote.token } }, headers: oscar });
     await h.settle();
     expect(active()).toEqual(["ann@example.com", "olive@example.com", "oscar@example.com"]);
+    // The preview says so: two to deactivate, one of them left on.
+    expect(await decommission(owner.headers, { preview: true })).toMatchObject({ accounts: 2, groups: 0, shared: { accounts: 1, groups: 0 } });
     await decommission(owner.headers, { confirm: 2 });
     await drive();
     expect(active()).toEqual(["ann@example.com", "oscar@example.com"]);
@@ -150,6 +152,7 @@ describe("decommissioning an organization's target", () => {
     await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: globex.id, settings, credentials: { token: remote.token } }, headers: oscar.headers });
     await h.settle();
     expect(active()).toEqual(["ann@example.com", "oscar@example.com"]);
+    expect(await decommission(owner.headers, { phase: "purge", preview: true })).toMatchObject({ accounts: 2, shared: { accounts: 1, groups: 0 } });
     await decommission(owner.headers, { phase: "purge" });
     await drive();
     expect([...remote.users.values()].map((u) => u.userName).sort()).toEqual(["ann@example.com", "oscar@example.com"]);

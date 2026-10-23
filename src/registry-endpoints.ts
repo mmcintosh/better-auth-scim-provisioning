@@ -55,6 +55,8 @@ export interface RegistryHost {
         kick(targetId: string): void;
         /** What a target still has at the app: accounts active there (for a purge, not adopted), and groups. */
         counts(targetId: string, phase?: "deactivate" | "purge"): Promise<{ accounts: number; groups: number }>;
+        /** Of those, how many another target at the same app still uses (left there); null when too many to count. */
+        shared(targetId: string, phase?: "deactivate" | "purge"): Promise<{ accounts: number; groups: number } | null>;
         /** The audit history (recording is a no-op without the plugin's `audit` option). */
         audit: {
           on: boolean;
@@ -543,7 +545,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
         }
         if (ctx.body.phase === "purge") {
           const counts = await i.counts(row.targetId, "purge");
-          if (preview) return ctx.json({ ...counts, decommission: await d.status(row.targetId) });
+          if (preview) return ctx.json({ ...counts, shared: await i.shared(row.targetId, "purge"), decommission: await d.status(row.targetId) });
           const current = await d.row(row.targetId);
           if (current?.phase === "purge" && current.state === "complete") throw refuse("BAD_REQUEST", "its purge is complete");
           if (current?.phase !== "purge") {
@@ -560,7 +562,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           return ctx.json({ decommission: await d.status(row.targetId) });
         }
         const counts = await i.counts(row.targetId);
-        if (preview) return ctx.json({ ...counts, decommission: await d.status(row.targetId) });
+        if (preview) return ctx.json({ ...counts, shared: await i.shared(row.targetId), decommission: await d.status(row.targetId) });
         const state = await d.state(row.targetId);
         if (state === "complete") throw refuse("BAD_REQUEST", "its decommission is complete");
         if (state !== "running") {

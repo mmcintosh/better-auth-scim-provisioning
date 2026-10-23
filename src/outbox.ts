@@ -172,6 +172,8 @@ const SWEEP_MS = 60_000;
  * queries (D1 allows 1,000 an invocation, and the run's deliveries need theirs).
  */
 const DECOMMISSION_PAGE = 50;
+/** A preview counts the accounts another target at the same app shares only up to this many accounts (a page of 500 is about 11 queries). */
+const SHARED_SCAN_MAX = 10_000;
 /** A Retry-After of 0 (or a date past) still waits this long, so a target that keeps answering 429 isn't asked every run. */
 const MIN_RATE_LIMIT_WAIT_MS = 10_000;
 /** A job rate limited for longer than this is logged as an error, not a warning: the app may never let it through. */
@@ -1937,6 +1939,67 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     };
   }
 
+  /**
+   * Of what decommissionCounts counts, how much another target at the same app still uses, and so
+   * is left there (see sharedWith): for a preview. Null past SHARED_SCAN_MAX accounts (not
+   * counted), or for a target that can't be built.
+   */
+  async function sharedCounts(targetId: string, phase: Decommission["phase"] = "deactivate"): Promise<{ accounts: number; groups: number } | null> {
+    const target = await source.get(targetId);
+    if (!target) return null;
+    const purge = phase === "purge";
+    const t = { field: "targetId", value: targetId };
+    if ((await adapter.count({ model: LINK_MODEL, where: purge ? [t] : [t, { field: "active", value: true }] })) > SHARED_SCAN_MAX) return null;
+    const used = new Map<string, Promise<boolean>>();
+    const stillUsedOnce = (otherId: string) => {
+      const known = used.get(otherId) ?? stillUsed(target, otherId);
+      used.set(otherId, known);
+      return known;
+    };
+    let accounts = 0;
+    for (let after = "", full = true; full; ) {
+      const where: Where[] = [t];
+      if (!purge) where.push({ field: "active", value: true });
+      if (after) where.push({ field: "userId", value: after, operator: "gt" });
+      const page = (await adapter.findMany({ model: LINK_MODEL, where, limit: PAGE, sortBy: { field: "userId", direction: "asc" } })) as Link[];
+      full = page.length >= PAGE;
+      after = page[page.length - 1]?.userId ?? after;
+      const mine = page.filter((l) => l.targetId === targetId && (purge ? !l.adopted : l.active) && l.remoteId);
+      for (let i = 0; i < mine.length; i += IN_BATCH) {
+        const batch = mine.slice(i, i + IN_BATCH);
+        const others = (await adapter.findMany({ model: LINK_MODEL, where: [{ field: "remoteId", value: batch.map((l) => l.remoteId), operator: "in" }], limit: batch.length * 20 })) as Link[];
+        for (const l of batch) {
+          const theirs = others.filter((o) => o.targetId !== targetId && o.remoteId === l.remoteId && o.userId === l.userId && (purge || o.active));
+          for (const o of theirs)
+            if (await stillUsedOnce(o.targetId)) {
+              accounts++;
+              break;
+            }
+        }
+      }
+    }
+    let groups = 0;
+    for (let after: string | null = null, full = true; full; ) {
+      const where: Where[] = [t];
+      if (after !== null) where.push({ field: "key", value: after, operator: "gt" });
+      const page = (await adapter.findMany({ model: GROUP_LINK_MODEL, where, limit: PAGE, sortBy: { field: "key", direction: "asc" } })) as GroupLink[];
+      full = page.length >= PAGE;
+      after = page[page.length - 1]?.key ?? after;
+      const mine = page.filter((g) => g.targetId === targetId && g.remoteId);
+      for (let i = 0; i < mine.length; i += IN_BATCH) {
+        const batch = mine.slice(i, i + IN_BATCH);
+        const others = (await adapter.findMany({ model: GROUP_LINK_MODEL, where: [{ field: "remoteId", value: batch.map((g) => g.remoteId), operator: "in" }], limit: batch.length * 20 })) as GroupLink[];
+        for (const g of batch)
+          for (const o of others.filter((o) => o.targetId !== targetId && o.remoteId === g.remoteId))
+            if (await stillUsedOnce(o.targetId)) {
+              groups++;
+              break;
+            }
+      }
+    }
+    return { accounts, groups };
+  }
+
   async function targetFor(targetId: string): Promise<Target> {
     const target = await source.get(targetId);
     if (!target) throw new Error(`[scim] no target ${targetId}`);
@@ -2118,5 +2181,5 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
     return adapter.updateMany({ model: JOB_MODEL, where: [{ field: "targetId", value: targetId }], update: { nextAttemptAt: new Date(), failed: false } });
   }
 
-  return { audit, forgetAccounts, enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, startPurge, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
+  return { audit, forgetAccounts, enqueue, resume, run, runDue, runFor, linkedUsers, allLinkedUsers, linkedGroups, groupsOf, groupsForOrganization, hasGroups, source, status, userStatus, failures, drift, accounts, decommissionCounts, sharedCounts, startPurge, decommissionOf, startDecommission, cancelDecommission, decommissionStatus };
 }
