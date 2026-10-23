@@ -198,7 +198,7 @@ export interface Decommission {
   completedAt?: Date | null;
   cancelledAt?: Date | null;
   cancelledBy?: string | null;
-  /** The app it was started at (see appOf): pointed elsewhere since, it stops there. Null in a row a 1.6 prerelease wrote. */
+  /** The app it was started at (see appOf): pointed elsewhere since, it stops there. */
   destination?: string | null;
   updatedAt: Date;
 }
