@@ -174,6 +174,38 @@ const batches = <T>(items: T[], size?: number): T[][] => {
   return out;
 };
 
+/** The response attributes we read, as RFC 7643 spells them. */
+const SCIM_NAMES = [
+  "Resources", "totalResults", "itemsPerPage", "startIndex", "nextCursor", "id", "userName", "externalId", "active", "members", "value", "displayName", "detail", "scimType", "status", "schemas",
+  // ServiceProviderConfig (RFC 7643 §5, RFC 9865, RFC 9967) and the discovery endpoints, for check.
+  "patch", "filter", "bulk", "etag", "sort", "supported", "authenticationSchemes", "type", "maxResults", "securityEvents", "asyncRequest", "eventUris", "pagination", "cursor", "index", "defaultPaginationMethod", "defaultPageSize", "maxPageSize", "cursorTimeout", "schema", "name", "schemaExtensions",
+];
+const CANONICAL = new Map(SCIM_NAMES.map((n) => [n.toLowerCase(), n]));
+
+/**
+ * A response with the attributes we read spelled as RFC 7643 does: attribute names are case
+ * insensitive (§2.1), so `resources` or `TotalResults` is the same list. A name spelled both ways
+ * keeps the exact spelling's value. Others are left as they are.
+ */
+export function scimKeys(json: unknown, depth = 0): unknown {
+  if (depth > 8 || json === null || typeof json !== "object") return json;
+  if (Array.isArray(json)) return json.map((v) => scimKeys(v, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(json)) {
+    const name = CANONICAL.get(k.toLowerCase()) ?? k;
+    if (name !== k && Object.hasOwn(json, name)) continue;
+    out[name] = scimKeys(v, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * A create the app accepted but hasn't done yet (202, RFC 9967's asynchronous requests): retried,
+ * and the retry finds the account (or group) by name once it's there, rather than making another.
+ */
+const accepted = (what: string, res: { status: number; txn: string | null; retryAfter: number | undefined }) =>
+  new ScimError(`${what}: accepted (202) but not done yet${res.txn ? ` (transaction ${res.txn.slice(0, 100)})` : ""}; looked for again`, 202, true, res.retryAfter);
+
 export function scimClient(endpoint: ScimEndpoint) {
   const base = trimSlashes(endpoint.url);
   const doFetch = endpoint.fetch ?? fetch;
@@ -181,7 +213,7 @@ export function scimClient(endpoint: ScimEndpoint) {
   const auth: ScimAuth = endpoint.auth ?? { type: "bearer", token: endpoint.token ?? "" };
   const creds = credentials(auth, { fetch: doFetch, timeoutMs });
 
-  async function request(method: string, path: string, body?: unknown, retried = false): Promise<{ status: number; json: unknown }> {
+  async function request(method: string, path: string, body?: unknown, retried = false): Promise<{ status: number; json: unknown; txn: string | null; retryAfter: number | undefined }> {
     let res: Response;
     const authorization = await creds.headers();
     try {
@@ -204,12 +236,12 @@ export function scimClient(endpoint: ScimEndpoint) {
     let json: unknown = null;
     if (text) {
       try {
-        json = JSON.parse(text);
+        json = scimKeys(JSON.parse(text));
       } catch {
         json = null;
       }
     }
-    if (res.ok) return { status: res.status, json };
+    if (res.ok) return { status: res.status, json, txn: res.headers.get("set-txn"), retryAfter: retryAfterMs(res.headers.get("retry-after")) };
     // A cached OAuth token the app no longer accepts: once, with a new one.
     if (res.status === 401 && !retried && creds.rejected()) return request(method, path, body, true);
     if (res.status >= 300 && res.status < 400) {
@@ -326,7 +358,9 @@ export function scimClient(endpoint: ScimEndpoint) {
       return { users, next: more ? `i:${startIndex + resources.length}:${users.at(-1)?.id ?? lastId}` : null };
     },
     async create(user: ScimUser): Promise<string> {
-      return idOf((await request("POST", "/Users", onTheWire(user))).json, "POST /Users");
+      const res = await request("POST", "/Users", onTheWire(user));
+      if (res.status === 202) throw accepted("POST /Users", res);
+      return idOf(res.json, "POST /Users");
     },
     async replace(id: string, user: ScimUser): Promise<void> {
       await request("PUT", `/Users/${encodeURIComponent(id)}`, { ...onTheWire(user), id });
@@ -381,7 +415,9 @@ export function scimClient(endpoint: ScimEndpoint) {
       return groupMemberIds(id, "group");
     },
     async createGroup(group: ScimGroup): Promise<string> {
-      return idOf((await request("POST", "/Groups", group)).json, "POST /Groups");
+      const res = await request("POST", "/Groups", group);
+      if (res.status === 202) throw accepted("POST /Groups", res);
+      return idOf(res.json, "POST /Groups");
     },
     async replaceGroup(id: string, group: ScimGroup): Promise<void> {
       await request("PUT", `/Groups/${encodeURIComponent(id)}`, { ...group, id });
@@ -412,7 +448,9 @@ export function scimClient(endpoint: ScimEndpoint) {
     /** Create a group with at most `batch` members, then add the rest. */
     async createGroupInBatches(group: ScimGroup, batch?: number): Promise<string> {
       const [first = [], ...rest] = batches(group.members.map((m) => m.value), batch);
-      const id = idOf((await request("POST", "/Groups", { ...group, members: first.map((value) => ({ value })) })).json, "POST /Groups");
+      const res = await request("POST", "/Groups", { ...group, members: first.map((value) => ({ value })) });
+      if (res.status === 202) throw accepted("POST /Groups", res);
+      const id = idOf(res.json, "POST /Groups");
       for (const more of rest) {
         await request("PATCH", `/Groups/${encodeURIComponent(id)}`, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "add", path: "members", value: more.map((value) => ({ value })) }] });
       }

@@ -75,3 +75,23 @@ it("discovery's odd answers: 401 on those endpoints, no User type, a bare array,
   // Only the schema by its id.
   expect(await result(mockScim({ discovery: { schemaById: true, enterprise: true } }))).toMatchObject({ ok: true, detail: "served at /Schemas/<its id>" });
 });
+
+it("reports RFC 9865's paging and RFC 9967's asynchronous requests from the ServiceProviderConfig, whatever its case; and a create answered 202", async () => {
+  const app = mockScim({ requireNames: true });
+  const spc = {
+    patch: { supported: true },
+    filter: { supported: true },
+    Pagination: { Cursor: true, index: true, defaultPaginationMethod: "cursor", maxPageSize: 200 },
+    securityevents: { asyncrequest: "long" },
+  };
+  const fetch: typeof globalThis.fetch = async (input, init) =>
+    String(input).endsWith("/ServiceProviderConfig") ? new Response(JSON.stringify(spc), { status: 200 }) : app.fetch(input, init);
+  const results = await checkScimTarget({ url: app.url, token: app.token, fetch });
+  expect(results[0]).toMatchObject({
+    ok: true,
+    detail: expect.stringContaining("paging by cursor and index (default cursor), at most 200 a page; asynchronous requests: long (it may answer a slow create with 202"),
+  });
+  app.failOn("POST", /^\/Users$/, { accepted: true });
+  const accepted = await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch });
+  expect(accepted.at(-1)).toMatchObject({ name: "create a user", ok: false, detail: expect.stringContaining("202: accepted, to be done later") });
+});

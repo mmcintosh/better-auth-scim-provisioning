@@ -22,7 +22,8 @@ export interface StoredGroup {
   members: { value: string }[];
 }
 
-export type Fault = { status: number; retryAfter?: string; detail?: string } | { timeout: true } | { lostReply: true };
+/** `accepted`: done, but answered 202 without a body (RFC 9967's asynchronous requests). */
+export type Fault = { status: number; retryAfter?: string; detail?: string } | { timeout: true } | { lostReply: true } | { accepted: true };
 
 /**
  * `keepsExternalId: false`: an app that ignores externalId, as many do. `patch: true`: PATCH can
@@ -45,7 +46,7 @@ export type Fault = { status: number; retryAfter?: string; detail?: string } | {
  * without a User type; `bare`: /Schemas as a bare array; `schemaById`: only /Schemas/<id>.
  */
 /** `noTotal`: the users list leaves out totalResults (apps do), so paging goes by full pages. With `like: "aws"`, the users list pages by cursor. */
-export function mockScim(o: { token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; noTotal?: boolean; discovery?: { resourceTypes?: boolean; schemas?: boolean; enterprise?: boolean; noUserType?: boolean; bare?: boolean; schemaById?: boolean } } = {}) {
+export function mockScim(o: { lowercaseKeys?: boolean; token?: string; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; noTotal?: boolean; discovery?: { resourceTypes?: boolean; schemas?: boolean; enterprise?: boolean; noUserType?: boolean; bare?: boolean; schemaById?: boolean } } = {}) {
   const token = o.token ?? "test-token";
   const users = new Map<string, StoredUser>();
   const groups = new Map<string, StoredGroup>();
@@ -75,6 +76,10 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
 
     const at = aimed.findIndex((a) => a.method === method && a.path.test(path));
     const fault = at >= 0 ? aimed.splice(at, 1)[0]?.fault : faults.shift();
+    if (fault && "accepted" in fault) {
+      await answer(url, method, path, body, init);
+      return new Response(null, { status: 202, headers: { "set-txn": "txn-1", "preference-applied": "respond-async" } });
+    }
     if (fault && "lostReply" in fault) {
       await answer(url, method, path, body, init);
       throw new TypeError("network connection lost");
@@ -88,7 +93,12 @@ export function mockScim(o: { token?: string; requireNames?: boolean; keepsExter
       if (fault.retryAfter) res.headers.set("retry-after", fault.retryAfter);
       return res;
     }
-    return answer(url, method, path, body, init);
+    const res = await answer(url, method, path, body, init);
+    if (!o.lowercaseKeys) return res;
+    // Attribute names in any case (RFC 7643 §2.1): every key lowercased.
+    const lower = (v: unknown): unknown => (Array.isArray(v) ? v.map(lower) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k.toLowerCase(), lower(x)])) : v);
+    const text = await res.text();
+    return new Response(text ? JSON.stringify(lower(JSON.parse(text))) : null, { status: res.status, headers: res.headers });
   };
 
   async function answer(url: URL, method: string, path: string, body: Record<string, unknown> | undefined, init: RequestInit | undefined): Promise<Response> {

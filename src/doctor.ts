@@ -4,7 +4,7 @@
 // (or at least deactivated) at the end. Behind `npx better-auth-scim-provisioning check`, and
 // usable from an admin page ("test connection").
 import { credentials, type ScimAuth } from "./credentials";
-import { fetchFailure, SCIM_ENTERPRISE_USER_SCHEMA, SCIM_USER_SCHEMA, scimString, targetUrl, trimSlashes } from "./scim-client";
+import { fetchFailure, SCIM_ENTERPRISE_USER_SCHEMA, SCIM_USER_SCHEMA, scimKeys, scimString, targetUrl, trimSlashes } from "./scim-client";
 
 /** Each check, by a stable id (the `name` is for people and may change). The list can grow in a minor release. */
 export type CheckId = "service-provider-config" | "enterprise-user" | "create" | "keeps-external-id" | "find" | "find-any-case" | "duplicate-refused" | "update-put" | "update-patch" | "update-patch-path" | "deactivate" | "delete";
@@ -72,7 +72,7 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
       const text = await res.text();
       let json: Record<string, unknown> | null = null;
       try {
-        json = text ? (JSON.parse(text) as Record<string, unknown>) : null;
+        json = text ? (scimKeys(JSON.parse(text)) as Record<string, unknown>) : null;
       } catch {}
       return { status: res.status, json };
     } catch (e) {
@@ -87,7 +87,15 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   if (spc.status === 200 && spc.json) {
     const flag = (k: string) => (spc.json?.[k] as { supported?: unknown } | undefined)?.supported === true;
     const schemes = Array.isArray(spc.json.authenticationSchemes) ? (spc.json.authenticationSchemes as { type?: unknown }[]).map((s) => String(s.type)).join(", ") : "";
-    note("service-provider-config", "ServiceProviderConfig", true, `patch ${flag("patch")}, filter ${flag("filter")}, bulk ${flag("bulk")}, etag ${flag("etag")}, sort ${flag("sort")}${schemes ? `; auth: ${schemes}` : ""}`);
+    // RFC 9865's paging and RFC 9967's asynchronous requests, when the app says.
+    const paging = spc.json.pagination as { cursor?: unknown; index?: unknown; defaultPaginationMethod?: unknown; maxPageSize?: unknown } | undefined;
+    const pages = paging && typeof paging === "object" ? [paging.cursor === true && "cursor", paging.index === true && "index"].filter(Boolean).join(" and ") : "";
+    const events = spc.json.securityEvents as { asyncRequest?: unknown } | undefined;
+    const extra = [
+      pages && `paging by ${pages}${typeof paging?.defaultPaginationMethod === "string" ? ` (default ${paging.defaultPaginationMethod})` : ""}${typeof paging?.maxPageSize === "number" ? `, at most ${paging.maxPageSize} a page` : ""}`,
+      events && typeof events === "object" && typeof events.asyncRequest === "string" && `asynchronous requests: ${events.asyncRequest}${events.asyncRequest.toLowerCase() === "long" ? " (it may answer a slow create with 202; a create is then looked for again)" : ""}`,
+    ].filter(Boolean);
+    note("service-provider-config", "ServiceProviderConfig", true, `patch ${flag("patch")}, filter ${flag("filter")}, bulk ${flag("bulk")}, etag ${flag("etag")}, sort ${flag("sort")}${schemes ? `; auth: ${schemes}` : ""}${extra.length ? `; ${extra.join("; ")}` : ""}`);
   } else note("service-provider-config", "ServiceProviderConfig", null, `not available (${why(spc)}); fine, it's optional in practice`);
 
   // 1b. Does the app advertise the Enterprise User extension (RFC 7643 §4.3)? /ResourceTypes says
@@ -141,7 +149,7 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   const id = typeof created.json?.id === "string" ? created.json.id : null;
   if (!(created.status >= 200 && created.status < 300 && id)) {
     // The app may have made the user anyway (a 2xx without an id, a timeout after the write).
-    note("create", "create a user", false, `${created.status >= 200 && created.status < 300 ? `${created.status} without an id` : why(created)}; if the app made it anyway, remove the test user ${userName} there by hand`);
+    note("create", "create a user", false, `${created.status === 202 ? "202: accepted, to be done later (asynchronously), which the plugin handles by looking for the account again; the other checks need it at once" : created.status >= 200 && created.status < 300 ? `${created.status} without an id` : why(created)}; if the app made it anyway, remove the test user ${userName} there by hand`);
     return results;
   }
   note("create", "create a user", true, `${created.status}, id ${id}`);

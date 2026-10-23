@@ -4,6 +4,15 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed
+
+- **A create answered 202 (RFC 9967) no longer fails the user's job**: RFC 9967 (May 2026) lets an app accept a slow request and do it later, answering 202 with no body, even to a client that didn't ask. A create answered so was taken as "no id" and failed. It's now retried, and a retry of a create of ours that's pending (a 202, or a reply lost) looks for the account or group first, so it's linked, not made twice.
+- **Attribute names in any case** (RFC 7643 §2.1): an app answering `resources`, `totalresults`, `ID` and so on was taken as not answering SCIM lists; it's read like any other.
+
+### Added
+
+- **`check` reports RFC 9865's paging and RFC 9967's asynchronous requests** when the ServiceProviderConfig gives them, and says when a create is answered 202.
+
 ## [1.7.0] - 2026-10-23
 
 A decommission's preview says how many accounts and groups it will leave on; roles warn past a user's first 1,000 organizations; and how to index a long audit history.

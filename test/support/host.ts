@@ -12,7 +12,7 @@ import { mockGraph } from "./mock-graph";
 import { mockScim } from "./mock-scim";
 import { mockWebhook } from "./mock-webhook";
 
-type TargetSpec = Omit<TargetOptions, "fetch"> & Pick<ScimTarget, "update" | "compat"> & { type?: "scim" | "google-workspace" | "entra-id" | "webhook"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; noTotal?: boolean };
+type TargetSpec = Omit<TargetOptions, "fetch"> & Pick<ScimTarget, "update" | "compat"> & { type?: "scim" | "google-workspace" | "entra-id" | "webhook"; requireNames?: boolean; keepsExternalId?: boolean; patch?: boolean; like?: "aws" | "atlassian"; pageSize?: number; membersOnRequest?: boolean; indexPaged?: boolean; noTotal?: boolean; lowercaseKeys?: boolean };
 
 /** A database for Better Auth's `database` option, and whether it needs Better Auth's migrations. */
 export interface HostDatabase {
@@ -33,7 +33,7 @@ export function schemaOptions(database?: unknown) {
 
 export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvisioningOptions["retry"]; onFailure?: ScimProvisioningOptions["onFailure"]; registry?: TargetRegistryOptions; decommission?: boolean; audit?: ScimProvisioningOptions["audit"]; concurrency?: number; database?: HostDatabase; googleLag?: number; googleRenameLag?: number; googleGroupLag?: number; googleGroupReadLag?: number; googleGroupScope?: boolean; googleMembersPageSize?: number; googleHoldNew?: string; graphLag?: number; graphLagFilter?: boolean; graphDeleteLag?: number; graphNextLinkBase?: string; userFields?: Record<string, { type: "string" | "number"; required?: boolean }> } = {}) {
   const specs = o.targets ?? [{ id: "app" }];
-  const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}), ...(s.membersOnRequest ? { membersOnRequest: true } : {}), ...(s.indexPaged ? { indexPaged: true } : {}), ...(s.noTotal ? { noTotal: true } : {}) })]));
+  const apps = Object.fromEntries(specs.map((s) => [s.id, mockScim({ requireNames: s.requireNames ?? true, keepsExternalId: s.keepsExternalId ?? true, patch: s.patch ?? false, ...(s.like ? { like: s.like } : {}), ...(s.pageSize ? { pageSize: s.pageSize } : {}), ...(s.membersOnRequest ? { membersOnRequest: true } : {}), ...(s.indexPaged ? { indexPaged: true } : {}), ...(s.noTotal ? { noTotal: true } : {}), ...(s.lowercaseKeys ? { lowercaseKeys: true } : {}) })]));
   // A Google Workspace target gets a mock Directory API instead (one per host).
   const google = specs.some((s) => s.type === "google-workspace") ? await mockGoogle({ lag: o.googleLag, renameLag: o.googleRenameLag, groupLag: o.googleGroupLag, groupReadLag: o.googleGroupReadLag, groupScope: o.googleGroupScope, membersPageSize: o.googleMembersPageSize, holdNew: o.googleHoldNew }) : undefined;
   // An Entra ID target gets a mock Microsoft Graph (one per host).
@@ -62,7 +62,7 @@ export async function createHost(o: { targets?: TargetSpec[]; retry?: ScimProvis
       // Teams on, so team groups can be tested; nothing else changes without teamGroups.
       organization({ teams: { enabled: true } }),
       scimProvisioning({
-        targets: specs.map(({ requireNames: _, keepsExternalId: __, patch: ___, like: ____, pageSize: _____, membersOnRequest: ______, indexPaged: _______, noTotal: ________, ...s }) =>
+        targets: specs.map(({ requireNames: _, keepsExternalId: __, patch: ___, like: ____, pageSize: _____, membersOnRequest: ______, indexPaged: _______, noTotal: ________, lowercaseKeys: _________, ...s }) =>
           s.type === "webhook" && webhook
             ? { ...s, type: "webhook", url: webhook.url, secret: webhook.secret, fetch: webhook.fetch }
             : s.type === "google-workspace" && google

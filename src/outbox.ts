@@ -708,6 +708,16 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       // A pending link from an earlier attempt: that create may have made the account (its reply
       // lost), so an account found now may be ours, whatever it looks like.
       const pendingBefore = link !== null && !link.remoteId;
+      // Look first, so a second create doesn't make a second account where a create of ours is
+      // pending: its reply lost, or accepted and not yet done (a 202, RFC 9967).
+      if (pendingBefore && externalId && target.type !== "webhook") {
+        const found = await lookUp(client, scim.userName, externalId);
+        if (found && found.externalId === externalId) {
+          await update(found.id);
+          await saveLink(target, userId, { remoteId: found.id, userName: scim.userName, externalId, active: true });
+          return null;
+        }
+      }
       // Pending first: if the reply to the create is lost, we still know to look for it. Pending
       // links have no id, so groups never list a user the app hasn't confirmed.
       await saveLink(target, userId, { remoteId: "", userName: scim.userName, externalId, active: true });
@@ -1453,16 +1463,16 @@ export function outbox(options: ScimProvisioningOptions, adapter: Adapter, log: 
       const what = ref.kind === "group" ? "organization" : ref.kind;
       throw new ScimError(`group ${displayName}: a group with this name already exists at the app and isn't this ${what}'s; rename one of them, or set ${ref.kind === "group" ? "groupName" : `${ref.kind}GroupName`}`, 409, false);
     };
-    if (!pendingBefore) {
-      // Look before creating: a group of this name that isn't ours is refused here, before any
-      // pending link exists, so a pending link always means "our own create may have made it".
-      const existing = await client.findGroupByName(displayName, externalId);
-      if (existing) {
-        if (existing.externalId !== externalId || (await otherOwner(existing.id))) return refuse();
-        await updateGroup(existing.id);
-        await saveGroupLink(target, ref, organizationId, { remoteId: existing.id, displayName });
-        return null;
-      }
+    // Look before creating: a group of this name that isn't ours is refused here, before any
+    // pending link exists, so a pending link always means "our own create may have made it". With
+    // one pending (a reply lost, or a 202 not yet done), ours by externalId is taken up here
+    // rather than created again; any other is left to the create's 409, as before.
+    const existing = await client.findGroupByName(displayName, externalId);
+    if (existing && (!pendingBefore || existing.externalId === externalId)) {
+      if (existing.externalId !== externalId || (await otherOwner(existing.id))) return refuse();
+      await updateGroup(existing.id);
+      await saveGroupLink(target, ref, organizationId, { remoteId: existing.id, displayName });
+      return null;
     }
     // Pending first, as for users: a create whose reply is lost is ours to adopt later.
     await saveGroupLink(target, ref, organizationId, { remoteId: "", displayName });
