@@ -55,7 +55,7 @@ export const storedSettingsSchema = z.strictObject({
     .optional(),
   groups: z.boolean().optional(),
   teamGroups: z.boolean().optional(),
-  roleGroups: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
+  roleGroups: z.union([z.boolean(), z.array(z.string().min(1)).max(1000)]).optional(),
   adopt: z.boolean().optional(),
   deprovision: z.enum(["deactivate", "delete"]).optional(),
   requireVerifiedEmail: z.boolean().optional(),

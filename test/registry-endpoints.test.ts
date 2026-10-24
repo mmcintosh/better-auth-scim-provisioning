@@ -2,6 +2,7 @@
 // what's shown (never credentials), and what each change does to delivery.
 import { describe, expect, it, vi } from "vitest";
 import type { TargetRegistryOptions } from "../src";
+import { storedSettingsSchema } from "../src/registry";
 import { createHost } from "./support/host";
 import { mockScim } from "./support/mock-scim";
 
@@ -120,6 +121,26 @@ describe("what's accepted and shown", () => {
     const e = await create(owner.headers, acme.id, body).catch((x) => x);
     expect(e.statusCode).toBe(400);
     expect(JSON.stringify(e.body)).toMatch(problem);
+  });
+
+  it("refuses too many role groups", async () => {
+    const { owner, acme, create } = await setup();
+    const e = await create(owner.headers, acme.id, { settings: { url: "https://app.example.com/scim/v2", roleGroups: Array.from({ length: 1001 }, (_, i) => `role${i}`) }, credentials: { token: "t" } }).catch((x) => x);
+    expect(e.statusCode).toBe(400);
+    expect(JSON.stringify(e.body)).toMatch(/settings\.roleGroups/);
+  });
+
+  // GHSA-mrhx-c7xc-m3w5: a large array of bad values made zod (to 4.6.5) record a problem per value
+  // until the process ran out of memory. Oversized settings are refused before they're parsed.
+  it("an update's oversized settings are refused before they're parsed", async () => {
+    const { owner, acme, create, update } = await setup();
+    const { target } = await create(owner.headers, acme.id);
+    const parse = vi.spyOn(storedSettingsSchema, "safeParse");
+    const e = await update(owner.headers, { id: target.id, settings: { url: "https://app.example.com/scim/v2", roleGroups: Array.from({ length: 100_000 }, () => 0) } }).catch((x) => x);
+    expect(e.statusCode).toBe(400);
+    expect(JSON.stringify(e.body)).toMatch(/settings are too large/);
+    expect(parse.mock.calls.filter(([s]) => (s as { roleGroups?: unknown } | null)?.roleGroups !== undefined)).toEqual([]);
+    parse.mockRestore();
   });
 
   it("allowHosts lets an internal host through", async () => {
