@@ -268,9 +268,14 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
   }
   const readable = async (ctx: GenericEndpointContext, row: TargetRow) => unseal(key(ctx), row).catch(() => null);
 
+  /** Throws 400 for settings too large to store, before anything parses them (GHSA-mrhx-c7xc-m3w5). */
+  const sized = (rawSettings: unknown) => {
+    if (JSON.stringify(rawSettings ?? {}).length > MAX_CONFIG_BYTES) throw refuse("BAD_REQUEST", "settings are too large");
+  };
+
   /** Settings and credentials checked as a whole target; throws 400 with every problem. */
   function check(ids: { targetId: string; organizationId: string }, rawSettings: unknown, rawCredentials: unknown) {
-    if (JSON.stringify(rawSettings ?? {}).length > MAX_CONFIG_BYTES) throw refuse("BAD_REQUEST", "settings are too large");
+    sized(rawSettings);
     const settings = storedSettingsSchema.safeParse(rawSettings ?? {});
     const credentials = storedCredentialsSchema.safeParse(rawCredentials);
     const issues = [
@@ -431,6 +436,7 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           const settings = ctx.body.settings !== undefined ? ctx.body.settings : ctx.body.credentials !== undefined ? kept : before;
           const type = (settings as { type?: unknown } | null)?.type ?? "scim";
           if (type !== row.type) throw refuse("BAD_REQUEST", `a target's type can't change (it's ${row.type}): remove it and connect a new one`);
+          sized(settings);
           const parsed = storedSettingsSchema.safeParse(settings);
           const moves = parsed.success && destination(parsed.data) !== destination(before);
           if (ctx.body.credentials === undefined) {
