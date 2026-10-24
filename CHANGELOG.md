@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-10-24
+
+A security fix: a target update's settings are size-checked before they're parsed (GHSA-mrhx-c7xc-m3w5), and zod 4.6.6 or later is required.
+
 ### Security
 
 - **A target update's settings are size-checked before they're parsed** ([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5), zod to 4.6.5): zod recorded a problem for every bad value in an array, so a `targets/update` with a huge `roleGroups` of bad values could run the server out of memory. Only someone allowed to change an existing target could send one. Creates were already size-checked first (16 KB); updates now are too, so this holds whatever zod the app has.
