@@ -436,7 +436,6 @@ export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpoint
           const settings = ctx.body.settings !== undefined ? ctx.body.settings : ctx.body.credentials !== undefined ? kept : before;
           const type = (settings as { type?: unknown } | null)?.type ?? "scim";
           if (type !== row.type) throw refuse("BAD_REQUEST", `a target's type can't change (it's ${row.type}): remove it and connect a new one`);
-          sized(settings);
           const parsed = storedSettingsSchema.safeParse(settings);
           const moves = parsed.success && destination(parsed.data) !== destination(before);
           if (ctx.body.credentials === undefined) {
