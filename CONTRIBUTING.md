@@ -60,7 +60,7 @@ Two suites need something extra:
 3. Run `pnpm typecheck && pnpm lint && pnpm test && pnpm pack:check`.
 4. Open the pull request.
 
-CI runs the full matrix (Better Auth at the peer range's minimum and the latest 1.7, Node 22 and 24, the adapter matrix, Workers runtimes, the example), CodeQL, dependency audits and dependency review. A new **runtime** dependency needs a good reason: every one is attack surface for a plugin that holds credentials to your apps, and it must be MIT-compatible.
+CI runs the full matrix (Better Auth at the peer range's minimum and the latest 1.7, Node 22 and 24, the adapter matrix, Workers runtimes, the example), CodeQL, dependency audits and dependency review; CodeRabbit reviews every pull request, drafts included (`.coderabbit.yaml`). A new **runtime** dependency needs a good reason: every one is attack surface for a plugin that holds credentials to your apps, and it must be MIT-compatible.
 
 ## Releasing (maintainers)
 
