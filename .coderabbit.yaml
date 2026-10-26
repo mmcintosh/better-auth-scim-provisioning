@@ -1,0 +1,7 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit reviews pull requests. Ours open as drafts and are often stacked on another
+# branch, both of which it skips by default.
+reviews:
+  auto_review:
+    drafts: true
+    base_branches: [".*"]
