@@ -36,6 +36,11 @@ jobs:
           # sharp's prebuilt libvips (LGPL-3.0) comes with Miniflare (its image binding), which runs D1
           # and the Workers example in the tests; development only.
           allow-dependencies-licenses: pkg:npm/npm, pkg:npm/elkjs, pkg:npm/robust-predicates, pkg:npm/%40img/sharp-libvips-darwin-arm64, pkg:npm/%40img/sharp-libvips-darwin-x64, pkg:npm/%40img/sharp-libvips-linux-arm64, pkg:npm/%40img/sharp-libvips-linux-arm, pkg:npm/%40img/sharp-libvips-linuxmusl-arm64, pkg:npm/%40img/sharp-libvips-linuxmusl-x64, pkg:npm/%40img/sharp-libvips-linux-ppc64, pkg:npm/%40img/sharp-libvips-linux-riscv64, pkg:npm/%40img/sharp-libvips-linux-s390x, pkg:npm/%40img/sharp-libvips-linux-x64, pkg:npm/%40img/sharp-wasm32, pkg:npm/%40img/sharp-win32-arm64, pkg:npm/%40img/sharp-win32-ia32, pkg:npm/%40img/sharp-win32-x64
+          # Inside npm's bundle (the release job's CLI, .github/npm-cli): npm 12.2.1 bundles undici 6.29.0
+          # (fixed in 6.29.1) and ip-address 10.7.2 (fixed in 10.7.4). Bundled, so they can't be updated
+          # alone; Dependabot alerts dismissed as tolerable risk. These apply repo-wide: remove them with
+          # the npm that bundles the fixed versions.
+          allow-ghsas: GHSA-xjj6-f33q-929c, GHSA-4qv8-2p9j-2685, GHSA-rxp7-6hxx-x8q5
           comment-summary-in-pr: never
 
   osv:
