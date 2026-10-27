@@ -10,13 +10,5 @@
   "monthly": [
     "Run the live tests against the real targets (`npx vitest run -c vitest.live.config.ts test/live/<file>`): the providers change without notice."
   ],
-  "overrides": [
-    {
-      "selector": "undici@<7.30.1",
-      "via": "miniflare@5",
-      "dependency": "undici",
-      "fixedIn": "7.30.1",
-      "why": "GHSA-xjj6-f33q-929c (high), GHSA-4qv8-2p9j-2685 and GHSA-f72v-6w45-q472; miniflare pins undici 7.29.1 exactly (Workers tests only)."
-    }
-  ]
+  "overrides": []
 }
