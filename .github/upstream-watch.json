@@ -4,7 +4,7 @@
       "name": "npm's bundled dependencies (release job)",
       "npm": "npm",
       "because": "they're bundled inside npm, so they can't be updated alone; their alerts are dismissed as tolerable risk.",
-      "takeWhen": "Dependabot proposes the newer npm (it does on its own); check its alerts close."
+      "takeWhen": "Dependabot proposes the newer npm (it does on its own); check its alerts close. Once it bundles undici >= 6.29.1, drop allow-ghsas (GHSA-xjj6-f33q-929c, GHSA-4qv8-2p9j-2685) from the review job in dependencies.yml."
     }
   ],
   "monthly": [
