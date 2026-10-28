@@ -9,7 +9,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply scim-example --remote"
   },
   "dependencies": {
-    "better-auth": "^1.7.10",
+    "better-auth": "^1.7.13",
     "better-auth-scim-provisioning": "^1.8.1"
   },
   "devDependencies": {
