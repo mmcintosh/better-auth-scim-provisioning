@@ -5,7 +5,7 @@ Keep your users' accounts in step at the apps they use, straight from your [Bett
 [![CI](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml/badge.svg)](https://github.com/mmcintosh/better-auth-scim-provisioning/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/better-auth-scim-provisioning)](https://www.npmjs.com/package/better-auth-scim-provisioning)
 [![Better Auth](https://img.shields.io/badge/better--auth-%E2%89%A51.7.7%20%3C1.8-black)](https://www.better-auth.com)
-[![Runs on](https://img.shields.io/badge/runs%20on-Workers%20%7C%20Node%2022%2B-f38020)](#databases-and-runtimes)
+[![Runs on](https://img.shields.io/badge/runs%20on-Workers%20%7C%20Node%2022%2B-f38020)](docs/databases-and-runtimes.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mmcintosh/better-auth-scim-provisioning/badge)](https://scorecard.dev/viewer/?uri=github.com/mmcintosh/better-auth-scim-provisioning)
 [![Socket](https://socket.dev/api/badge/npm/package/better-auth-scim-provisioning)](https://socket.dev/npm/package/better-auth-scim-provisioning)
@@ -14,32 +14,30 @@ Keep your users' accounts in step at the apps they use, straight from your [Bett
 
 It's the **outbound** direction. Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim) is the inbound one, where directories push users *into* your app; this package pushes them *out*. It works however your users sign in, and pairs with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) when your app is also their identity provider: see [sign-in and provisioning together](https://github.com/mmcintosh/better-auth-saml-idp/blob/main/docs/guide/provisioning.md).
 
-> **Unofficial community plugin.** This project isn't affiliated with or endorsed by Better Auth. Status: **1.0 on npm**, verified live against Cloudflare Access, Google Workspace, AWS IAM Identity Center and Microsoft Entra ID (see [what exactly](#-verified-live)), and field-tested in a real app on Workers. From 1.0, a change that could break your app comes only in a major release ([versioning](docs/versioning.md)); every change is in the [CHANGELOG](CHANGELOG.md). **Upgrading from 0.3 needs a database migration**: see [upgrading from 0.3](docs/upgrading.md).
+> **Unofficial community plugin.** This project isn't affiliated with or endorsed by Better Auth. Status: **stable (1.x) on npm**, verified live against Cloudflare Access, Google Workspace, AWS IAM Identity Center and Microsoft Entra ID (see [what exactly](#verified-live)), and field-tested in a real app on Workers. A change that could break your app comes only in a major release ([versioning](docs/versioning.md)); every change is in the [CHANGELOG](CHANGELOG.md). Coming from 0.3? See [upgrading](docs/upgrading.md).
 
-If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-auth-scim-provisioning) helps others find it.
+## Features
 
-## ✨ Features
+- **Four kinds of target**: any **SCIM 2.0** app (Cloudflare Access, AWS IAM Identity Center, Slack, Atlassian, GitHub Enterprise, Zoom…), **Google Workspace** through its Directory API, **Microsoft Entra ID** (Microsoft 365) through Microsoft Graph, and **signed webhooks** for your own apps or automation tools (Zapier, Make, n8n).
+- **Enterprise User attributes**: employee number, cost center, organization, division, department and manager, from your users' fields, as SCIM's Enterprise User extension (and Google Workspace's and Entra ID's own fields), the manager kept in step as people join and leave.
+- **Groups**: organizations, teams and roles in your app become groups at the app (SCIM groups or Google Groups), with the provisioned members, kept in sync as people join, leave and change roles.
+- **Offboarding**: a ban or a delete deactivates (or deletes) the account at every app at once, not when a session expires; a timed ban is lifted on time by the scheduled run. In the field test, Cloudflare Access revoked a live session within 35 seconds.
+- **Reliable delivery**: a database outbox with leases, retries with backoff (honouring `Retry-After`), concurrency, and a scheduled run. Once queued, a change isn't lost to an outage, a timeout or a reply that never arrived, and a 404 counts as "gone" only when the app's list agrees.
+- **Careful adoption**: an account that already exists at the app is taken over only where you allow it (`adopt`, off by default for Google Workspace and Entra ID), only if it's nobody's and its userName is the user's verified email, and it's then only ever deactivated, never deleted. Never handed to someone who reused a deleted user's email.
+- **Profiles for real apps**: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`, each built from the app's documented quirks (no PUT on groups, batches of 100, groups that can't be renamed…).
+- **Every sign-in method apps use**: bearer tokens, Basic, an API-key header, OAuth 2.0 client credentials, and Google service accounts with domain-wide delegation.
+- **Organizations' own targets**: with `registry`, each organization connects its own SCIM app, Google Workspace or webhook at runtime, through an API its owners and admins use, with credentials encrypted and never shown again, and only its own members sent there.
+- **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
+- **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports, the Enterprise User extension included.
+- **Retiring an app**: decommission a target to deactivate every account and empty every group made there before removing it, with a preview, a confirmed count, cancel, an optional purge, and accounts another target still uses left alone (see [Retiring an app](docs/retiring-an-app.md)).
+- **Rate limits**: an app's 429 holds the whole target for its `Retry-After` without counting a failed attempt, and `maxRequestsPerMinute` keeps under an app's published limit (the `githubEnterprise` profile sets 30).
+- **Audit history**: with `audit`, who connected, changed, removed or decommissioned which target, and when, kept in the database, listed newest first, and handed to your own code (a SIEM) as it happens (see [Audit history](docs/monitoring.md#audit-history)).
+- **Drift detection**: `scimProvisioningDrift` reads an app's own list of accounts and reports the ones nobody manages, ours without a link, and linked ones that differ, page by page, changing nothing.
+- **Status and failures**: `scimProvisioningStatus` counts what's queued, stuck and failed at each target (or shows one user's state), `onFailure` tells you when a delivery gives up or keeps failing, and failures are logged with the app's own message.
+- **Runtimes and databases**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger; the whole suite on Node.js 22 and 24, and the database suite on SQLite, D1, PostgreSQL, MySQL and MongoDB, with Drizzle and Prisma too ([which combinations](docs/databases-and-runtimes.md)).
+- **Supply chain**: SHA-pinned actions, CodeQL, dependency review, OpenSSF Scorecard, and a release workflow that publishes with npm provenance and an SBOM.
 
-- 🎯 **Four kinds of target**: any **SCIM 2.0** app (Cloudflare Access, AWS IAM Identity Center, Slack, Atlassian, GitHub Enterprise, Zoom…), **Google Workspace** through its Directory API, **Microsoft Entra ID** (Microsoft 365) through Microsoft Graph, and **signed webhooks** for your own apps or automation tools (Zapier, Make, n8n).
-- 🪪 **Enterprise User attributes**: employee number, cost center, organization, division, department and manager, from your users' fields, as SCIM's Enterprise User extension (and Google Workspace's and Entra ID's own fields), the manager kept in step as people join and leave.
-- 👥 **Groups**: organizations, teams and roles in your app become groups at the app (SCIM groups or Google Groups), with the provisioned members, kept in sync as people join, leave and change roles.
-- 🚪 **Real offboarding**: a ban or a delete deactivates (or deletes) the account at every app at once, not when a session expires; a timed ban is lifted on time by the scheduled run. In the field test, Cloudflare Access revoked a live session within 35 seconds.
-- 📬 **Delivery that holds up**: a database outbox with leases, retries with backoff (honouring `Retry-After`), concurrency, and a scheduled run. Once queued, a change isn't lost to an outage, a timeout or a reply that never arrived, and a 404 counts as "gone" only when the app's list agrees.
-- 🤝 **Careful adoption**: an account that already exists at the app is taken over only where you allow it (`adopt`, off by default for Google Workspace and Entra ID), only if it's nobody's and its userName is the user's verified email, and it's then only ever deactivated, never deleted. Never handed to someone who reused a deleted user's email.
-- 🧩 **Profiles for real apps**: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`, each built from the app's documented quirks (no PUT on groups, batches of 100, groups that can't be renamed…).
-- 🔑 **Every sign-in method apps use**: bearer tokens, Basic, an API-key header, OAuth 2.0 client credentials, and Google service accounts with domain-wide delegation.
-- 🏢 **Organizations' own targets**: with `registry`, each organization connects its own SCIM app, Google Workspace or webhook at runtime, through an API its owners and admins use, with credentials encrypted and never shown again, and only its own members sent there.
-- 🔁 **Reconcile**: queue everyone again after adding or fixing a target, a page at a time (with `limit`), within a Workers invocation's limits.
-- 🩺 **Check an app first**: `npx better-auth-scim-provisioning check` tries an app's SCIM with a throwaway user and reports what it supports, the Enterprise User extension included.
-- 🧹 **Retiring an app**: decommission a target to deactivate every account and empty every group made there before removing it, with a preview, a confirmed count, cancel, an optional purge, and accounts another target still uses left alone (see [Retiring an app](#retiring-an-app)).
-- 🚦 **Rate limits**: an app's 429 holds the whole target for its `Retry-After` without counting a failed attempt, and `maxRequestsPerMinute` keeps under an app's published limit (the `githubEnterprise` profile sets 30).
-- 🧾 **Audit history**: with `audit`, who connected, changed, removed or decommissioned which target, and when, kept in the database, listed newest first, and handed to your own code (a SIEM) as it happens (see [Audit history](#audit-history)).
-- 🔍 **Drift detection**: `scimProvisioningDrift` reads an app's own list of accounts and reports the ones nobody manages, ours without a link, and linked ones that differ, page by page, changing nothing.
-- 📈 **You can see it**: `scimProvisioningStatus` counts what's queued, stuck and failed at each target (or shows one user's state), `onFailure` tells you when a delivery gives up or keeps failing, and failures are logged with the app's own message.
-- ☁️ **Runs where your app runs**: only `fetch` and Web APIs; tested on Workers with D1, `waitUntil` and a Cron Trigger; the whole suite on Node.js 22 and 24, and the database suite on SQLite, D1, PostgreSQL, MySQL and MongoDB, with Drizzle and Prisma too ([which combinations](#databases-and-runtimes)).
-- 📦 **Supply chain**: SHA-pinned actions, CodeQL, dependency review, OpenSSF Scorecard, and a release workflow that publishes with npm provenance and an SBOM.
-
-## ✅ Verified live
+## Verified live
 
 | App | Users | Groups | How |
 |---|---|---|---|
@@ -48,11 +46,26 @@ If it's useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-aut
 | AWS IAM Identity Center | ✓ | ✓ (including a group of over 100) | live tests with the `awsIamIdentityCenter` profile |
 | Microsoft Entra ID | ✓ | not yet supported | live tests in a test tenant (`test/live/entra-id.test.ts`), which found and fixed how Graph settles after writes; separately, by hand, a user created through Graph the same way signed in to Microsoft 365 through better-auth-saml-idp |
 
-The live tests run by hand with real credentials, not in CI. Webhooks have no third party to verify against: CI sends them over HTTP to a receiver written as shown below ([Webhooks](#webhooks)). Better Auth apps are tested against the real `@better-auth/scim` in CI ([Better Auth apps](#better-auth-apps-and-id-jag)). Slack, Atlassian and GitHub Enterprise are built from each app's documentation and tested against a model of it. The code was reviewed independently before 0.1.0 and 0.2.0, and three more times before 1.0, each review's findings fixed with a test.
+The live tests run by hand with real credentials, not in CI. Webhooks have no third party to verify against: CI sends them over HTTP to a receiver written as [Webhooks](docs/webhooks.md) shows. Better Auth apps are tested against the real `@better-auth/scim` in CI ([Better Auth apps](docs/better-auth-apps.md)). Slack, Atlassian and GitHub Enterprise are built from each app's documentation and tested against a model of it. The code was reviewed independently before 0.1.0 and 0.2.0, and three more times before 1.0, each review's findings fixed with a test.
 
-## Contents
+## Documentation
 
-[Install](#install) · [Set up](#set-up) · [Targets](#targets) · [Watching it](#watching-it) · [Who is provisioned, and what's sent](#who-is-provisioned-and-whats-sent) · [Groups](#groups) · [How it holds up](#how-it-holds-up) · [Retiring an app](#retiring-an-app) · [Apps](#apps) · [Better Auth apps, and ID-JAG](#better-auth-apps-and-id-jag) · [Google Workspace](#google-workspace) · [Microsoft Entra ID](#microsoft-entra-id) · [Webhooks](#webhooks) · [Check an app first](#check-an-app-first) · [Organizations' own targets](#organizations-own-targets) · [Databases and runtimes](#databases-and-runtimes) · [Not yet](#not-yet) · [Development](#development)
+| To… | Read |
+|---|---|
+| Set up targets, and every target option | [Targets](docs/targets.md) |
+| Choose who is provisioned and what's sent: attributes, roles, Enterprise User | [Users and attributes](docs/users-and-attributes.md) |
+| Send organizations, teams and roles as groups | [Groups](docs/groups.md) |
+| See what's queued, stuck or failed, and keep an audit history | [Monitoring](docs/monitoring.md) |
+| Understand retries, rate limits, adoption and lost replies | [How it holds up](docs/reliability.md) |
+| Set up a particular app (Cloudflare Access, AWS, Slack, Atlassian, GitHub) | [Apps](docs/apps.md) |
+| Provision a Better Auth app, and use ID-JAG with it | [Better Auth apps](docs/better-auth-apps.md) |
+| Provision Google Workspace or Microsoft Entra ID | [Google Workspace](docs/google-workspace.md), [Microsoft Entra ID](docs/entra-id.md) |
+| Send signed webhooks to your own code | [Webhooks](docs/webhooks.md) |
+| Try an app's SCIM before you rely on it | [Check an app first](docs/check.md) |
+| Let each organization connect its own apps | [Organizations' own targets](docs/registry.md) |
+| Retire an app cleanly | [Retiring an app](docs/retiring-an-app.md) |
+| Check databases and runtimes | [Databases and runtimes](docs/databases-and-runtimes.md) |
+| Upgrade, or see what counts as breaking | [Upgrading](docs/upgrading.md), [versioning](docs/versioning.md) |
 
 ## Install
 
@@ -119,598 +132,6 @@ betterAuth({ advanced: { backgroundTasks: { handler: waitUntil } } /* … */ });
 
 Without it, a cancelled delivery waits for the scheduled run instead of happening right away.
 
-## Targets
-
-| Option | Default | |
-|---|---|---|
-| `id` | required | Stable id: letters, digits, `-`, `_`. Jobs, links and logs use it. |
-| `type` | `"scim"` | `"google-workspace"` for Google Workspace's Directory API (see [Google Workspace](#google-workspace)), `"entra-id"` for Microsoft Entra ID through Microsoft Graph (see [Microsoft Entra ID](#microsoft-entra-id)), or `"webhook"` for signed webhooks (see [Webhooks](#webhooks)). |
-| `url` | required (not for Google Workspace or Entra ID) | The app's SCIM base URL, without `/Users`. `https://` (`http://` only for localhost), with no query or credentials. |
-| `token` | | Its bearer token. Or `auth`, for anything else: one of the two is required. |
-| `auth` | | `{ type: "bearer", token }` (the same as `token`; give one or the other), `{ type: "basic", username, password }`, `{ type: "header", name, value }` (an API key), or `{ type: "oauth2", tokenUrl, clientId, clientSecret, scope?, clientAuth?, params? }` (client credentials; tokens cached and renewed before they expire). |
-| `update` | `"put"` | SCIM targets: `"put"` replaces the whole user at the app; `"patch"` changes only the attributes we send, keeping what an admin set there. |
-| `organizationId` | | Only members of this organization (Better Auth's organization plugin). |
-| `include` | | `(user) => boolean`: who else to leave out. Only `true` includes; anything else deprovisions a provisioned user at their next delivery. |
-| `requireVerifiedEmail` | `true` | Only users with a verified email. Set false if your sign-in leaves `emailVerified` false for addresses you trust. An account that already exists at the app is still only taken over for a verified email. |
-| `adopt` | `true` (`false` for Google Workspace and Entra ID) | Take over an account made elsewhere when it's nobody's, active, and its userName is the user's verified email. It's then never deleted, only deactivated. |
-| `mapUser` | see below | `(user) => ScimUser`: what's sent. |
-| `enterprise` | | The Enterprise User extension, from user fields (see [Enterprise User attributes](#enterprise-user-attributes)). |
-| `attributes` | | More of the user's details from user fields: the title, phones, a work address, language, locale, time zone, user type, photo, nickname, profile URL, middle name and honorifics (see [More attributes](#more-attributes)). |
-| `groups` | `false` | Organizations as groups at the app: `true`, or `(organization) => boolean` to choose which (see [Groups](#groups)). |
-| `groupName` | the organization's name | `(organization) => string`: the group's name. |
-| `teamGroups` | `false` | Teams as groups: `true`, or `(team, organization) => boolean`. |
-| `teamGroupName` | "Org / Team" | `(team, organization) => string`. |
-| `roleGroups` | `false` | Roles as groups: `true` (every role held) or a list, `["admin"]`. |
-| `roleGroupName` | "Org / role" | `(role, organization) => string`. |
-| `compat` | | SCIM targets: how the app differs from the standard, usually set by a profile (see [Apps](#apps)). |
-| `deprovision` | `"deactivate"` | `"deactivate"` (`active: false`, the account is kept) or `"delete"`. |
-| `timeoutMs` | `10000` | Per request. |
-| `maxRequestsPerMinute` | none (30 with the `githubEnterprise` profile) | At most this many requests a minute to the app, for apps with a rate limit (see [Rate limits](#how-it-holds-up)). |
-| `credentialsExpireAt` | none (a bearer token that's a JWT: its own `exp`) | When the credentials expire, as an ISO date or a `Date`: shown in the status and warned about before it comes (see [Watching it](#watching-it)). An AWS IAM Identity Center token lasts a year; a GitHub token or an Entra ID client secret, as long as you chose. |
-| `roles` | `false` | The user's organization roles, as SCIM `roles` (see [Roles and entitlements](#roles-and-entitlements)). |
-| `entitlements` | none | A function of the user returning what they're entitled to, as SCIM `entitlements`. |
-| `decommission` | `false` | Marked for decommissioning: frozen until it's started (see [Retiring an app](#retiring-an-app)). Needs the plugin's `decommission: true`. |
-| `fetch` | the global `fetch` | The fetch requests go through: a proxy's, or a Workers service binding's. |
-
-Options are checked when the plugin starts: an unknown or misspelled option, or one in the wrong place, stops it with a message naming it. The scheduled run delivers 4 jobs at once by default: `concurrency: 4` (1 to 32), shared by all targets. Retries are shared too: `retry: { maxAttempts: 8, baseDelayMs: 30000 }`. The delay doubles each attempt, or is longer if the app's `Retry-After` asks for it (up to a day). After `maxAttempts`, failures that can fix themselves are retried every 6 hours. A rate limit isn't a failure: it never counts toward `maxAttempts` (see Rate limits under [How it holds up](#how-it-holds-up)).
-
-A change to a target (`include`, `organizationId`, `deprovision`) applies to each user at their next change: run a reconcile to apply it to everyone, once the new version is fully deployed (on Workers, old and new run side by side for a few seconds). Do the same after an app's outage or a token fix, to deliver what's waiting now rather than at its next retry.
-
-## Watching it
-
-```ts
-// Per target: jobs queued (due now), waiting (a backoff, a Retry-After, or a ban running out), stuck
-// (an app error still retried past retry.maxAttempts, every 6 hours), failed (until the user changes
-// again or a reconcile), and the accounts and groups the app confirmed.
-const { targets } = await auth.api.scimProvisioningStatus({ body: {} });
-// One user's account and pending job at each target.
-const { user } = await auth.api.scimProvisioningStatus({ body: { userId } });
-// One target, or a page of them ({ limit, after: next }; with a registry, 25 by default).
-const { targets: [app] } = await auth.api.scimProvisioningStatus({ body: { targetId: "app" } });
-// Which jobs failed or are stuck, with the app's last error; then { after: next } for more.
-const { items, next } = await auth.api.scimProvisioningFailures({ body: { limit: 100 } });
-// Drift: what's at the app that isn't as we'd have it, a page of the app's own list at a time
-// ({ limit }, 100 by default; then { after: next } until it's null). Reported, never changed.
-const { items: drift, scanned, next: more } = await auth.api.scimProvisioningDrift({ body: { targetId: "app", limit: 100 } });
-```
-
-`scimProvisioningDrift` reads the app's own list and reports each account that isn't as we'd have it, with a `finding` (at a target being decommissioned, or decommissioned, also `ours-active`: one of our accounts still active there, see [Retiring an app](#retiring-an-app)): `unmanaged` (no link here and not our externalId: made by hand, or by another tool; at Google Workspace and Entra ID that's every account the plugin didn't make, the whole directory being listed), `unlinked` (our externalId for a user here, but no link: queue the user, and the next delivery takes the account over if its userName is still the user's address), or `mismatch` (deactivated or renamed at the app, or still active though the user was deleted here: a reconcile, or queueing the user, sends our state again). Each item carries the account's `remoteId`, `userName`, `externalId`, `active`, the `userId` here when known, and a `detail`. It changes nothing. A webhook receiver can't be listed; a disabled stored target still is (it's read only), and one whose credentials can't be read isn't. At an organization's target, only its members count as users here. The app must page as SCIM says, by `startIndex` (with `totalResults`, or full pages until a short one) or by a cursor.
-
-In `scimProvisioningFailures` items and `onFailure`, `kind` is what was being delivered: `user`, or a group: `group` (an organization's own group), `team` or `role` (and, in failures only, `resync`: queueing an organization for its own target, page by page; `decommission`: a step of retiring a target). `subjectId` is the user's, organization's or team's id, and for a role group `"<organization id>:<role>"`.
-
-`onFailure` is called when a delivery gives up (an error that won't fix itself) or reaches `retry.maxAttempts`: alert on it, so a deprovisioning that isn't getting through doesn't go unnoticed. It's also called with `kind: "credentials"` (`subjectId` being the target's id) when a target's credentials expire within 7 days, or have (`failed: true`): once a day per target, however many servers run the scheduled run (noted in the database), and again the same day if they then expire. From 30 days out, the scheduled run warns about them in the log, after its deliveries, and `scimProvisioningStatus` shows each target's `credentialsExpireAt` (or null): set it on the target (an ISO date, or date and time), or it's read from a bearer token that's a JWT (for an organization's target, when its credentials are stored, into its settings, so the check never decrypts them). Better there than on the first day nobody can be offboarded.
-
-```ts
-scimProvisioning({
-  targets: [/* … */],
-  onFailure: ({ targetId, kind, subjectId, error, status, attempts, failed }) => alert(`provisioning ${kind} ${subjectId} at ${targetId}: ${error}`),
-});
-```
-
-When something changes memberships outside Better Auth's organization endpoints (an SSO sync, inbound SCIM, your own database writes), queue what changed, and it's delivered in the background:
-
-```ts
-// Someone added to, or removed from, an organization (or given another role, or another team):
-await auth.api.scimProvisioningQueue({ body: { userId, organizationId } });
-// Only the user (their account, and the groups they're in now): { userId }
-// Only an organization's groups: { organizationId }; at one target: add targetId.
-```
-
-For a removal, pass the organization as well: the user isn't in its groups any more, so queueing only the user can't find the group they left.
-
-### Audit history
-
-`audit: true` keeps a record of who connected, changed, removed or decommissioned which target, and when, in its own table (`scimProvisioningAuditEvent`: run your migration after turning it on). It never holds a secret: a credentials change is recorded as `changed: ["credentials"]`. Changes are recorded, not reads (status, accounts, drift, check) or refused attempts, which are in the logs.
-
-```ts
-scimProvisioning({
-  targets: [/* … */],
-  // Or just `audit: true`: kept for good, and nothing forwarded.
-  audit: { keepDays: 400, onEvent: (event) => siem.send(event) },
-});
-// Newest first: one target's (a removed one's too), one organization's, or all; then { after: next }.
-const { items, next } = await auth.api.scimProvisioningAuditEvents({ body: { targetId: "app", limit: 100 } });
-// [{ at, targetId, organizationId, actor, action, detail }, …]
-```
-
-`action` is `target.created`, `target.updated` or `target.deleted` (organizations' stored targets), `decommission.started`, `decommission.cancelled`, `decommission.completed`, `decommission.forgot`, `purge.started` or `purge.completed`; the list can grow in a minor release. `actor` is `user:<id>` for the registry's routes (with `detail.hostAdministrator` for a host administrator), `server` for `auth.api` calls from your code, and `system` for the plugin itself (a decommission completing). `detail` says what: the URL (as the API shows it) and `enabled` of a new target; which of `settings`, `credentials` and `enabled` changed; what a delete left at the app (`abandoned`); a decommission's counts. With the registry, an organization's administrators read their own organization's at `targets/events` (see [Organizations' own targets](#organizations-own-targets)). `keepDays` has the scheduled run remove older events, hourly. `onEvent` gets each event as it's recorded, with a few seconds to take it; an error it throws is logged, never in the way. An event is written just after the change it records: if that write fails, it's logged as an error (the change's own `warn` line is still there), and the change stands.
-
-**A long history.** The table has an index on each of `targetId` and `organizationId` with `key`, so one target's or organization's events are read a page at a time in order, however many there are. Migrate after upgrading to add them (MongoDB's adapter makes them on first use: the first event recorded after the upgrade waits while it indexes the events already there). If you added 1.7.0's two indexes by hand (`scimProvisioningAuditEvent_targetId_key` and `scimProvisioningAuditEvent_organizationId_key`, or MongoDB's `{ targetId: 1, key: -1 }` and `{ organizationId: 1, key: -1 }`), drop them once the migration has added these: they do the same job.
-
-## Who is provisioned, and what's sent
-
-A user is at a target when their email is verified (unless `requireVerifiedEmail: false`), they aren't banned (the admin plugin), they're a member of `organizationId` if one is set, and `include` returns true (if set). Otherwise they're deprovisioned there, if they had been provisioned. A timed ban is lifted at the app when it runs out.
-
-Membership changes are seen through the organization plugin's endpoints (add, remove, update role, accept an invitation, leave, delete the organization) and server-side `addMember`. Changes made any other way (the creator of a new organization, SSO or inbound SCIM provisioning, your own database writes) are applied at the user's next change or the next reconcile. **That includes removals:** someone removed from an `organizationId` organization by those means keeps their account at the app until then, so call `scimProvisioningQueue` for them (see [Watching it](#watching-it)), or run a reconcile.
-
-By default the app gets:
-- **`userName`** and the one primary **`emails`** value: the user's email;
-- **`name`**: `givenName` and `familyName` split from Better Auth's `name`. The last word is the family name; a one-word name fills both, since apps such as AWS IAM Identity Center require both;
-- **`displayName`**: the name;
-- **`externalId`**: the Better Auth user id;
-- **`active`**.
-
-Override it per target with `mapUser`, for example to take `userName` from an employee id. `defaultScimUser(user)` is exported to build on.
-
-### More attributes
-
-With `attributes`, a target also gets the user's job title, phone numbers and work address, read from fields of your users (`user.additionalFields`), as SCIM's `title`, `phoneNumbers` and `addresses`:
-
-```ts
-scimProvisioning({
-  targets: [
-    { id: "aws", url, token, attributes: true }, // fields named as the attributes
-    { id: "slack", url, token, attributes: { title: "jobTitle", phone: "workPhone", locality: "city" } }, // your own field names
-  ],
-});
-```
-
-- **`true`** reads `title`, `phone` (the work number), `mobile`, and the address's `streetAddress`, `locality`, `region`, `postalCode` and `country`, for those fields your users have. **`preferredLanguage`, `locale`, `timezone`, `userType`, `photo`, `nickName`, `profileUrl`, `middleName`, `honorificPrefix` and `honorificSuffix` are read only when named** (`{ timezone: "timezone", photo: "image" }`), so upgrading never starts sending, or clearing, a field you didn't ask for. **A map** names your fields, and only those attributes are sent; a field it names that your users don't have stops the plugin at startup. A number is written out as text.
-- **What's sent:** `title`; `phoneNumbers` with the work number (type `work`) and the mobile (type `mobile`), the first of them primary; one `addresses` entry of type `work` with the parts that have a value; `preferredLanguage`, `locale`, `timezone`, `userType`, `nickName` and `profileUrl` as they are; the middle name and honorifics in `name`, beside the given and family names; and the photo as one `photos` entry of type `photo`, primary. All as RFC 7643 names them. Better Auth's own `image` is the photo: `{ photo: "image" }`.
-- **Checked before they're sent:** `preferredLanguage` and `locale` must be language tags (`en`, `en-CA`), `timezone` a name in the runtime's time zone data (`America/Toronto`, `UTC`), and `photo` and `profileUrl` https URLs written out in full (`https://`, no spaces or backslashes; an image served over http, or a `data:` URL, isn't sent). Anything else (`English`, `Eastern Time`) is left out and logged at `warn` (once an hour per target and attribute), rather than sent for the app to refuse: a PATCH leaves the app's value as it is; a PUT, which replaces the whole account, leaves the attribute out.
-- **An empty field clears the attribute at the app**: a PUT leaves it out, and a PATCH (`update: "patch"`) removes it by path (`title`, `photos`, `name.middleName`, and so on; `phoneNumbers` and `addresses` as a whole): once the target names a phone or an address part, the phone list and the address list at the app are the plugin's, and once it names `photo`, so is the photo list (one photo replaces, or clearing removes, any the app had, thumbnails included).
-- **Entra ID** keeps these as `jobTitle`, `businessPhones` (the work number), `mobilePhone`, `streetAddress`, `city`, `state`, `postalCode`, `country` and `preferredLanguage`. Not `locale` or `timezone`, which Graph's user doesn't have, and never `userType`: Graph's means member or guest.
-- **Google Workspace** keeps the title in the user's primary organization (its other fields, such as a department set by an admin or by `enterprise`, kept), the phones in `phones` (the work and mobile entries are the plugin's; an admin's other numbers stay) and the address in `addresses` (the work entry's named parts; its other parts and other addresses stay). Only the attributes the target reads are touched. Google allows one primary phone and one primary address: when the plugin sends one, an admin's entry loses its primary flag.
-- **Google Workspace** gets none of `preferredLanguage`, `locale`, `timezone` and `userType` (yet).
-- **The photo, `nickName`, `profileUrl`, the middle name and honorifics** go to SCIM apps and webhooks only. Google Workspace and Entra ID take a photo as an uploaded image through APIs of their own, not a URL, and their users have no such name parts.
-- **Webhooks** get the same object as SCIM.
-- A `mapUser` that sets one of these itself takes precedence for that attribute, at Google Workspace and Entra ID too: a phone list it sends replaces the phones of the types it holds (Entra keeps only the work and mobile numbers), and only a work address has a place at Entra.
-- The apps' own limits apply: Graph refuses a title over 128 characters, say, with a 400 that fails that user's job (with Graph's message) until their next change or a reconcile.
-- **Organizations' own targets** may read only the fields you allow: by default the fields named like the eight attributes `true` reads (`title`, `phone` and so on); to let them name the others, add the user fields those read to `registry.attributeFields` (`image` for the photo, say: the list is of your user fields, not attribute names); `registry.attributeFields` sets the list (`[]` turns it off). `true` reads the fields your users have, so a narrowed list that covers those is enough. Never list a field you wouldn't show their administrators.
-
-### Roles and entitlements
-
-```ts
-scimProvisioning({
-  targets: [
-    { id: "app", url, token, roles: true, entitlements: (user) => (user.plan === "pro" ? ["pro"] : []) },
-  ],
-});
-```
-
-- **`roles: true`** sends the user's organization roles as SCIM `roles`. At an organization's target, their roles there, as `{ value: "admin", type: "organization" }`; at any other, their roles in every organization they're in, each with the organization's slug as `type` (`{ value: "admin", type: "acme" }`). They follow membership changes made through the organization plugin; a renamed slug shows at the user's next delivery, or a reconcile. A user's first 1,000 organizations are read (each delivery reads them in one query, as for groups); a user in more is logged at `warn`, and the rest's roles aren't sent. Organizations' own targets can set it too.
-- **`entitlements`** is a function of the user that returns what they're entitled to (a licence, a plan), sent as SCIM `entitlements` (`{ value }`, duplicates and blanks dropped). It's called at each delivery of the user, so when what it reads changes outside the user (a billing system), queue them (`scimProvisioningQueue`). In code only: a function can't be stored.
-- None (no roles, `[]`) clears them at the app, as for the attributes above. A `mapUser` that sets `roles` or `entitlements` itself takes precedence.
-- SCIM apps and webhooks only: Google Workspace and Entra ID have no place for them (Entra's app roles are assignments, not attributes).
-
-### Enterprise User attributes
-
-With `enterprise`, a target also gets the SCIM Enterprise User extension ([RFC 7643 §4.3](https://www.rfc-editor.org/rfc/rfc7643#section-4.3)): employee number, cost center, organization, division, department and manager. They're read from fields of your users, so add them as Better Auth `user.additionalFields`:
-
-```ts
-betterAuth({
-  user: {
-    additionalFields: {
-      employeeNumber: { type: "string", required: false },
-      department: { type: "string", required: false },
-      managerId: { type: "string", required: false, index: true }, // the manager's user id; indexed, since a manager's reports are looked up by it
-    },
-  },
-  plugins: [
-    scimProvisioning({
-      targets: [
-        { id: "aws", url, token, enterprise: true }, // fields named as the attributes, the manager from managerId
-        { id: "slack", url, token, enterprise: { employeeNumber: "employeeId", department: "dept", manager: "reportsTo" } }, // your own field names
-      ],
-    }),
-  ],
-});
-```
-
-- **`true`** reads `employeeNumber`, `costCenter`, `organization`, `division` and `department`, and the manager's user id from `managerId`, for those fields your users have: an attribute without a field is neither sent nor cleared. **A map** names your fields, and only those attributes are sent; a field it names that your users don't have stops the plugin at startup. A number is written out as text.
-- **An empty field clears the attribute at the app**: a PUT leaves it out, and a PATCH (`update: "patch"`) removes it by path. An app that refuses to remove an attribute it doesn't have (400) gets the change again without the removes, then each remove on its own. A user with no values at all isn't sent the extension.
-- **The manager** is sent as their id at that app (SCIM's `manager.value`), and only once they're provisioned and active there. Whenever that changes (their account appears, goes, is made again under a new id, or at Google gets a new address), the users reporting to them are queued again, at an organization's target only its members, so their manager follows at the next scheduled run. That's a job of its own, retried if it fails. A user named as their own manager has none. Index the manager field: each such change looks up the reports by it.
-- **Entra ID** keeps these in its own fields: the employee number as `employeeId` (Entra allows at most 16 characters), the department as `department`, the organization as `companyName`, the cost center and division in `employeeOrgData` (keeping the other one when only one is read), and the manager as the user's `manager`.
-- **Google Workspace** keeps these differently: the organization, department, cost center and division (as `description`) go in the user's primary organization, keeping its other fields such as an admin's job title. The employee number becomes the `organization` external id, and the manager the `manager` relation, by their address; other relations are kept. Only the attributes the target reads are touched: with a map of a few, what an admin set for the others stays.
-- **Webhooks** get the same object as SCIM, with the manager's id at the receiver: their `externalId` as the target sends it (the user id, unless `mapUser` changes it).
-- A `mapUser` that sets the extension itself is sent as it is.
-- **Organizations' own targets** may read only the fields you allow, since their administrators choose the fields and the values go to their app: by default the attribute names and `managerId`; `registry.enterpriseFields` sets the list (`[]` turns it off). Never list a field you wouldn't show them.
-- **Verified live at AWS IAM Identity Center** (every attribute, the manager as AWS's id for them, and clearing), and tested against Better Auth's own `@better-auth/scim` with PUT and PATCH. Slack documents the extension too. Send it only to apps that accept it.
-
-## Groups
-
-With `groups: true`, each organization (Better Auth's organization plugin) is a group at the app, or only `organizationId`'s when that's set. With a function, only the organizations it returns true for: `groups: (org) => org.slug.startsWith("team-")`.
-
-> **Who can name a group?** Better Auth lets any signed-in user create organizations by default, and each organization becomes a group at the app. A user could then create one called "Administrators", with themselves in it. Some apps match access rules by group name. Restrict who creates and renames organizations (the organization plugin's `allowUserToCreateOrganization` and roles), or choose groups with a function.
-
-The group's members are the organization's members who are provisioned and active at that target, so a banned or unverified member isn't in it.
-
-**Teams and roles** can be groups too, the same way:
-- `teamGroups: true`: each team (the organization plugin's `teams`) is a group of its provisioned members, named "Acme / Red". A function chooses which: `teamGroups: (team, org) => team.name.startsWith("eng-")`. `teamGroupName: (team, org) => string` names them.
-- `roleGroups: ["admin"]`: the members holding that role in each organization are a group, named "Acme / admin"; `roleGroups: true` makes one for every role held. A member with several roles is in each role's group. `roleGroupName: (role, org) => string` names them.
-
-All three kinds can be used together. Any change in an organization (members, roles, teams, the organization itself) updates its groups; a removed team, or (with `roleGroups: true`) a role no one holds any more, has its group removed at the app. A role named in a `roleGroups` list keeps its group even while no one holds it.
-
-- **When it changes:**
-  - members join or leave (add, remove, accepting an invitation, leaving), change role, or join or leave a team;
-  - a member is provisioned, deprovisioned or deleted;
-  - the organization or team is renamed (the group is renamed) or deleted (the group is removed at the app);
-  - a reconcile runs.
-- **Rebuilt each time:** the group is recomputed from the database on every delivery, so it converges whatever order changes arrive in. A change made in the app is delivered at once; a reconcile updates each group a few times, not once per member.
-- **Never taken over:** a group of the same name that isn't the organization's (another `externalId`, or one made by hand) is refused, because replacing it would rewrite its members. The name is looked up before the first create. If that create fails or its reply is lost, a group found later without our `externalId` is taken as ours only when everyone in it is someone we'd put there; otherwise it's refused. Rename one of them, or set `groupName`.
-- **Verified** at Cloudflare Access (in the field test, by hand), Google Workspace and AWS IAM Identity Center (live tests).
-
-Most apps grant access by group: assign the group to the app or role there (AWS permission sets, Atlassian products, Cloudflare Access policies).
-
-## How it holds up
-
-- **An outbox in your database.** A change queues one job per user and target. The job carries no user data: delivery reads the user as they are then, so quick changes collapse into one request with the latest state.
-- **Never in the way.** Provisioning never fails the user's own write. A failure to queue is logged, and the next reconcile catches up: until then that change isn't queued.
-- **Leases.** A job is claimed before delivery, so two workers don't deliver it at once; a group delivery renews its claim while it runs. A change that arrives during a delivery goes out straight after it.
-- **Retries.** 429 (honouring `Retry-After`, at every kind of target), 408, 5xx, timeouts, network errors, 401/403 (an expired token is the host's problem, not the user's), and a wrong target URL (a 404 for everything, or a redirect) are retried with backoff, for as long as it takes. The job's last error says which: "check the target's token", "check the target's url". Other errors fail the job until the user changes again or a reconcile runs, and are logged with the app's message.
-- **Rate limits.** When an app answers 429 (or Google answers 403 `rateLimitExceeded`), every queued job for that target waits for its `Retry-After` (a minute if it gives none), instead of each finding out with a request of its own. Rate limits don't count toward `retry.maxAttempts`, so a large first sync or reconcile never leaves jobs stuck or calls `onFailure`. For an app that publishes its limit, `maxRequestsPerMinute` keeps under it: requests wait their turn, one that would wait more than 30 seconds goes back in the queue, and a scheduled run sends the target about a minute's worth of jobs (two requests a job) so it doesn't hold up the others. It's counted per server process (on Workers, per isolate), so with several processes delivering at once, divide the limit between them; a 429 the app sends anyway is handled as above. A scheduled run that finds such a target's backlog in the way looks past it, so the others' jobs still go. A `Retry-After` of 0 still waits 10 seconds. `scimProvisioningStatus` counts the jobs a rate limit is holding (`rateLimited`), and a job held for over a day is logged as an error rather than a warning: the app may never let it through (an exhausted quota, a firewall that answers 429). To get through a large backlog at that pace, run the scheduled run every minute: at `maxRequestsPerMinute: 30`, that's about 900 users an hour, and every 5 minutes about a fifth of that.
-- **Lost replies.** The account is recorded as pending before it's created, so if the app's reply is lost and the user then leaves, the account is still found and switched off. At apps that don't keep `externalId`, we can't always tell that account from one made by hand in the meantime: then the job fails with a message instead of guessing, and the pending record is kept, so a later leave fails loudly too rather than passing for done. A create the app answers with 202 (accepted, to be done later: RFC 9967's asynchronous requests, which an app may use for a slow create though we don't ask) is treated the same way: retried, and the retry looks for the account (or group) by name before creating, so it's linked rather than made twice.
-- **Any spelling of SCIM's names.** SCIM's attribute names are case insensitive (RFC 7643 §2.1): an app that answers `resources`, `totalresults` or `ID` is read like one that answers `Resources`, `totalResults` and `id`.
-- **Careful adoption.** A user who already exists at the app is found by userName and taken over only if that account is ours (our `externalId`), or nobody's: no `externalId`, not linked to another user here, active, the user's email verified, the account's userName that same email, and the target allowing it (`adopt`, off by default for Google Workspace and Entra ID). An account taken over is marked so, and is only ever deactivated, never deleted, even with `deprovision: "delete"`. With a custom `mapUser` userName (an employee id, a handle), accounts made by hand at the app are therefore never taken over: give them our `externalId` at the app, or remove them, first. A new user signing up with a deleted user's old email is refused, not handed the old account, even at apps that don't keep `externalId`.
-- **A 404 is checked, not believed.** A user is taken as gone at the app only when the app's own list agrees. A wrong URL answers 404 for everything, and believing it would mark people deactivated here while they stay active there.
-- **Reconcile** covers every user, and every user still linked at a target, so deleted users whose deprovisioning was lost are cleaned up too.
-- **Deleted users' links are kept** (with `deprovision: "deactivate"`): the account stays at the app, deactivated, and its link (with the userName, usually the email) stays here, so switching to `delete` later can still remove it. Every reconcile looks at them again. If you need that data gone, delete those rows from `scimProvisioningLink`.
-- **No redirects.** The token only goes to the target's URL: a redirect is never followed. It's retried (a maintenance page passes), with the new location in the error, so a target moved for good shows up as "check the target's url".
-
-## Retiring an app
-
-Removing a target stops sending to it, and that's all: every account we made there stays active, and every group keeps its members, as when you remove an app from Okta or Entra. To take everyone off the app first, decommission it: every account we made there is deactivated and every group emptied (kept, so what the app ties to it, such as an AWS permission set or an Access policy, is still there if you change your mind). Nothing is deleted, whatever the target's `deprovision` says.
-
-1. **Turn on the option, and migrate.** `decommission: true` adds a table, `scimProvisioningDecommission`, which holds each decommission's progress: run your migration (`npx auth migrate`, or generate your ORM's schema) before deploying.
-2. **Mark the target, and deploy.** `decommission: true` on the target freezes it: nothing is sent to it from then on, and changes wait. Nothing is deactivated yet.
-3. **Start it,** with the number of accounts it will deactivate:
-
-```ts
-const { accounts, groups, shared } = await auth.api.scimProvisioningDecommission({ body: { targetId: "app", preview: true } });
-await auth.api.scimProvisioningDecommission({ body: { targetId: "app", confirm: accounts } });
-```
-
-   `shared` says how many of those another target at the same app still uses, so they'll be left on (`{ accounts, groups }`, see below); it's `null` for a target with more than 10,000 accounts, which aren't counted (it takes about 11 queries per 500 accounts). `confirm` is still the whole `accounts`.
-
-4. **Wait for it to complete.** The scheduled run carries it on a page at a time, at the app's pace (see Rate limits under [How it holds up](#how-it-holds-up)). It's complete once no account of ours there is active and nothing for the target is queued or failing; it looks again every minute until then. `scimProvisioningStatus` shows it on each target as `decommission`: `{ phase, state, accounts, groups, total, groupsTotal, startedAt, startedBy, completedAt, cancelledAt, estimatedCompletionAt }` (the last at its pace so far, while it runs). `state` is `frozen` (marked, not started), `running`, `blocked` (all that's left is failed or stuck: `scimProvisioningFailures` says why; or the target was pointed at another app since it started, see below), `complete` or `cancelled`. `accounts` is what's still active there. Starting it again while it runs changes nothing but queues its next step at once, should it ever be lost.
-
-   **How long it takes.** Each scheduled run queues a page of 50 accounts and delivers what's queued, 50 jobs a run shared with your other targets (a step is about 60 queries, well within D1's 1,000 an invocation). At one run a minute, that's about 50 accounts a minute: 10,000 take about 3½ hours. A paced target goes at its pace: the `githubEnterprise` profile's 30 requests a minute is about 14 accounts a minute, so 10,000 take about 12 hours; with a run every 5 minutes, five times as long. Start and cancel also run it a little straight away. On SQLite and D1, run `PRAGMA optimize` once the tables are large, so that its queries use the indexes.
-5. **Check it, if you like.** `scimProvisioningDrift` on a decommissioned target reports any account of ours still active there as `ours-active` (switched back on at the app, say).
-6. **Purge, if you want them gone** (optional, later, and irreversible at most apps): `{ targetId, phase: "purge" }` deletes every account the decommission deactivated, except accounts that were there before us (taken over: those are only ever deactivated), and removes the groups. `preview: true` with `phase: "purge"` says how many; more than 500 need `confirm` with that number. A purge can't be cancelled. Entra ID keeps deleted users in its recycle bin for 30 days, Google Workspace for about 20; most apps keep nothing.
-7. **Remove the target**, once it's complete. A complete decommission is final for that target id; to use the app again, add it under a new id. A target pointed at another app (a new `url`, tenant or domain) while its decommission runs, or after, sends nothing in its name there: it's `blocked`, and an error is logged. Point it back, or cancel.
-
-**An account it can't get through** (the app refuses to deactivate it, say: `blocked`, and `scimProvisioningFailures` says why) can be dealt with at the app by hand and then forgotten: `{ targetId, forget: [userId, …] }` (up to 100) removes this target's record of those accounts and their jobs, so it can complete; the accounts stay at the app as they are. Only accounts it's stuck on are forgotten (linked here, their job failed or past `retry.maxAttempts`, and not being delivered right now); the answer lists the others as `skipped`. The same works for a purge. It's logged at `warn`, and recorded in the audit history (`decommission.forgot`).
-
-To stop it before it completes: `{ targetId, cancel: true }`. Every account it deactivated whose user is still wanted there is switched back on, and the groups get their members back (nothing was deleted, so nothing is made again). Cancel first, then remove the mark: while the target is marked, it stays frozen. Once started, removing the mark doesn't cancel it (a rollback, or old and new versions running side by side on Workers, mustn't switch it off and on), and the target stays retired until it completes or is cancelled.
-
-**Organizations' own targets** (the registry) are decommissioned through `POST /scim-provisioning/targets/decommission { id, phase?, preview?, confirm?, cancel?, forget? }` (`auth.api.scimProvisioningDecommissionTarget`), with the same preview, confirmation, cancel, forget and purge (`phase: "purge"`), and no mark: starting it is enough. Only the organization's owners may (`registry.decommissionRoles`, default `["owner"]`, counting only roles also in `organizationRoles`; and the host's administrators, `canManage`), signed in within the last 15 minutes (`registry.decommissionFreshAge`, in seconds, at least 60, default 900); its other administrators may look at its status. The target must be enabled, with credentials that can be read; disabled mid-way, it shows `paused`. While it's being decommissioned, or once it has been, it can't be pointed at another app (new credentials are fine), and only those who may decommission it may disable or delete it, since that would stop or undo it. Its progress is in `targets/status`, as `decommission`. The start, a purge, a cancel and the end are logged at `warn` (Better Auth's default level), the routes' lines with the acting user and the counts; so are the server endpoint's.
-
-Two targets at the same app (two organizations connecting the same workspace, say) can share an account: the same person, provisioned through both. Decommissioning one leaves such an account on, and only removes that target's link to it, so the other organization's access isn't taken away; a purge doesn't delete it either, even if the other target took it up after the decommission. One organization's two targets at an app share its groups the same way: a group the other target still uses is left as it is. The preview's `accounts` and `groups` include them, and its `shared` says how many they are; so does a purge's preview. Two targets are at the same app when they have the same type and URL (Google: the admin's domain; Entra ID: the tenant).
-
-## Apps
-
-Some apps differ from the SCIM standard. A **profile** sets a target up for one: it fills in what that app's documentation requires, and anything you set on the target yourself still wins.
-
-```ts
-import { awsIamIdentityCenter, scimProvisioning } from "better-auth-scim-provisioning";
-
-scimProvisioning({
-  targets: [awsIamIdentityCenter({ id: "aws", url: process.env.AWS_SCIM_URL!, token: process.env.AWS_SCIM_TOKEN!, groups: true })],
-});
-```
-
-| App | Profile | Status | What it handles |
-|---|---|---|---|
-| Cloudflare Access | `cloudflareAccess` | verified live | Nothing differs. Turn on **seat deprovisioning** in the identity provider's SCIM settings, or deactivated users keep their seats. |
-| AWS IAM Identity Center | `awsIamIdentityCenter` | verified live | Groups have no PUT and list no members, so they're updated by a diff of members, at most 100 per request, read through AWS's users filter page by page (cursor). Verified with users, organization, team and role groups, and a 105-member group. |
-| Slack | `slack` | documented | userNames must be lowercase, at most 21 characters, with only `.` `_` `-`: taken from the email's local part (`slackUserName`). Deleting only deactivates. Since the userName isn't the email, Slack accounts made by hand are never adopted: give them our `externalId`, or remove them, first. |
-| Atlassian | `atlassian` | documented | Groups can't be renamed, so a renamed group is created anew with its members, then the old one deleted (retried until it is). If a group with the new name exists and isn't ours, the job fails. |
-| GitHub Enterprise Managed Users | `githubEnterprise` | documented | GitHub's DELETE permanently suspends an account, so this only deactivates, and refuses `deprovision: "delete"`. |
-| Better Auth apps (`@better-auth/scim`) | | tested against the real package | Nothing differs. See [Better Auth apps](#better-auth-apps-and-id-jag), which also covers ID-JAG. |
-| Google Workspace | `type: "google-workspace"` | verified live | Not SCIM: see [Google Workspace](#google-workspace). |
-| Microsoft Entra ID (Microsoft 365) | `type: "entra-id"` | verified live | Not SCIM: see [Microsoft Entra ID](#microsoft-entra-id). Users only, for now. |
-| Anything else | `type: "webhook"` | | Signed webhooks to your own code or an automation platform: see [Webhooks](#webhooks). |
-
-"Verified live" means tested against the app itself. "Documented" means built from the app's documentation and tested against a model of it. Run `check` against it first (below), and tell us what you find.
-
-- **Cloudflare Access.** Zero Trust → Integrations → Identity providers → your identity provider → turn on **Enable SCIM** and **Enable user deprovisioning**, **save**, then copy the SCIM endpoint and secret.
-  - The secret only works once the provider is saved: if you copied it before saving, regenerate it, copy it, and save.
-  - With SCIM, a user exists at Cloudflare before their first sign-in, and that sign-in lands on the same account.
-  - Verified live: a ban revoked the user's Access session within 35 seconds, and a timed ban was lifted by the scheduled run within a minute of ending.
-  - Cloudflare's Users list shows the name from the last sign-in, not the latest SCIM update.
-- **AWS IAM Identity Center.** IAM Identity Center → Settings → Identity source → **Automatic provisioning**.
-  - Its tokens last a year.
-  - Your identity provider's SAML NameID must be the same value as the SCIM `userName` (the email, by default).
-  - Users need a given name, a family name, a display name and a single primary email, which the default mapping always sends.
-- **GitHub Enterprise Managed Users.**
-  - The token is a classic personal access token of the setup user, with `scim:enterprise`.
-  - Only one system may provision the enterprise.
-  - GitHub asks for at most 1,000 users an hour, so the profile sends at most 30 requests a minute (`maxRequestsPerMinute`), about 900 users an hour when the scheduled run runs every minute.
-- **Anything else that speaks SCIM 2.0**, with a bearer token, Basic auth, an API-key header or OAuth 2.0 client credentials (Salesforce, Zoom, your own apps).
-  - If an app differs in a way a profile would cover, `compat` sets the same behaviours by hand: `groupUpdate: "patch"`, `groupMembers: "users-filter"`, `maxGroupMembersPerRequest`, `groupRename: "recreate"`.
-
-### Better Auth apps, and ID-JAG
-
-An app built on Better Auth can take users in with Better Auth's own [`@better-auth/scim`](https://www.better-auth.com/docs/plugins/scim). Give it a connection for your identity provider, and point a target at its endpoint:
-
-```ts
-// The app: inbound SCIM, one connection for your identity provider.
-scim({ connections: [{ id: "our-idp", credentials: [{ type: "bearer", id: "idp-token", token: process.env.SCIM_TOKEN! }] }] });
-
-// Your identity provider: a target for that app.
-scimProvisioning({ targets: [{ id: "app", url: "https://app.example.com/api/auth/scim/v2", token: process.env.APP_SCIM_TOKEN! }] });
-```
-
-The tests run this pair for real: [`@better-auth/scim`](https://www.npmjs.com/package/@better-auth/scim) at the same versions as Better Auth, in CI. They show:
-
-- Users are created there, updated, deactivated when banned or deleted here, and reactivated when unbanned; `deprovision: "delete"` deletes them there.
-- Organizations arrive as SCIM Groups with their provisioned members (`groups`).
-- **Deactivation signs the user out there.** `@better-auth/scim` deletes a user's sessions once none of their SCIM connections has them active.
-- **But it doesn't stop them signing in again.** The user is still there, so any sign-in method the app offers (a password, a password reset, a magic link, a social account) gets them back in, as Better Auth's docs say. To refuse that, the app records the state in `@better-auth/scim`'s `reconcileUser` hook. With Better Auth's admin plugin, a ban does it: the tests show this refuses new sign-ins once we deactivate the user, lets them in again once we reactivate them, and never lifts a ban an admin set themselves.
-
-```ts
-// The app (with Better Auth's admin plugin): no new sign-ins while no SCIM connection has the user active.
-const SCIM_BAN = "Deprovisioned by SCIM";
-scim({
-  connections: [/* … */],
-  identity: {
-    async reconcileUser({ userId, active }, { database }) {
-      const where = [{ field: "id", value: userId }];
-      const user = await database.findOne<{ banned?: boolean | null; banReason?: string | null }>({ model: "user", where });
-      if (!active && !user?.banned) await database.update({ model: "user", where, update: { banned: true, banReason: SCIM_BAN } });
-      if (active && user?.banned && user.banReason === SCIM_BAN) await database.update({ model: "user", where, update: { banned: false, banReason: null } });
-    },
-  },
-});
-```
-- **Only users with a verified email are sent**, by default (`requireVerifiedEmail`), so a new sign-up appears there once they've verified it.
-- **Their email is unverified there.** `@better-auth/scim` creates users with `emailVerified: false`. If the app requires verified emails to sign in with a password, provisioned users sign in another way (SSO, an ID-JAG) or verify there.
-- **On Cloudflare, give that app Postgres through Hyperdrive, not D1.** `@better-auth/scim` needs database transactions, which D1 doesn't have. This package, the identity provider side, runs on D1 as before.
-
-**ID-JAG.** An app that accepts ID-JAGs (Identity Assertion JWT Authorization Grants, the grant behind Cross App Access and MCP's Enterprise-Managed Authorization) can find the user an ID-JAG names through this link: `acquireActiveSCIMUserLink({ connectionId, externalId: sub })` from `@better-auth/scim`. That works because an ID-JAG issued by a Better Auth identity provider carries the Better Auth user id as its `sub` (unless the provider gives clients pairwise subject identifiers), and that id is the `externalId` this package sends by default.
-
-- **Keep the default `externalId`.** A `mapUser` that changes `externalId` breaks the link: the `sub` no longer finds anyone. The tests pin this.
-- **Deprovisioning blocks it.** The link is found only while the user is active there, so a banned, deleted or deprovisioned user's ID-JAGs find no one, from the moment the deactivation is delivered (usually at once; after a retry if the app was down).
-
-### Google Workspace
-
-Google doesn't accept SCIM, so Workspace is its own kind of target, through the Directory API: users, and with `groups`, `teamGroups` or `roleGroups`, Google Groups. Verified live against a real Workspace: users (create, rename, email change, suspend, unsuspend, deprovision, and the refusals below) and groups (an organization, a team and a role, through a rename, a member leaving, and removal).
-
-```ts
-{
-  id: "google",
-  type: "google-workspace",
-  google: {
-    clientEmail: process.env.GOOGLE_CLIENT_EMAIL!, // the service account (client_email)
-    privateKey: process.env.GOOGLE_PRIVATE_KEY!,   // its key (private_key), PEM
-    adminEmail: "provisioning-admin@your-domain.com", // the Workspace admin it acts as
-    orgUnitPath: "/Provisioned",                   // optional: where new users go (existing users are never moved)
-  },
-  groups: true,                                    // optional: organizations as Google Groups (also teamGroups, roleGroups)
-}
-```
-
-Setting it up:
-1. In Google Cloud, create or choose a project (a plain one; no billing needed) and enable the **Admin SDK API**.
-2. Create a **service account** (IAM & Admin → Service Accounts). It needs no role in the project: skip that step. Then add a JSON key (Keys → Add key → JSON). `client_email` and `private_key` go in the options.
-3. In the Workspace Admin console, as a super admin, go to Security → Access and data control → API controls → **Domain-wide delegation** → Add new. The client ID is the service account's **Unique ID** (its Details tab), with the scope `https://www.googleapis.com/auth/admin.directory.user`, and for groups also `https://www.googleapis.com/auth/admin.directory.group` (comma-separated). It can take a few minutes to apply. A target with groups asks for both, and Google refuses its token if delegation allows only one, so set them together.
-4. Choose an **admin** for it to act as, with permission to manage users.
-5. Optionally, create an **organizational unit** for the users it creates (Directory → Organizational units) and set `orgUnitPath`: there you decide which Workspace services they get.
-
-How it maps:
-- the email (`userName`) becomes `primaryEmail`, which must be in one of the Workspace's domains;
-- the names map to `name`, and Google requires both;
-- with `attributes`, the title goes in the user's primary organization, the phones in `phones` and the work address in `addresses` (see [More attributes](#more-attributes));
-- deprovisioning suspends the user, or deletes them with `deprovision: "delete"`;
-- our user id is a custom entry in `externalIds`, and any other external ids an admin set are kept;
-- Google requires a password when a user is created, so a random one is set. Users sign in through your identity provider (with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) as Workspace's SAML identity provider), so it's never used.
-
-Groups (`groups`, `teamGroups`, `roleGroups`, as for SCIM apps):
-- each group is a Google Group at an address made from its externalId, such as `ba-team-<team id>@your-domain.com`, so renaming an organization renames the group without moving it. Set `google.groupDomain` for another domain, or `google.groupEmail: (externalId) => string` to name them yourself, and keep it stable: the address is how the group is found again;
-- the description marks it ours. A group already at that address without our marker is someone else's, and is never taken over;
-- members are the provisioned users, added and removed one request each; members that aren't users (a nested group an admin added) are left alone.
-
-Adoption follows the same rules as SCIM, and an account that merely has the user's email as an *alias* is never taken over. Nor is a suspended account made by hand: taking it over would unsuspend it, so the job fails until an admin unsuspends it (or gives it our id). Right after a create, Google sometimes says an account exists before it can show it; that's retried.
-
-Google takes a while to settle, and the plugin waits it out rather than failing:
-- for a few seconds after a create, the new user answers 404 by id, and 412 "User creation is not complete" to a delete;
-- for a minute or more after an email change, further changes to that user (a ban, say) are answered with 409;
-- reads of a new user can trail its changes by a minute or more, so the Admin console may briefly show older details;
-- a group made seconds ago can answer 404 to its first members, and say "already exists" while a read of it still finds nothing.
-
-Google sometimes suspends new accounts itself (`suspensionReason` `WEB_LOGIN_REQUIRED`, for example after many accounts are created in a short time), until the user signs in once or an admin lifts it in the Admin console. The API can't lift that, so the plugin leaves it as Google has it and still applies every other change. The plugin lifts only a suspension it made itself, when the user is back (unbanned, or included again); an admin's own suspension, say during an incident, is left alone by every other change.
-
-### Microsoft Entra ID
-
-Entra ID, Microsoft 365's directory, doesn't take SCIM from outside, so it's its own kind of target, through Microsoft Graph: users, for now (groups aren't supported yet). Verified live in a test tenant: create (on a managed and a federated domain), rename, email change, disable, enable, delete into the recycle bin and restore, the Enterprise User attributes with a manager, the `attributes` (title, phones, address) set and cleared, and drift detection a page at a time. Each user's `onPremisesImmutableId` is our user id, which is what Entra matches a federated sign-in's NameID against. So with [better-auth-saml-idp](https://www.npmjs.com/package/better-auth-saml-idp) as a domain's SAML identity provider (its NameID the user id, as it is by default), a user provisioned here can sign in to Microsoft 365 straight away, with no password at Microsoft. That was tested live, by hand: a user created through Graph the way this target creates them, without a password, signed in to My Apps through the identity provider on the first try.
-
-```ts
-{
-  id: "entra",
-  type: "entra-id",
-  entra: {
-    tenantId: "00000000-0000-0000-0000-000000000000", // Entra admin center → Overview → Tenant ID
-    clientId: process.env.ENTRA_CLIENT_ID!,           // the app registration's Application (client) ID
-    clientSecret: process.env.ENTRA_CLIENT_SECRET!,   // one of its client secrets
-  },
-}
-```
-
-Setting it up:
-1. In the Entra admin center, App registrations → **New registration**: single tenant, no redirect URI.
-2. API permissions → Add a permission → Microsoft Graph → **Application permissions** → `User.ReadWrite.All`, then **Grant admin consent**.
-3. Certificates & secrets → **New client secret**, and copy its value (it's shown once). Note when it expires: after that, deliveries are retried until you give a new one.
-4. Users' emails must be on domains verified in the tenant. For sign-in through your identity provider, federate the domain to it. A user on a domain that isn't federated gets a random password that nobody knows.
-
-How it maps:
-- the email (`userName`) becomes `userPrincipalName`, and its local part the `mailNickname`; the names map to `displayName`, `givenName` and `surname`;
-- with `attributes`, the title is `jobTitle`, the phones `businessPhones` and `mobilePhone`, and the address `streetAddress`, `city`, `state`, `postalCode` and `country` (see [More attributes](#more-attributes));
-- our user id is `onPremisesImmutableId`. Entra won't change it on a federated user, so it's set only when an account is created or taken over;
-- deprovisioning disables the account (`accountEnabled: false`) and revokes its sessions, so a signed-in user is out straight away rather than when their tokens expire;
-- with `deprovision: "delete"`, the user goes to Entra's recycle bin for 30 days and is never purged by the plugin. A user back within that time is restored: the same account, with its id and immutableId (verified live). What Microsoft 365 keeps of their mailbox and files meanwhile depends on its own retention;
-- the account is enabled again only if the plugin disabled it (the user is unbanned, or included again). An admin who disabled it, say during an incident, isn't overruled by a rename.
-
-Adoption is off by default, as for Google Workspace: an account with the user's email made elsewhere could be someone's real mailbox, and taking it over gives it our immutableId, which changes how that person signs in. With `adopt: true`, it follows the same rules as SCIM, and a disabled account isn't taken over until an admin enables it. Know what that means on a federated domain: once taken over, the existing account, with its mailbox, files and any roles or licences, is signed in to by whoever holds that verified email in your Better Auth. Your email verification becomes the only guard on it. Turn it on only when your users' emails are verified the way you'd trust with those accounts, and check first that no admin accounts share addresses with your users.
-
-Graph's replicas take seconds to agree after a write (found live), and the plugin works around it rather than failing:
-- a user created seconds ago can answer 404 by id, though the lookup by immutableId usually finds them already: retried. Once, live, a delete seconds after the create met that 404 with the lookup finding nothing either, so a delete's 404 isn't taken as gone until the check a minute later (below) meets it again;
-- a user deleted seconds ago can still read as live while changes to them 404: retried, then restored from the bin;
-- a deleted user keeps their immutableId in the recycle bin, so creating them anew is refused. The plugin restores them instead (verified live). If someone else has their old userPrincipalName by then, the restore is refused and the job fails with Graph's reason;
-- a write made seconds after another to the same user can be answered as done and never applied (found live: a disable straight after an enable). So a minute after the plugin disables or deletes a user, their job comes back and checks: a disable or delete Graph doesn't show is sent again, until it shows. Only that is checked. A dropped rename, address or attribute change is sent with the user's next change or a reconcile, and a dropped enable isn't forced later, since an admin may have disabled the account meanwhile: a user who stays disabled after being unbanned can be enabled in Entra, or unbanned again.
-
-Microsoft's national clouds (US Government, China) need their own Graph and sign-in addresses: set `url` (say `https://graph.microsoft.us/v1.0`) and `entra.tokenUrl` (`https://login.microsoftonline.us/<tenantId>/oauth2/v2.0/token`); the token's scope follows `url`. Behind a proxy, set `url` to the proxy and `entra.scope` to `https://graph.microsoft.com/.default`. Only the commercial cloud was tested.
-
-### Webhooks
-
-For anything that doesn't speak SCIM (your own apps, or automation platforms such as Zapier, Make and n8n), a webhook target POSTs every change as a JSON event, signed with HMAC-SHA256:
-
-```ts
-{ id: "my-app", type: "webhook", url: "https://my-app.example.com/hooks/provisioning", secret: process.env.PROVISIONING_WEBHOOK_SECRET! }
-```
-
-Each event holds the full current state, so applying one twice is harmless, and `occurredAt` lets a receiver ignore an older one:
-
-| `type` | Body |
-|---|---|
-| `user.upsert` | `user`: the SCIM user (as `mapUser` makes it), with `externalId` |
-| `user.deactivate` | `user: { externalId }` |
-| `user.delete` | `user: { externalId }` (with `deprovision: "delete"`) |
-| `group.upsert` | `group`: `displayName`, `externalId`, `members` (the users' `externalId`s); with `groups`, `teamGroups` or `roleGroups` |
-| `group.delete` | `group: { externalId }` |
-
-Every event also carries `id`, `schemaVersion` (1; a change a receiver could trip over is a new version, in a major release), `target` and `occurredAt`: when this attempt was sent (not when the change was made). A user's or group's events are sent one at a time, so a later `occurredAt` is a later state. Check the signature on the receiving side with the raw body:
-
-```ts
-import { verifyWebhookSignature, WebhookSignatureError } from "better-auth-scim-provisioning";
-
-export async function POST(request: Request) {
-  const body = await request.text();
-  let event;
-  try {
-    event = await verifyWebhookSignature({ body, signature: request.headers.get("x-scim-provisioning-signature"), secret: process.env.PROVISIONING_WEBHOOK_SECRET! });
-  } catch (e) {
-    // 401, not a 500: the sender's error then says "check the target's secret".
-    if (e instanceof WebhookSignatureError) return new Response(e.reason, { status: 401 });
-    throw e;
-  }
-  // event.type, event.user / event.group …
-  return new Response(null, { status: 204 });
-}
-```
-
-It throws on a wrong signature, or one more than 5 minutes old, which stops a captured request being replayed later. A retry of the same change carries the same `id` (with a new signature and `occurredAt`), and within those 5 minutes a captured request could be replayed, so make applying an event idempotent: remember the event `id`s you've applied for a while, and drop an event whose `occurredAt` is older than the last one you applied for that user or group.
-
-**Rotating the secret:** let the receiver accept both (`secret: [newSecret, oldSecret]`), switch the target to the new one and deploy, then drop the old one from the receiver.
-
-A user's `externalId` is their id at the receiver. If a `mapUser` changes it for users already sent, the receiver sees new users, and the old ones are never deactivated: keep it stable.
-- **Retried:** 5xx, 429, 408, timeouts, and 401/403 ("check the target's secret").
-- **Fails the job:** any other 4xx.
-- **A 404 is a wrong URL:** it's retried, and never read as "already gone".
-
-### Check an app first
-
-`check` asks an app what its SCIM supports: its ServiceProviderConfig, whether it advertises the Enterprise User extension (through `/ResourceTypes` or `/Schemas`; many apps have neither, and then it can't tell), then a throwaway user taken through create, find, replace, both PATCH forms, deactivate and delete (removed at the end):
-
-```sh
-SCIM_TOKEN=… npx better-auth-scim-provisioning check --url https://example.com/scim/v2 --user-name check@your-domain.com
-```
-
-```
-✓ ServiceProviderConfig: patch true, filter true, bulk false, etag false, sort false; auth: oauthbearertoken
-✓ Enterprise User extension: listed by /ResourceTypes
-✓ create a user: 201, id 4bb3b660-…
-✓ keeps externalId
-✓ find by userName
-✓ find by userName, any case
-✓ duplicate userName refused (409)
-✓ update with PUT
-✓ update with PATCH (no path)
-✓ update with PATCH (path)
-✓ deactivate (PATCH active false)
-✓ delete
-```
-
-When the app's ServiceProviderConfig says, the first line also gives how it pages (RFC 9865: by cursor, by index, its largest page) and whether it may answer requests asynchronously (RFC 9967's `securityEvents.asyncRequest`). A create it answers with 202 is reported as such: the plugin handles it, but the other checks need the user at once.
-
-Like the plugin, it sends the token only over https (http only to localhost).
-
-For other auth methods, `--auth auth.json`, a file holding the `auth` object as in the table above (or `{ "auth": { … } }`):
-
-```json
-{ "type": "oauth2", "tokenUrl": "https://login.example.com/oauth2/token", "clientId": "…", "clientSecret": "…" }
-```
-
- From code (an admin page's "test connection"), `checkScimTarget({ url, token | auth })` returns the same results.
-
-## Organizations' own targets
-
-With `registry`, each organization can connect its own apps at runtime (its SCIM app, its Google Workspace domain, a webhook), the way better-auth-saml-idp's registry does for service providers. A stored target belongs to one organization and only ever receives that organization's members and groups. Targets in code work as before, alongside.
-
-```ts
-scimProvisioning({
-  targets: [], // or your own, as before
-  registry: {
-    // Your own administrators manage every organization's targets (optional).
-    canManage: ({ user }) => user.role === "admin",
-    // And each organization's owners and admins manage their own (the default; [] turns it off).
-    organizationRoles: ["owner", "admin"],
-  },
-}),
-```
-
-It needs Better Auth's organization plugin, and adds a table, `scimProvisioningTarget`: run your migration (`npx auth migrate`, or generate your ORM's schema) after turning it on, before deploying: Better Auth refuses requests while a table it expects is missing. Without `registry` the table doesn't exist and the endpoints answer 404 (401 to someone signed out).
-
-With the organization plugin's defaults, every signed-up user can create any number of organizations, and so becomes an owner who can connect targets, whose deliveries share your scheduled run with everyone else's. If that's not what you want, limit who creates organizations (`allowUserToCreateOrganization`, `organizationLimit`), or set `organizationRoles: []` so only `canManage` decides.
-
-```ts
-// Connect an app to an organization (as one of its owners or admins). The id is generated.
-const { target } = await authClient.$fetch("/scim-provisioning/targets/create", {
-  method: "POST",
-  body: {
-    organizationId,
-    settings: { name: "Slack", url: "https://api.slack.com/scim/v2", profile: "slack", groups: true },
-    credentials: { token: "xoxp-…" },
-    requestId: crypto.randomUUID(), // optional: makes the create safe to retry (see below)
-  },
-});
-// The organization's members and groups are queued, a page at a time; later changes follow as for any target.
-
-GET  /scim-provisioning/targets?organizationId=…&limit=…&offset=…  // list (a host administrator may omit organizationId)
-POST /scim-provisioning/targets/update  { id, settings?, credentials?, enabled? }
-POST /scim-provisioning/targets/check   { id }   // try the URL and credentials, changing nothing
-POST /scim-provisioning/targets/status  { id }   // queued, waiting, stuck, failed; the latest failures' status
-POST /scim-provisioning/targets/drift   { id, after?, limit? }   // what's at the app that isn't as we'd have it (see Watching it); read only
-POST /scim-provisioning/targets/accounts { id, after?, limit? }  // the accounts made through it: userName, remoteId, active
-POST /scim-provisioning/targets/decommission { id, phase?, preview?, confirm?, cancel?, forget? }  // see Retiring an app
-POST /scim-provisioning/targets/delete  { id, abandon? }  // says what it leaves at the app: { abandoned: { accounts, groups } }
-POST /scim-provisioning/targets/events  { organizationId?, id?, after?, limit? }  // the audit history (with `audit`): see Audit history
-```
-
-On the server they're `auth.api.scimProvisioningListTargets`, `…CreateTarget`, `…UpdateTarget`, `…CheckTarget`, `…TargetStatus`, `…TargetDrift`, `…TargetAccounts`, `…DecommissionTarget`, `…DeleteTarget` and `…TargetEvents`, with the user's headers.
-
-- **Settings** are the target options that are data: `type`, `url`, `profile` (by name: `awsIamIdentityCenter`, `slack`, `atlassian`, `githubEnterprise`, `cloudflareAccess`), `update`, `compat`, `groups`, `teamGroups`, `roleGroups`, `adopt`, `deprovision`, `requireVerifiedEmail`, `enterprise`, `attributes`, `roles`, `timeoutMs` (at most 30 s), `credentialsExpireAt` (replacing the credentials clears it, unless the settings give it again), and for Google Workspace `google: { clientEmail, adminEmail, orgUnitPath?, groupDomain? }`; plus a `name` for people. Functions (`mapUser`, `include`, the group name functions) and `organizationId` can't be stored: the organization is always the owner.
-- **Credentials** are one of `{ token }`, `{ auth: { type: "basic" | "header" | "oauth2", … } }` (as in [Targets](#targets)), `{ secret }` for a webhook and `{ privateKey }` for Google Workspace. They're encrypted with Better Auth's secret, tied to the target, its organization and where it sends, and never shown: a target shows only their `kind`, and a webhook URL only its origin (Slack's and Azure's carry secrets in the path or query). They never go anywhere new either: changing a target's URL (or Google's `clientEmail` or `adminEmail`) needs the credentials given again, and a URL changed in the database rather than through the API doesn't get them (the target pauses). Two changes to one target at once can't mix: the second is refused (409) and is made again on what the first left. When you rotate Better Auth's secret (`secrets`), stored credentials are sealed again with the new one as they're used; keep the old secret until every target has been used once. If the secret changes without rotation, they can't be read: those targets pause (logged), and their deliveries are tried again every 15 minutes, so they go once the right secret is back or new credentials are given.
-- **Who may**: a signed-in user, their session re-read from the database (a stateless deployment's signed cookie is its own record), as the database has them now (not banned, not impersonating): a host administrator (`canManage`) for every organization, or an owner or admin (`organizationRoles`) of the target's organization. Creating, changing and deleting also need a fresh session (signed in within Better Auth's `session.freshAge`, a day by default), as a password change does. Someone else's target is a 404. Changes are logged at `warn`, Better Auth's default level, with the acting user.
-- **URLs** must be `https://` on the standard port and public, as your server calls them: no `localhost`, names without a dot, `.local`, `.internal`, `.lan`, `.home.arpa` and the like, and no private, loopback, link-local, shared, benchmarking, documentation or reserved address (IPv4 written as a number, or inside IPv6, included). Redirects are never followed. Each request is checked again by these rules as it's made (so a row allowed once, by an `allowHosts` entry since removed, say, reaches nothing inside), and the name is looked up (Node.js 22.3 and later, Bun, Deno) and refused if it resolves to a private address or doesn't resolve; on Workers, whose `fetch` can't reach private networks, the URL check is what applies. A name that changes what it resolves to between the check and the request can't be ruled out this way: if your server can reach internal services, route stored targets through an egress proxy with `registry.fetch` (which replaces the lookup). `allowHosts: ["scim.internal.example"]` makes exceptions, ports included. The check endpoint answers in broad terms ("the credentials were refused", "not found: check the URL"), never with the app's own words.
-- **Changes** to a target's settings or credentials, or enabling it, queue its organization again (members, those with an account there, and its groups), and new credentials or enabling make what was waiting or failed go again, so a fixed token or a new setting applies to everyone. Renaming (`name`) changes nothing to send. The organization is queued as one job that the deliveries expand a page at a time (the first pages at once, in the background; the rest by the scheduled run), so creating a target for an organization of thousands stays a small request, on Workers too.
-- **Sharing the queue**: a scheduled run gives no target more than half its batch while others' deliveries are due, so one slow or busy app doesn't hold everyone else's up.
-- **Disabling** (`enabled: false`) pauses a target: changes are still queued for it, and wait, out of the scheduled run's way, until it's enabled again. **Deleting** removes the target, its queued jobs and its record of the accounts and groups it made; the accounts at the app stay as they are, and nothing tells the app any more. The answer says how many it left there (`abandoned`: accounts still active, and groups); decommission the target first for them to go (see [Retiring an app](#retiring-an-app)). With `deleteRequiresDecommission: true`, a delete that would leave active accounts is refused (409) unless it says `abandon: true`, for an app that's gone; `targets/accounts` lists them, to keep a record first. Deleting the organization deprovisions its members through its targets as usual (a disabled target's wait); its targets then belong to no one's organization, so only a host administrator (`canManage`) can enable or remove them.
-- **Safe to retry** with a `requestId` (8 to 128 letters, digits and `. _ : -`; one per target you mean to make, a UUID say): the target's id is derived from it and the organization, so a create sent again after a timeout, or twice at once, makes one target, and the repeat answers with it (`replayed: true`) without recording another audit event. It queues the organization again (one job, however many repeats), so a create cut short after the target was made still gets its members queued. A repeat that asks for something else (other settings, credentials or `enabled`), or comes after the target was changed, is refused (409), as is one Better Auth can no longer read the target's credentials for (its secret changed). So is one after the target was removed, while the audit history still has the removed target's events: without `audit`, or once `keepDays` has removed them, it makes a new target with the old id. Use a fresh `requestId` for each target you mean to make. A repeat is answered even when the organization is at its limit. Without a `requestId`, each create makes a new target, as before. It relies on the target id being unique, which the table's unique index enforces (on MongoDB too, where the adapter makes it on first use).
-- **Every server sees a change at once**: targets are read from the database when they're used (by organization for a change, by id for a delivery), nothing is kept as a list. `maxTargetsPerOrganization` (default 10) limits each organization.
-
-## Databases and runtimes
-
-Proven in CI. The whole suite runs on SQLite with Better Auth 1.7.7 and the latest 1.7.x, on Node.js 22 and 24; the database suite runs on Node.js 24 with the Better Auth version in the lockfile:
-
-| Database | Through | |
-| --- | --- | --- |
-| SQLite (`node:sqlite`) | Kysely (Better Auth's built-in adapter) | every test |
-| Cloudflare D1 (local, Miniflare) | Kysely | the outbox suite, D1's 100-parameter limit included |
-| PostgreSQL 17 | Kysely, Drizzle, Prisma 7 | the outbox suite |
-| MySQL 8.4 | Kysely, Drizzle | the outbox suite |
-| MongoDB 8.2 | Better Auth's MongoDB adapter | the outbox suite |
-
-The outbox suite is what differs between databases: leases, version checks, dates, booleans, `in` and `gt` queries, groups and reconcile. In the Drizzle and Prisma runs the tables come from Better Auth's migrator and the ORM schema from Better Auth's own table definitions, as `npx auth generate` builds it.
-
-**MongoDB and unique keys.** Better Auth's MongoDB adapter makes a table's own indexes, not the unique keys declared on single fields. So on MongoDB nothing stops two of the plugin's jobs, links or group links from sharing a key, or two decommissions from sharing a target. (A stored target's id has a table index of its own, so it's unique on MongoDB too.) The plugin is written for that. Two servers queueing the same user at the same moment can leave two jobs: they're delivered one at a time, and the user's latest state is what's sent. Two links for the same account, or two group links for the same group, are updated and removed together. What you may notice:
-- `scimProvisioningFailures` and `scimProvisioningStatus` can list or count a user twice.
-- The first time a target's credentials are alerted about, two servers running the scheduled run at the same moment can both call `onFailure`.
-- A decommission started twice at the same moment can be recorded twice.
-
-The built package also runs on **Bun** and **Deno**: CI runs the `check` CLI and a user's life, delivered to a SCIM app and a signed webhook, on both.
-
-It uses only `fetch` and Web APIs, and runs on Cloudflare Workers. CI runs [the Workers example](examples/workers) inside workerd with D1, `waitUntil` and its Cron Trigger. It was also field-tested in a real app on Workers against Cloudflare Access, where 200 users were reconciled and delivered at about 6 users a second with the default concurrency.
-
 ## Not yet
 
 - **Groups at Entra ID**, and Entra ID targets in organizations' own targets (`registry`). Entra ID targets are users only, and set in code, for now.
@@ -726,10 +147,12 @@ ADAPTER_DB=postgres ADAPTER_URL=postgres://postgres:test@localhost:5432/postgres
 ADAPTER_DB=d1 npx vitest run test/adapters    # also drizzle-postgres, drizzle-mysql, prisma-postgres, mysql, mongodb
 ```
 
-The live tests (`test/live/`) run against real services when the git-ignored `.env.live` holds their settings (`SCIM_URL` and `SCIM_TOKEN`, `AWS_SCIM_URL` and `AWS_SCIM_TOKEN`, the `GOOGLE_*` ones): `npx vitest run -c vitest.live.config.ts`. Each file runs only with its settings.
+The live tests (`test/live/`) run against real services when the git-ignored `.env.live` holds their settings (`SCIM_URL` and `SCIM_TOKEN`, `AWS_SCIM_URL` and `AWS_SCIM_TOKEN`, the `GOOGLE_*` and `ENTRA_*` ones): `npx vitest run -c vitest.live.config.ts`. Each file runs only with its settings.
 
 **Releasing** (maintainers): keep CHANGELOG.md's `[Unreleased]` section current; then, on an up-to-date main, `pnpm release patch|minor|major ["summary"]` opens the **Release X.Y.Z** pull request (version bumped, section dated). Merging it is the go-ahead: [tag-release.yml](.github/workflows/tag-release.yml) tags `vX.Y.Z` and starts [release.yml](.github/workflows/release.yml), which tests, packs and, after the `npm` environment's approval, stages the tarball with provenance and an SBOM; approve the staged version on npmjs.com to publish it.
 
 ## License
 
 [MIT](LICENSE) © Mark McIntosh
+
+If the package is useful to you, a ⭐ on [GitHub](https://github.com/mmcintosh/better-auth-scim-provisioning) helps others find it.
