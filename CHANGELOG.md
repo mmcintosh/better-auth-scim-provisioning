@@ -6,7 +6,8 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Documentation
 
-- **MongoDB and unique keys.** Better Auth's MongoDB adapter doesn't make the unique keys declared on single fields, so on MongoDB two of the plugin's jobs, links or group links can share a key, and two decommissions a target. The README's Databases and runtimes section now says how the plugin copes and what you may notice: a user listed or counted twice by `scimProvisioningFailures` and `scimProvisioningStatus`, `onFailure` called by two servers at once for a target's first credentials alert, a decommission started twice at the same moment recorded twice.
+- **The README is short again.** Its reference sections moved unchanged to pages under [docs/](docs/) (targets, users and attributes, groups, monitoring, how it holds up, apps, Google Workspace, Entra ID, webhooks, organizations' own targets, retiring an app, databases and runtimes), linked from a table in the README. Headings and the feature list lost their emoji, and links into the old sections point to the new pages.
+- **MongoDB and unique keys.** Better Auth's MongoDB adapter doesn't make the unique keys declared on single fields, so on MongoDB two of the plugin's jobs, links or group links can share a key, and two decommissions a target. The [Databases and runtimes](docs/databases-and-runtimes.md) page now says how the plugin copes and what you may notice: a user listed or counted twice by `scimProvisioningFailures` and `scimProvisioningStatus`, `onFailure` called by two servers at once for a target's first credentials alert, a decommission started twice at the same moment recorded twice.
 
 ## [1.8.1] - 2026-10-24
 
