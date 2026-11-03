@@ -6,8 +6,8 @@ For **security vulnerabilities**, don't open an issue: see [SECURITY.md](SECURIT
 
 ## Ways to help without writing code
 
-- **Tell us an app works (or doesn't).** Open an issue with the app, the target settings you used (never a token) and what happened. A "works with X" report is as valuable as a bug report: it becomes a profile or a line under [Apps](README.md#apps).
-- **Improve the docs.** If something in the [README](README.md) was unclear or wrong for you, it will be for others.
+- **Tell us an app works (or doesn't).** Open an issue with the app, the target settings you used (never a token) and what happened. A "works with X" report is as valuable as a bug report: it becomes a profile or a line under [Apps](docs/apps.md).
+- **Improve the docs.** If something in the [README](README.md) or [docs/](docs/) was unclear or wrong for you, it will be for others.
 
 ## Setup
 
@@ -48,7 +48,7 @@ Two suites need something extra:
 - **Tests with every change.** A bug fix comes with the test that would have caught it; regressions live in `test/regressions/`.
 - **Security checks are mutation-checked.** For a check that refuses something (URL rules, credential binding, adoption rules), disable it and confirm a test fails, then put it back. Say in the PR that you did it.
 - **Say why in the pull request.** A design choice, an interop finding or a security trade-off is explained in the PR description: what was found, what was decided, and the evidence.
-- **Docs move with the code.** A new option, behaviour or limit goes in the [README](README.md), and a line under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+- **Docs move with the code.** A new option, behaviour or limit goes in its page under [docs/](docs/) (and the [README](README.md) if it's a headline feature), and a line under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
 - **Breaking?** Check [versioning](docs/versioning.md). What an app receives counts too.
 - **No real secrets, ever.** Tests use mock services and throwaway credentials; live-test settings stay in the git-ignored `.env.live`. gitleaks runs on every push.
 - **Commits:** small, with an imperative subject and a body that says why.
@@ -64,4 +64,4 @@ CI runs the full matrix (Better Auth at the peer range's minimum and the latest 
 
 ## Releasing (maintainers)
 
-See [Development](README.md#development) in the README: `pnpm release patch|minor|major` opens the release pull request, and merging it starts the release, which waits for the maintainer's approvals. Before opening it, check that the README covers everything in `[Unreleased]`.
+See [Development](README.md#development) in the README: `pnpm release patch|minor|major` opens the release pull request, and merging it starts the release, which waits for the maintainer's approvals. Before opening it, check that the README and docs/ cover everything in `[Unreleased]`.

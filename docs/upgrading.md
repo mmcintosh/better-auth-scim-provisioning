@@ -31,4 +31,4 @@
 
 ## New, if you want them
 
-- `scimProvisioningStatus`, `scimProvisioningFailures`, `scimProvisioningQueue` and `onFailure`: see [Watching it](../README.md#watching-it). Hosts that read the plugin's tables directly should move to these; the tables are internal from 1.0.
+- `scimProvisioningStatus`, `scimProvisioningFailures`, `scimProvisioningQueue` and `onFailure`: see [Watching it](monitoring.md). Hosts that read the plugin's tables directly should move to these; the tables are internal from 1.0.
