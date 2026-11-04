@@ -1,0 +1,40 @@
+# Fails a pull request (title, description, commits) or a push to main whose text carries an AI
+# co-author or "Generated with" line. GitHub lists anyone named in a Co-authored-by line as a
+# contributor; nothing but people and Dependabot belongs there.
+name: Attribution
+on:
+  push: { branches: [main] }
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+permissions: { contents: read }
+jobs:
+  no-ai-attribution:
+    runs-on: ubuntu-24.04
+    permissions: { contents: read, pull-requests: read }
+    steps:
+      - name: Check titles, descriptions and commit messages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          pattern='co-authored-by:.*(claude|anthropic|copilot|openai|chatgpt|gemini|cursor)|generated (with|by) \[?(claude|copilot|chatgpt|gemini|cursor)|claude\.(ai|com)/code'
+          if [ "$EVENT" = pull_request ]; then
+            text=$(printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY"; gh api "repos/$REPO/pulls/$PR/commits" --paginate --jq '.[].commit.message')
+          elif [ -n "${BEFORE//0/}" ] && gh api "repos/$REPO/compare/$BEFORE...$AFTER" --silent 2>/dev/null; then
+            text=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.commits[].commit.message')
+          else
+            text=$(gh api "repos/$REPO/commits/$AFTER" --jq .commit.message)
+          fi
+          if hits=$(printf '%s\n' "$text" | grep -inE "$pattern"); then
+            echo "::error::AI attribution found; remove these lines:"
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+          echo "No AI attribution."
