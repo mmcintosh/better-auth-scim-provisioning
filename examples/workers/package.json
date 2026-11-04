@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "better-auth": "^1.7.16",
-    "better-auth-scim-provisioning": "^1.8.1"
+    "better-auth-scim-provisioning": "^1.8.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261101.1",
