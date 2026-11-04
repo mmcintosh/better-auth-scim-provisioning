@@ -50,22 +50,22 @@
     "release": "node scripts/release.mjs"
   },
   "peerDependencies": {
-    "better-auth": ">=1.7.7 <1.8.0"
+    "better-auth": ">=1.7.16 <1.8.0"
   },
   "dependencies": {
     "zod": "^4.6.6"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
-    "@better-auth/core": "1.7.7",
-    "@better-auth/drizzle-adapter": "1.7.7",
-    "@better-auth/scim": "1.7.7",
+    "@better-auth/core": "1.7.16",
+    "@better-auth/drizzle-adapter": "1.7.16",
+    "@better-auth/scim": "1.7.16",
     "@biomejs/biome": "^2.5.14",
     "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1",
     "@types/node": "^26.6.3",
     "@types/pg": "^8.23.1",
-    "better-auth": "1.7.7",
+    "better-auth": "1.7.16",
     "drizzle-orm": "0.45.4",
     "esbuild": "^0.28.2",
     "miniflare": "5.20261023.0-beta",
