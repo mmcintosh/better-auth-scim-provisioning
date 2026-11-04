@@ -4,6 +4,11 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Security
+
+- **Better Auth 1.7.16 or later is now required** (the peer range is `>=1.7.16 <1.8.0`). Better Auth 1.7.16 fixes twelve advisories published on 2026-11-03. The most serious: Expo's authorization proxy signing values it didn't issue (critical, [GHSA-4wq4-2ppv-q3hg](https://github.com/better-auth/better-auth/security/advisories/GHSA-4wq4-2ppv-q3hg)), phone numbers claimed before they're verified (high, [GHSA-q747-mqgr-4gh7](https://github.com/better-auth/better-auth/security/advisories/GHSA-q747-mqgr-4gh7)), Electron desktop sign-in returning the server secret (high, [GHSA-9p5w-h4pr-fcrc](https://github.com/better-auth/better-auth/security/advisories/GHSA-9p5w-h4pr-fcrc)), and, on MySQL with `generateId: "serial"`, a sign-in handed another user's session (medium, [GHSA-48c2-w96j-mv3m](https://github.com/better-auth/better-auth/security/advisories/GHSA-48c2-w96j-mv3m)). The others cover OAuth email verification, revoked sessions, Email OTP, email-change links, organization owner invitations, admin phone changes, Stripe and passkeys. None of the fixes is in this plugin's code (it already trims and splits organization roles as 1.7.16 now does), though on MySQL with serial IDs its own records were written through the affected adapters too. The app it's installed in may use any of these features, so the plugin no longer accepts the vulnerable versions. Upgrade Better Auth, and any `@better-auth/*` packages you use, along with this release; see [Better Auth's advisories](https://github.com/better-auth/better-auth/security/advisories).
+- **The Workers example's lockfile has Better Auth 1.7.16.**
+
 ### Documentation
 
 - **The README is short again.** Its reference sections moved unchanged to pages under [docs/](docs/) (targets, users and attributes, groups, monitoring, how it holds up, apps, Google Workspace, Entra ID, webhooks, organizations' own targets, retiring an app, databases and runtimes), linked from a table in the README. Headings and the feature list lost their emoji, and links into the old sections point to the new pages.

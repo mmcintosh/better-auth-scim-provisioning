@@ -1,6 +1,6 @@
 # Databases and runtimes
 
-Proven in CI. The whole suite runs on SQLite with Better Auth 1.7.7 and the latest 1.7.x, on Node.js 22 and 24; the database suite runs on Node.js 24 with the Better Auth version in the lockfile:
+Proven in CI. The whole suite runs on SQLite with Better Auth 1.7.16 and the latest 1.7.x, on Node.js 22 and 24; the database suite runs on Node.js 24 with the Better Auth version in the lockfile:
 
 | Database | Through | |
 | --- | --- | --- |
