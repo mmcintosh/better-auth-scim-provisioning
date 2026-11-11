@@ -37,7 +37,15 @@ it("a Better Auth app on a database without transactions answers 501 to everythi
   const results = await checkScimTarget({ url: "https://app.example.com/api/auth/scim/v2", token: "t", fetch });
   expect(results[0]).toMatchObject({ name: "ServiceProviderConfig", ok: false, detail: expect.stringContaining("no transactions") });
   expect(results.at(-1)).toMatchObject({ name: "create a user", ok: false, detail: expect.stringContaining("501 The scim plugin requires") });
-  expect(results.at(-1)?.detail).not.toContain("by hand"); // a 501 made nothing
+  expect(results.at(-1)?.detail).not.toContain("by hand"); // that 501 comes before any write
+});
+
+it("another app's 501 is not taken for Better Auth's: ServiceProviderConfig stays optional, and a failed create still asks for cleanup", async () => {
+  const body = { schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"], status: "501", detail: "transaction information is not implemented" };
+  const fetch = async () => new Response(JSON.stringify(body), { status: 501, headers: { "content-type": "application/scim+json" } });
+  const results = await checkScimTarget({ url: "https://app.example.com/scim/v2", token: "t", fetch });
+  expect(results[0]).toMatchObject({ name: "ServiceProviderConfig", ok: null, detail: expect.stringContaining("optional") });
+  expect(results.at(-1)).toMatchObject({ name: "create a user", ok: false, detail: expect.stringContaining("by hand") });
 });
 
 it("another app's 501 for ServiceProviderConfig alone is no ServiceProviderConfig: optional, as before", async () => {
