@@ -196,9 +196,11 @@ function checkResult(e: unknown): { ok: false; problem: string; status?: number 
           ? "redirected: use the final URL"
           : status === 429
             ? "rate limited: try again later"
-            : status >= 500
-              ? "the app had an error"
-              : "the app refused the request";
+            : status === 501
+              ? "the app doesn't support the request (a Better Auth app answers 501 to all of SCIM while its database has no transactions)"
+              : status >= 500
+                ? "the app had an error"
+                : "the app refused the request";
   return { ok: false, problem, status };
 }
 

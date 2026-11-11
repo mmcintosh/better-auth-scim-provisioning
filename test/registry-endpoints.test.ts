@@ -182,6 +182,13 @@ describe("what each change does", () => {
     await h.settle();
     expect(users()).toEqual([["olive", true]]);
     expect(await h.auth.api.scimProvisioningCheckTarget({ body: { id: target.id }, headers: owner.headers })).toEqual({ ok: true });
+    // @better-auth/scim on a database without transactions: said in our words, never the app's.
+    remote.fail({ status: 501, detail: "The scim plugin requires a database adapter with native transaction support." });
+    expect(await h.auth.api.scimProvisioningCheckTarget({ body: { id: target.id }, headers: owner.headers })).toEqual({
+      ok: false,
+      problem: "the app doesn't support the request (a Better Auth app answers 501 to all of SCIM while its database has no transactions)",
+      status: 501,
+    });
   });
 
   it("changing where a target sends needs its credentials again (they never go anywhere new); the type can't change", async () => {

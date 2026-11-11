@@ -4,6 +4,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed
+
+- **A 501 from a target now says why.** From Better Auth 1.7.21, a Better Auth app whose database has no transactions (D1, for one) starts, but answers 501 to every SCIM request; before, it didn't start. A 501 is still retried, like other problems the app's host has to fix, so queued changes go through once it's fixed. Its error now says the app doesn't support the request, and gives the Better Auth case. `check` marks that case as a failure, with the fix, instead of "ServiceProviderConfig: optional", and the check route says it in its own words. [Better Auth apps](docs/better-auth-apps.md) says what such an app does.
+
 ## [1.8.2] - 2026-11-04
 
 Requires Better Auth 1.7.16 or later, which fixes twelve advisories published on 2026-11-03; the README's reference sections move to docs/.

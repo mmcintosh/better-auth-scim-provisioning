@@ -70,6 +70,11 @@ describe("scimClient", () => {
     expect(await failure(client.findByUserName("x@example.com"))).toMatchObject({ status: 429, retryable: true, retryAfterMs: 7000 });
     sp.fail({ status: 503 });
     expect(await failure(client.findByUserName("x@example.com"))).toMatchObject({ status: 503, retryable: true });
+    // @better-auth/scim on a database without transactions (D1): the host's to fix, so retried.
+    sp.fail({ status: 501, detail: "The scim plugin requires a database adapter with native transaction support." });
+    const unimplemented = await failure(client.findByUserName("x@example.com"));
+    expect(unimplemented).toMatchObject({ status: 501, retryable: true });
+    expect(unimplemented.message).toMatch(/501 \(not implemented: .*no transactions.*\) The scim plugin requires/);
   });
 
   it("gives up on a silent service after timeoutMs, as retryable", async () => {
