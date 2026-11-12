@@ -5,137 +5,322 @@ import { checkScimTarget } from "../src";
 import { mockScim } from "./support/mock-scim";
 
 it("reports what a limited app supports, and leaves nothing behind", async () => {
-  const app = mockScim({ requireNames: true });
-  const results = await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch });
-  const ok = Object.fromEntries(results.map((r) => [r.name, r.ok]));
-  expect(ok).toEqual({
-    ServiceProviderConfig: null,
-    "Enterprise User extension": null,
-    "create a user": true,
-    "keeps externalId": true,
-    "find by userName": true,
-    "find by userName, any case": true,
-    "duplicate userName refused (409)": true,
-    "update with PUT": true,
-    "update with PATCH (no path)": false,
-    "update with PATCH (path)": false,
-    "deactivate (PATCH active false)": true,
-    delete: true,
-  });
-  expect(app.users.size).toBe(0);
+	const app = mockScim({ requireNames: true });
+	const results = await checkScimTarget({
+		url: app.url,
+		token: app.token,
+		fetch: app.fetch,
+	});
+	const ok = Object.fromEntries(results.map((r) => [r.name, r.ok]));
+	expect(ok).toEqual({
+		ServiceProviderConfig: null,
+		"Enterprise User extension": null,
+		"create a user": true,
+		"keeps externalId": true,
+		"find by userName": true,
+		"find by userName, any case": true,
+		"duplicate userName refused (409)": true,
+		"update with PUT": true,
+		"update with PATCH (no path)": false,
+		"update with PATCH (path)": false,
+		"deactivate (PATCH active false)": true,
+		delete: true,
+	});
+	expect(app.users.size).toBe(0);
 });
 
 it("finds the test user in a list with a null in it", async () => {
-  const app = mockScim({ requireNames: true });
-  // The same app, with a null put at the head of every list it answers with.
-  const fetch: typeof app.fetch = async (input, init) => {
-    const res = await app.fetch(input, init);
-    const json = res.status === 200 ? ((await res.clone().json()) as { Resources?: unknown[] }) : null;
-    if (!Array.isArray(json?.Resources)) return res;
-    return new Response(JSON.stringify({ ...json, Resources: [null, ...json.Resources] }), { status: 200, headers: res.headers });
-  };
-  const results = await checkScimTarget({ url: app.url, token: app.token, fetch });
-  expect(results.find((r) => r.id === "find")).toMatchObject({ ok: true });
-  expect(results.find((r) => r.id === "find-any-case")).toMatchObject({ ok: true });
-  expect(app.users.size).toBe(0);
+	const app = mockScim({ requireNames: true });
+	// The same app, with a null put at the head of every list it answers with.
+	const fetch: typeof app.fetch = async (input, init) => {
+		const res = await app.fetch(input, init);
+		const json =
+			res.status === 200
+				? ((await res.clone().json()) as { Resources?: unknown[] })
+				: null;
+		if (!Array.isArray(json?.Resources)) return res;
+		return new Response(
+			JSON.stringify({ ...json, Resources: [null, ...json.Resources] }),
+			{ status: 200, headers: res.headers },
+		);
+	};
+	const results = await checkScimTarget({
+		url: app.url,
+		token: app.token,
+		fetch,
+	});
+	expect(results.find((r) => r.id === "find")).toMatchObject({ ok: true });
+	expect(results.find((r) => r.id === "find-any-case")).toMatchObject({
+		ok: true,
+	});
+	expect(app.users.size).toBe(0);
 });
 
 it("stops after a failed create, and says why", async () => {
-  const app = mockScim({ requireNames: true });
-  const results = await checkScimTarget({ url: app.url, token: "wrong", fetch: app.fetch });
-  expect(results.at(-1)).toMatchObject({ name: "create a user", ok: false, detail: expect.stringContaining("401") });
+	const app = mockScim({ requireNames: true });
+	const results = await checkScimTarget({
+		url: app.url,
+		token: "wrong",
+		fetch: app.fetch,
+	});
+	expect(results.at(-1)).toMatchObject({
+		name: "create a user",
+		ok: false,
+		detail: expect.stringContaining("401"),
+	});
 });
 
 it("a Better Auth app on a database without transactions answers 501 to everything: said, not taken as optional", async () => {
-  const body = { schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"], status: "501", detail: "The scim plugin requires a database adapter with native transaction support." };
-  const fetch = async () => new Response(JSON.stringify(body), { status: 501, headers: { "content-type": "application/scim+json" } });
-  const results = await checkScimTarget({ url: "https://app.example.com/api/auth/scim/v2", token: "t", fetch });
-  expect(results[0]).toMatchObject({ name: "ServiceProviderConfig", ok: false, detail: expect.stringContaining("no transactions") });
-  expect(results.at(-1)).toMatchObject({ name: "create a user", ok: false, detail: expect.stringContaining("501 The scim plugin requires") });
-  expect(results.at(-1)?.detail).not.toContain("by hand"); // that 501 comes before any write
+	const body = {
+		schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+		status: "501",
+		detail:
+			"The scim plugin requires a database adapter with native transaction support.",
+	};
+	const fetch = async () =>
+		new Response(JSON.stringify(body), {
+			status: 501,
+			headers: { "content-type": "application/scim+json" },
+		});
+	const results = await checkScimTarget({
+		url: "https://app.example.com/api/auth/scim/v2",
+		token: "t",
+		fetch,
+	});
+	expect(results[0]).toMatchObject({
+		name: "ServiceProviderConfig",
+		ok: false,
+		detail: expect.stringContaining("no transactions"),
+	});
+	expect(results.at(-1)).toMatchObject({
+		name: "create a user",
+		ok: false,
+		detail: expect.stringContaining("501 The scim plugin requires"),
+	});
+	expect(results.at(-1)?.detail).not.toContain("by hand"); // that 501 comes before any write
 });
 
 it("another app's 501 is not taken for Better Auth's: ServiceProviderConfig stays optional, and a failed create still asks for cleanup", async () => {
-  const body = { schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"], status: "501", detail: "transaction information is not implemented" };
-  const fetch = async () => new Response(JSON.stringify(body), { status: 501, headers: { "content-type": "application/scim+json" } });
-  const results = await checkScimTarget({ url: "https://app.example.com/scim/v2", token: "t", fetch });
-  expect(results[0]).toMatchObject({ name: "ServiceProviderConfig", ok: null, detail: expect.stringContaining("optional") });
-  expect(results.at(-1)).toMatchObject({ name: "create a user", ok: false, detail: expect.stringContaining("by hand") });
+	const body = {
+		schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+		status: "501",
+		detail: "transaction information is not implemented",
+	};
+	const fetch = async () =>
+		new Response(JSON.stringify(body), {
+			status: 501,
+			headers: { "content-type": "application/scim+json" },
+		});
+	const results = await checkScimTarget({
+		url: "https://app.example.com/scim/v2",
+		token: "t",
+		fetch,
+	});
+	expect(results[0]).toMatchObject({
+		name: "ServiceProviderConfig",
+		ok: null,
+		detail: expect.stringContaining("optional"),
+	});
+	expect(results.at(-1)).toMatchObject({
+		name: "create a user",
+		ok: false,
+		detail: expect.stringContaining("by hand"),
+	});
 });
 
 it("another app's 501 for ServiceProviderConfig alone is no ServiceProviderConfig: optional, as before", async () => {
-  const app = mockScim({ requireNames: true });
-  const fetch: typeof globalThis.fetch = async (url, init) => (String(url).endsWith("/ServiceProviderConfig") ? new Response(null, { status: 501 }) : app.fetch(url, init));
-  const results = await checkScimTarget({ url: app.url, token: app.token, fetch });
-  expect(results[0]).toMatchObject({ name: "ServiceProviderConfig", ok: null, detail: expect.stringContaining("optional") });
-  expect(results.find((r) => r.name === "create a user")?.ok).toBe(true);
+	const app = mockScim({ requireNames: true });
+	const fetch: typeof globalThis.fetch = async (url, init) =>
+		String(url).endsWith("/ServiceProviderConfig")
+			? new Response(null, { status: 501 })
+			: app.fetch(url, init);
+	const results = await checkScimTarget({
+		url: app.url,
+		token: app.token,
+		fetch,
+	});
+	expect(results[0]).toMatchObject({
+		name: "ServiceProviderConfig",
+		ok: null,
+		detail: expect.stringContaining("optional"),
+	});
+	expect(results.find((r) => r.name === "create a user")?.ok).toBe(true);
 });
 
 it("an app that ignores externalId is reported", async () => {
-  const app = mockScim({ keepsExternalId: false });
-  const results = await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch });
-  expect(results.find((r) => r.name === "keeps externalId")).toMatchObject({ ok: false, detail: expect.stringContaining("our own links") });
+	const app = mockScim({ keepsExternalId: false });
+	const results = await checkScimTarget({
+		url: app.url,
+		token: app.token,
+		fetch: app.fetch,
+	});
+	expect(results.find((r) => r.name === "keeps externalId")).toMatchObject({
+		ok: false,
+		detail: expect.stringContaining("our own links"),
+	});
 });
 
 it("says whether the app advertises the Enterprise User extension, by its ResourceTypes or its Schemas; neither, and it can't tell", async () => {
-  const result = async (discovery: NonNullable<Parameters<typeof mockScim>[0]>["discovery"]) => {
-    const app = mockScim(discovery ? { discovery } : {});
-    const r = (await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch })).find((x) => x.id === "enterprise-user")!;
-    expect(app.users.size).toBe(0);
-    return [r.ok, r.detail] as const;
-  };
-  expect(await result({ resourceTypes: true, enterprise: true })).toEqual([true, "listed by /ResourceTypes"]);
-  expect(await result({ resourceTypes: true, enterprise: false })).toEqual([false, expect.stringContaining("not listed by /ResourceTypes")]);
-  expect(await result({ schemas: true, enterprise: true })).toEqual([true, "listed by /Schemas"]);
-  expect(await result({ schemas: true, enterprise: false })).toEqual([false, expect.stringContaining("not listed by /Schemas")]);
-  expect(await result(undefined)).toEqual([null, expect.stringContaining("can't tell")]);
-  // The result comes before the test user's, so a failed create still ends the list.
-  const app = mockScim({ discovery: { resourceTypes: true, enterprise: true } });
-  const ids = (await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch })).map((r) => r.id);
-  expect(ids.slice(0, 3)).toEqual(["service-provider-config", "enterprise-user", "create"]);
+	const result = async (
+		discovery: NonNullable<Parameters<typeof mockScim>[0]>["discovery"],
+	) => {
+		const app = mockScim(discovery ? { discovery } : {});
+		const r = (
+			await checkScimTarget({
+				url: app.url,
+				token: app.token,
+				fetch: app.fetch,
+			})
+		).find((x) => x.id === "enterprise-user")!;
+		expect(app.users.size).toBe(0);
+		return [r.ok, r.detail] as const;
+	};
+	expect(await result({ resourceTypes: true, enterprise: true })).toEqual([
+		true,
+		"listed by /ResourceTypes",
+	]);
+	expect(await result({ resourceTypes: true, enterprise: false })).toEqual([
+		false,
+		expect.stringContaining("not listed by /ResourceTypes"),
+	]);
+	expect(await result({ schemas: true, enterprise: true })).toEqual([
+		true,
+		"listed by /Schemas",
+	]);
+	expect(await result({ schemas: true, enterprise: false })).toEqual([
+		false,
+		expect.stringContaining("not listed by /Schemas"),
+	]);
+	expect(await result(undefined)).toEqual([
+		null,
+		expect.stringContaining("can't tell"),
+	]);
+	// The result comes before the test user's, so a failed create still ends the list.
+	const app = mockScim({
+		discovery: { resourceTypes: true, enterprise: true },
+	});
+	const ids = (
+		await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch })
+	).map((r) => r.id);
+	expect(ids.slice(0, 3)).toEqual([
+		"service-provider-config",
+		"enterprise-user",
+		"create",
+	]);
 });
 
 it("discovery's odd answers: 401 on those endpoints, no User type, a bare array, only the schema by id", async () => {
-  const result = async (app: ReturnType<typeof mockScim>, fetch = app.fetch) => {
-    const r = (await checkScimTarget({ url: app.url, token: app.token, fetch })).find((x) => x.id === "enterprise-user")!;
-    expect(app.users.size).toBe(0);
-    return r;
-  };
-  // A token without the discovery scope: the statuses are said, and the rest of the check goes on.
-  const plain = mockScim();
-  const gated: typeof fetch = async (input, init) => {
-    const url = input instanceof Request ? input.url : String(input);
-    return /\/(ResourceTypes|Schemas)/.test(url) ? new Response(JSON.stringify({ detail: "no scope" }), { status: 401, headers: { "content-type": "application/scim+json" } }) : plain.fetch(input, init);
-  };
-  expect(await result(plain, gated)).toMatchObject({ ok: null, detail: expect.stringMatching(/\/ResourceTypes 401 no scope, \/Schemas 401 no scope/) });
-  // /ResourceTypes without a User type, then /Schemas as a bare array listing the extension.
-  expect(await result(mockScim({ discovery: { resourceTypes: true, noUserType: true, schemas: true, bare: true, enterprise: true } }))).toMatchObject({ ok: true, detail: "listed by /Schemas" });
-  // /ResourceTypes without a User type and no /Schemas at all: what was seen.
-  expect(await result(mockScim({ discovery: { resourceTypes: true, noUserType: true } }))).toMatchObject({ ok: null, detail: expect.stringMatching(/\/ResourceTypes answered without a User type, \/Schemas 404/) });
-  // Only the schema by its id.
-  expect(await result(mockScim({ discovery: { schemaById: true, enterprise: true } }))).toMatchObject({ ok: true, detail: "served at /Schemas/<its id>" });
+	const result = async (
+		app: ReturnType<typeof mockScim>,
+		fetch = app.fetch,
+	) => {
+		const r = (
+			await checkScimTarget({ url: app.url, token: app.token, fetch })
+		).find((x) => x.id === "enterprise-user")!;
+		expect(app.users.size).toBe(0);
+		return r;
+	};
+	// A token without the discovery scope: the statuses are said, and the rest of the check goes on.
+	const plain = mockScim();
+	const gated: typeof fetch = async (input, init) => {
+		const url = input instanceof Request ? input.url : String(input);
+		return /\/(ResourceTypes|Schemas)/.test(url)
+			? new Response(JSON.stringify({ detail: "no scope" }), {
+					status: 401,
+					headers: { "content-type": "application/scim+json" },
+				})
+			: plain.fetch(input, init);
+	};
+	expect(await result(plain, gated)).toMatchObject({
+		ok: null,
+		detail: expect.stringMatching(
+			/\/ResourceTypes 401 no scope, \/Schemas 401 no scope/,
+		),
+	});
+	// /ResourceTypes without a User type, then /Schemas as a bare array listing the extension.
+	expect(
+		await result(
+			mockScim({
+				discovery: {
+					resourceTypes: true,
+					noUserType: true,
+					schemas: true,
+					bare: true,
+					enterprise: true,
+				},
+			}),
+		),
+	).toMatchObject({ ok: true, detail: "listed by /Schemas" });
+	// /ResourceTypes without a User type and no /Schemas at all: what was seen.
+	expect(
+		await result(
+			mockScim({ discovery: { resourceTypes: true, noUserType: true } }),
+		),
+	).toMatchObject({
+		ok: null,
+		detail: expect.stringMatching(
+			/\/ResourceTypes answered without a User type, \/Schemas 404/,
+		),
+	});
+	// Only the schema by its id.
+	expect(
+		await result(
+			mockScim({ discovery: { schemaById: true, enterprise: true } }),
+		),
+	).toMatchObject({ ok: true, detail: "served at /Schemas/<its id>" });
 });
 
 it("reports RFC 9865's paging and RFC 9967's asynchronous requests from the ServiceProviderConfig, whatever its case; and a create answered 202", async () => {
-  const app = mockScim({ requireNames: true });
-  const spc = {
-    patch: { supported: true },
-    filter: { supported: true },
-    Pagination: { Cursor: true, index: true, defaultPaginationMethod: "cursor", maxPageSize: 200 },
-    securityevents: { asyncrequest: "long" },
-  };
-  const fetch: typeof globalThis.fetch = async (input, init) =>
-    String(input).endsWith("/ServiceProviderConfig") ? new Response(JSON.stringify(spc), { status: 200 }) : app.fetch(input, init);
-  const results = await checkScimTarget({ url: app.url, token: app.token, fetch });
-  expect(results[0]).toMatchObject({
-    ok: true,
-    detail: expect.stringContaining("paging by cursor and index (default cursor), at most 200 a page; asynchronous requests: long (it may answer a slow create with 202"),
-  });
-  // An odd list of schemes (a null in it) is no crash.
-  const odd: typeof globalThis.fetch = async (input, init) =>
-    String(input).endsWith("/ServiceProviderConfig") ? new Response(JSON.stringify({ ...spc, authenticationSchemes: [null, { type: "oauthbearertoken" }] }), { status: 200 }) : app.fetch(input, init);
-  expect((await checkScimTarget({ url: app.url, token: app.token, fetch: odd }))[0]).toMatchObject({ ok: true });
-  app.failOn("POST", /^\/Users$/, { accepted: true });
-  const accepted = await checkScimTarget({ url: app.url, token: app.token, fetch: app.fetch });
-  expect(accepted.at(-1)).toMatchObject({ name: "create a user", ok: false, detail: expect.stringContaining("202: accepted, to be done later") });
+	const app = mockScim({ requireNames: true });
+	const spc = {
+		patch: { supported: true },
+		filter: { supported: true },
+		Pagination: {
+			Cursor: true,
+			index: true,
+			defaultPaginationMethod: "cursor",
+			maxPageSize: 200,
+		},
+		securityevents: { asyncrequest: "long" },
+	};
+	const fetch: typeof globalThis.fetch = async (input, init) =>
+		String(input).endsWith("/ServiceProviderConfig")
+			? new Response(JSON.stringify(spc), { status: 200 })
+			: app.fetch(input, init);
+	const results = await checkScimTarget({
+		url: app.url,
+		token: app.token,
+		fetch,
+	});
+	expect(results[0]).toMatchObject({
+		ok: true,
+		detail: expect.stringContaining(
+			"paging by cursor and index (default cursor), at most 200 a page; asynchronous requests: long (it may answer a slow create with 202",
+		),
+	});
+	// An odd list of schemes (a null in it) is no crash.
+	const odd: typeof globalThis.fetch = async (input, init) =>
+		String(input).endsWith("/ServiceProviderConfig")
+			? new Response(
+					JSON.stringify({
+						...spc,
+						authenticationSchemes: [null, { type: "oauthbearertoken" }],
+					}),
+					{ status: 200 },
+				)
+			: app.fetch(input, init);
+	expect(
+		(await checkScimTarget({ url: app.url, token: app.token, fetch: odd }))[0],
+	).toMatchObject({ ok: true });
+	app.failOn("POST", /^\/Users$/, { accepted: true });
+	const accepted = await checkScimTarget({
+		url: app.url,
+		token: app.token,
+		fetch: app.fetch,
+	});
+	expect(accepted.at(-1)).toMatchObject({
+		name: "create a user",
+		ok: false,
+		detail: expect.stringContaining("202: accepted, to be done later"),
+	});
 });

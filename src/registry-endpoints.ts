@@ -8,121 +8,203 @@
 // of where needs them given again). The routes are always there (so they're typed for every
 // app); without `registry` they're 404 (401 first, signed out).
 import type { GenericEndpointContext } from "better-auth";
-import { APIError, createAuthEndpoint, sensitiveSessionMiddleware } from "better-auth/api";
-import * as z from "zod";
-import { type Adapter, clientFor, credentialsMarkerKey, DECOMMISSION_MODEL, jwtExpiry, GROUP_LINK_MODEL, JOB_MODEL, LINK_MODEL, PURGE_CONFIRM_ABOVE } from "./outbox";
 import {
-  assemble,
-  credentialsKind,
-  guardedFetch,
-  type SealKey,
-  seal,
-  type StoredCredentials,
-  type StoredSettings,
-  storedCredentialsSchema,
-  storedProblems,
-  storedSettingsSchema,
-  TARGET_MODEL,
-  type TargetRow,
-  unseal,
-  destination,
+	APIError,
+	createAuthEndpoint,
+	sensitiveSessionMiddleware,
+} from "better-auth/api";
+import * as z from "zod";
+import {
+	type Adapter,
+	clientFor,
+	credentialsMarkerKey,
+	DECOMMISSION_MODEL,
+	jwtExpiry,
+	GROUP_LINK_MODEL,
+	JOB_MODEL,
+	LINK_MODEL,
+	PURGE_CONFIRM_ABOVE,
+} from "./outbox";
+import {
+	assemble,
+	credentialsKind,
+	guardedFetch,
+	type SealKey,
+	seal,
+	type StoredCredentials,
+	type StoredSettings,
+	storedCredentialsSchema,
+	storedProblems,
+	storedSettingsSchema,
+	TARGET_MODEL,
+	type TargetRow,
+	unseal,
+	destination,
 } from "./registry";
 import { ScimError } from "./scim-client";
-import type { AuditAction, AuditEvent, Target, TargetRegistryOptions } from "./types";
+import type {
+	AuditAction,
+	AuditEvent,
+	Target,
+	TargetRegistryOptions,
+} from "./types";
 import { AUDIT_PAGE_MAX, type AuditInput } from "./audit";
 
 const MAX_CONFIG_BYTES = 16 * 1024;
 
 /** What the endpoints need from the plugin's instance. */
 export interface RegistryHost {
-  /** Undefined without `registry`: every route answers 404. */
-  options: TargetRegistryOptions | undefined;
-  /** Ids of the targets in code: a stored one never takes one, in any case. */
-  codeIds: string[];
-  /** Problems with a whole target, as the plugin's option checks see them. */
-  targetProblems(target: Target): string[];
-  /** The user model's fields, set at init: what `enterprise: true` and `attributes: true` resolve to. */
-  userFields(): ReadonlySet<string>;
-  /** This instance's outbox, for a target's organization. */
-  instance(ctx: GenericEndpointContext):
-    | {
-        resync(targetId: string, o: { resume: boolean }): Promise<void>;
-        status(targetId: string): Promise<{ queued: number; waiting: number; stuck: number; failed: number; rateLimited: number; accounts: number; groups: number; credentialsExpireAt: string | null }>;
-        failures(targetId: string): Promise<{ kind: string; subjectId: string; failed: boolean; status: number | null; nextAttemptAt: string }[]>;
-        drift(targetId: string, after: string | null, limit: number): Promise<{ items: unknown[]; scanned: number; next: string | null }>;
-        accounts(targetId: string, after: string | null, limit: number): Promise<{ items: { userId: string; userName: string; remoteId: string | null; active: boolean; adopted: boolean }[]; next: string | null }>;
-        /** Deliver some of the target's due jobs now, in the background; the scheduled run does the rest. */
-        kick(targetId: string): void;
-        /** What a target still has at the app: accounts active there (for a purge, not adopted), and groups. */
-        counts(targetId: string, phase?: "deactivate" | "purge"): Promise<{ accounts: number; groups: number }>;
-        /** Of those, how many another target at the same app still uses (left there); null when too many to count. */
-        shared(targetId: string, phase?: "deactivate" | "purge"): Promise<{ accounts: number; groups: number } | null>;
-        /** The audit history (recording is a no-op without the plugin's `audit` option). */
-        audit: {
-          on: boolean;
-          record(e: AuditInput): Promise<void>;
-          list(q: { targetId?: string | undefined; organizationId?: string | undefined; after?: string | undefined; limit?: number | undefined }): Promise<{ items: AuditEvent[]; next: string | null }>;
-        };
-        /** Undefined without the plugin's `decommission` option. */
-        decommission:
-          | {
-              state(targetId: string): Promise<"running" | "complete" | "cancelled" | null>;
-              status(targetId: string): Promise<unknown>;
-              /** True if this call started it (not one that was already under way). */
-              start(targetId: string, by: string): Promise<boolean>;
-              purge(targetId: string, by: string): Promise<boolean>;
-              row(targetId: string): Promise<{ phase: "deactivate" | "purge"; state: "running" | "complete" | "cancelled" } | null>;
-              cancel(targetId: string, by: string): Promise<boolean>;
-              forget(targetId: string, userIds: string[], by: string): Promise<{ forgotten: string[]; skipped: string[] } | null>;
-            }
-          | undefined;
-      }
-    | undefined;
+	/** Undefined without `registry`: every route answers 404. */
+	options: TargetRegistryOptions | undefined;
+	/** Ids of the targets in code: a stored one never takes one, in any case. */
+	codeIds: string[];
+	/** Problems with a whole target, as the plugin's option checks see them. */
+	targetProblems(target: Target): string[];
+	/** The user model's fields, set at init: what `enterprise: true` and `attributes: true` resolve to. */
+	userFields(): ReadonlySet<string>;
+	/** This instance's outbox, for a target's organization. */
+	instance(ctx: GenericEndpointContext):
+		| {
+				resync(targetId: string, o: { resume: boolean }): Promise<void>;
+				status(targetId: string): Promise<{
+					queued: number;
+					waiting: number;
+					stuck: number;
+					failed: number;
+					rateLimited: number;
+					accounts: number;
+					groups: number;
+					credentialsExpireAt: string | null;
+				}>;
+				failures(targetId: string): Promise<
+					{
+						kind: string;
+						subjectId: string;
+						failed: boolean;
+						status: number | null;
+						nextAttemptAt: string;
+					}[]
+				>;
+				drift(
+					targetId: string,
+					after: string | null,
+					limit: number,
+				): Promise<{ items: unknown[]; scanned: number; next: string | null }>;
+				accounts(
+					targetId: string,
+					after: string | null,
+					limit: number,
+				): Promise<{
+					items: {
+						userId: string;
+						userName: string;
+						remoteId: string | null;
+						active: boolean;
+						adopted: boolean;
+					}[];
+					next: string | null;
+				}>;
+				/** Deliver some of the target's due jobs now, in the background; the scheduled run does the rest. */
+				kick(targetId: string): void;
+				/** What a target still has at the app: accounts active there (for a purge, not adopted), and groups. */
+				counts(
+					targetId: string,
+					phase?: "deactivate" | "purge",
+				): Promise<{ accounts: number; groups: number }>;
+				/** Of those, how many another target at the same app still uses (left there); null when too many to count. */
+				shared(
+					targetId: string,
+					phase?: "deactivate" | "purge",
+				): Promise<{ accounts: number; groups: number } | null>;
+				/** The audit history (recording is a no-op without the plugin's `audit` option). */
+				audit: {
+					on: boolean;
+					record(e: AuditInput): Promise<void>;
+					list(q: {
+						targetId?: string | undefined;
+						organizationId?: string | undefined;
+						after?: string | undefined;
+						limit?: number | undefined;
+					}): Promise<{ items: AuditEvent[]; next: string | null }>;
+				};
+				/** Undefined without the plugin's `decommission` option. */
+				decommission:
+					| {
+							state(
+								targetId: string,
+							): Promise<"running" | "complete" | "cancelled" | null>;
+							status(targetId: string): Promise<unknown>;
+							/** True if this call started it (not one that was already under way). */
+							start(targetId: string, by: string): Promise<boolean>;
+							purge(targetId: string, by: string): Promise<boolean>;
+							row(targetId: string): Promise<{
+								phase: "deactivate" | "purge";
+								state: "running" | "complete" | "cancelled";
+							} | null>;
+							cancel(targetId: string, by: string): Promise<boolean>;
+							forget(
+								targetId: string,
+								userIds: string[],
+								by: string,
+							): Promise<{ forgotten: string[]; skipped: string[] } | null>;
+					  }
+					| undefined;
+		  }
+		| undefined;
 }
 
 /** A stored target as the API shows it: no credentials, and a webhook URL without its path or query (Slack's and Azure's carry secrets). */
 export interface StoredTargetView {
-  id: string;
-  organizationId: string;
-  type: string;
-  enabled: boolean;
-  settings: StoredSettings;
-  credentials: { kind: ReturnType<typeof credentialsKind> | "unreadable" };
-  createdAt: Date | string;
-  updatedAt: Date | string;
+	id: string;
+	organizationId: string;
+	type: string;
+	enabled: boolean;
+	settings: StoredSettings;
+	credentials: { kind: ReturnType<typeof credentialsKind> | "unreadable" };
+	createdAt: Date | string;
+	updatedAt: Date | string;
 }
 
-const refuse = (status: "FORBIDDEN" | "BAD_REQUEST" | "NOT_FOUND" | "CONFLICT", message: string, issues?: string[]) =>
-  new APIError(status, { message: `[scim] ${message}`, ...(issues ? { issues } : {}) });
+const refuse = (
+	status: "FORBIDDEN" | "BAD_REQUEST" | "NOT_FOUND" | "CONFLICT",
+	message: string,
+	issues?: string[],
+) =>
+	new APIError(status, {
+		message: `[scim] ${message}`,
+		...(issues ? { issues } : {}),
+	});
 
 /** What's shown of a URL: all of a SCIM base URL; of a webhook's, the origin only. */
 const shownUrl = (type: string, url: string | undefined) => {
-  if (url === undefined || type !== "webhook") return url;
-  try {
-    const u = new URL(url);
-    return u.pathname === "/" && !u.search ? u.origin : `${u.origin}/…`;
-  } catch {
-    return "…";
-  }
+	if (url === undefined || type !== "webhook") return url;
+	try {
+		const u = new URL(url);
+		return u.pathname === "/" && !u.search ? u.origin : `${u.origin}/…`;
+	} catch {
+		return "…";
+	}
 };
 
-const truthy = (v: unknown) => v === true || v === 1 || v === "1" || v === "true";
+const truthy = (v: unknown) =>
+	v === true || v === 1 || v === "1" || v === "true";
 const isBanned = (user: Record<string, unknown>) => {
-  if (!truthy(user.banned)) return false;
-  const exp = user.banExpires;
-  if (exp === null || exp === undefined) return true;
-  const t = new Date(exp as string | number | Date).getTime();
-  return Number.isNaN(t) || t > Date.now();
+	if (!truthy(user.banned)) return false;
+	const exp = user.banExpires;
+	if (exp === null || exp === undefined) return true;
+	const t = new Date(exp as string | number | Date).getTime();
+	return Number.isNaN(t) || t > Date.now();
 };
 
 interface Actor {
-  userId: string;
-  /** A host administrator: every organization. */
-  host: boolean;
-  /** Otherwise, the organizations it administers. */
-  organizations: ReadonlySet<string>;
+	userId: string;
+	/** A host administrator: every organization. */
+	host: boolean;
+	/** Otherwise, the organizations it administers. */
+	organizations: ReadonlySet<string>;
 }
-const may = (actor: Actor, organizationId: string) => actor.host || actor.organizations.has(organizationId);
+const may = (actor: Actor, organizationId: string) =>
+	actor.host || actor.organizations.has(organizationId);
 
 /** A create's `requestId`: the client's own, fresh for each target it means to make (a UUID, say). */
 const REQUEST_ID = /^[A-Za-z0-9._:-]{8,128}$/;
@@ -131,583 +213,1149 @@ const REQUEST_ID = /^[A-Za-z0-9._:-]{8,128}$/;
  * The id of the target a create with this `requestId` makes, the same every time: a retry finds it
  * (the id is unique, so two at once make one), with nothing more stored than the target itself.
  */
-async function requestTargetId(organizationId: string, requestId: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${organizationId}\n${requestId}`)));
-  const hex = [...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  return `t-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+async function requestTargetId(
+	organizationId: string,
+	requestId: string,
+): Promise<string> {
+	const digest = new Uint8Array(
+		await crypto.subtle.digest(
+			"SHA-256",
+			new TextEncoder().encode(`${organizationId}\n${requestId}`),
+		),
+	);
+	const hex = [...digest.slice(0, 16)]
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+	return `t-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 /** JSON with its keys sorted, so two of the same value compare equal whatever their order. */
 const canonical = (v: unknown): string =>
-  JSON.stringify(v, (_, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x));
+	JSON.stringify(v, (_, x) =>
+		x && typeof x === "object" && !Array.isArray(x)
+			? Object.fromEntries(
+					Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+				)
+			: x,
+	);
 
-async function actorOf(ctx: GenericEndpointContext, options: TargetRegistryOptions | undefined, o: { change?: boolean; roles?: string[]; freshAge?: number } = {}): Promise<Actor> {
-  if (!options) throw refuse("NOT_FOUND", "the target registry isn't enabled (registry option)");
-  const s = (ctx.context as { session?: { user: { id: string }; session: Record<string, unknown> } }).session;
-  if (!s) throw refuse("FORBIDDEN", "sign in to manage targets");
-  // An administrator acting as someone else doesn't manage targets as them.
-  if (s.session.impersonatedBy) throw refuse("FORBIDDEN", "not while impersonating");
-  if (o.change) {
-    // Fresh, as Better Auth asks for a password or email change: a session cookie stolen days ago
-    // mustn't be able to point an organization's users at another app.
-    const freshAge = o.freshAge ?? (ctx.context as { sessionConfig?: { freshAge?: number } }).sessionConfig?.freshAge ?? 60 * 60 * 24;
-    const createdAt = new Date(s.session.createdAt as string | Date).getTime();
-    if (freshAge !== 0 && !(Date.now() - createdAt < freshAge * 1000)) throw refuse("FORBIDDEN", "sign in again to change targets (the session isn't fresh)");
-  }
-  const user = (await ctx.context.internalAdapter.findUserById(s.user.id)) as ({ id: string; email: string; emailVerified: boolean } & Record<string, unknown>) | null;
-  if (!user || isBanned(user)) throw refuse("FORBIDDEN", "not allowed");
-  let host = false;
-  if (options.canManage) {
-    try {
-      host = (await options.canManage({ user, session: s.session })) === true;
-    } catch (e) {
-      ctx.context.logger.error("[scim] registry.canManage threw", e);
-    }
-  }
-  const roles = o.roles ?? options.organizationRoles ?? ["owner", "admin"];
-  const organizations = new Set<string>();
-  if (!host && roles.length) {
-    const adapter = ctx.context.adapter as unknown as Adapter;
-    for (let offset = 0; ; offset += 1000) {
-      const page = (await adapter.findMany({ model: "member", where: [{ field: "userId", value: user.id }], limit: 1000, offset, sortBy: { field: "id", direction: "asc" } })) as { userId: string; organizationId: string; role?: string | null }[];
-      // Exact match: a case-insensitive collation mustn't widen it. Better Auth stores several roles comma-separated.
-      for (const m of page) if (m.userId === user.id && String(m.role ?? "").split(",").some((r) => roles.includes(r.trim()))) organizations.add(m.organizationId);
-      if (page.length < 1000) break;
-    }
-  }
-  if (!host && organizations.size === 0) throw refuse("FORBIDDEN", "not allowed");
-  return { userId: user.id, host, organizations };
+async function actorOf(
+	ctx: GenericEndpointContext,
+	options: TargetRegistryOptions | undefined,
+	o: { change?: boolean; roles?: string[]; freshAge?: number } = {},
+): Promise<Actor> {
+	if (!options)
+		throw refuse(
+			"NOT_FOUND",
+			"the target registry isn't enabled (registry option)",
+		);
+	const s = (
+		ctx.context as {
+			session?: { user: { id: string }; session: Record<string, unknown> };
+		}
+	).session;
+	if (!s) throw refuse("FORBIDDEN", "sign in to manage targets");
+	// An administrator acting as someone else doesn't manage targets as them.
+	if (s.session.impersonatedBy)
+		throw refuse("FORBIDDEN", "not while impersonating");
+	if (o.change) {
+		// Fresh, as Better Auth asks for a password or email change: a session cookie stolen days ago
+		// mustn't be able to point an organization's users at another app.
+		const freshAge =
+			o.freshAge ??
+			(ctx.context as { sessionConfig?: { freshAge?: number } }).sessionConfig
+				?.freshAge ??
+			60 * 60 * 24;
+		const createdAt = new Date(s.session.createdAt as string | Date).getTime();
+		if (freshAge !== 0 && !(Date.now() - createdAt < freshAge * 1000))
+			throw refuse(
+				"FORBIDDEN",
+				"sign in again to change targets (the session isn't fresh)",
+			);
+	}
+	const user = (await ctx.context.internalAdapter.findUserById(s.user.id)) as
+		| ({ id: string; email: string; emailVerified: boolean } & Record<
+				string,
+				unknown
+		  >)
+		| null;
+	if (!user || isBanned(user)) throw refuse("FORBIDDEN", "not allowed");
+	let host = false;
+	if (options.canManage) {
+		try {
+			host = (await options.canManage({ user, session: s.session })) === true;
+		} catch (e) {
+			ctx.context.logger.error("[scim] registry.canManage threw", e);
+		}
+	}
+	const roles = o.roles ?? options.organizationRoles ?? ["owner", "admin"];
+	const organizations = new Set<string>();
+	if (!host && roles.length) {
+		const adapter = ctx.context.adapter as unknown as Adapter;
+		for (let offset = 0; ; offset += 1000) {
+			const page = (await adapter.findMany({
+				model: "member",
+				where: [{ field: "userId", value: user.id }],
+				limit: 1000,
+				offset,
+				sortBy: { field: "id", direction: "asc" },
+			})) as { userId: string; organizationId: string; role?: string | null }[];
+			// Exact match: a case-insensitive collation mustn't widen it. Better Auth stores several roles comma-separated.
+			for (const m of page)
+				if (
+					m.userId === user.id &&
+					String(m.role ?? "")
+						.split(",")
+						.some((r) => roles.includes(r.trim()))
+				)
+					organizations.add(m.organizationId);
+			if (page.length < 1000) break;
+		}
+	}
+	if (!host && organizations.size === 0)
+		throw refuse("FORBIDDEN", "not allowed");
+	return { userId: user.id, host, organizations };
 }
 
 /** What a check found, in broad terms only: never the app's own words, which would make this a way to read internal services. */
-function checkResult(e: unknown): { ok: false; problem: string; status?: number } {
-  const status = e instanceof ScimError ? e.status : null;
-  if (status === null) {
-    if (!(e instanceof ScimError)) return { ok: false, problem: "the request couldn't be made" };
-    // Retried errors are the app not answering; the rest are an answer that couldn't be used.
-    return { ok: false, problem: e.retryable ? "no answer (the host can't be reached, or didn't answer in time)" : "the app's answer couldn't be used: check the URL, or pass a `next` this route handed out" };
-  }
-  const problem =
-    status === 401 || status === 403
-      ? "the credentials were refused"
-      : status === 404
-        ? "not found: check the URL"
-        : status >= 300 && status < 400
-          ? "redirected: use the final URL"
-          : status === 429
-            ? "rate limited: try again later"
-            : status === 501
-              ? "the app doesn't support the request (a Better Auth app answers 501 to all of SCIM while its database has no transactions)"
-              : status >= 500
-                ? "the app had an error"
-                : "the app refused the request";
-  return { ok: false, problem, status };
+function checkResult(e: unknown): {
+	ok: false;
+	problem: string;
+	status?: number;
+} {
+	const status = e instanceof ScimError ? e.status : null;
+	if (status === null) {
+		if (!(e instanceof ScimError))
+			return { ok: false, problem: "the request couldn't be made" };
+		// Retried errors are the app not answering; the rest are an answer that couldn't be used.
+		return {
+			ok: false,
+			problem: e.retryable
+				? "no answer (the host can't be reached, or didn't answer in time)"
+				: "the app's answer couldn't be used: check the URL, or pass a `next` this route handed out",
+		};
+	}
+	const problem =
+		status === 401 || status === 403
+			? "the credentials were refused"
+			: status === 404
+				? "not found: check the URL"
+				: status >= 300 && status < 400
+					? "redirected: use the final URL"
+					: status === 429
+						? "rate limited: try again later"
+						: status === 501
+							? "the app doesn't support the request (a Better Auth app answers 501 to all of SCIM while its database has no transactions)"
+							: status >= 500
+								? "the app had an error"
+								: "the app refused the request";
+	return { ok: false, problem, status };
 }
 
-export function registryEndpoints(host: RegistryHost, key: (ctx: GenericEndpointContext) => SealKey) {
-  const adapterOf = (ctx: GenericEndpointContext) => ctx.context.adapter as unknown as Adapter;
-  // At warn, Better Auth's default level: who connected what, and where, must not be dropped.
-  const audit = (ctx: GenericEndpointContext, actor: Actor, what: string) => ctx.context.logger.warn(`[scim] registry: user ${actor.userId}${actor.host ? " (host administrator)" : ""} ${what}`);
-  /** The same, in the audit history (with the plugin's `audit`). */
-  const record = (ctx: GenericEndpointContext, actor: Actor, row: { targetId: string; organizationId: string }, action: AuditAction, detail: Record<string, unknown>) =>
-    instance(ctx).audit.record({ targetId: row.targetId, organizationId: row.organizationId, actor: `user:${actor.userId}`, action, detail: { ...(actor.host ? { hostAdministrator: true } : {}), ...detail } });
-  const instance = (ctx: GenericEndpointContext) => {
-    const i = host.instance(ctx);
-    if (!i) throw new Error("[scim] not initialised");
-    return i;
-  };
+export function registryEndpoints(
+	host: RegistryHost,
+	key: (ctx: GenericEndpointContext) => SealKey,
+) {
+	const adapterOf = (ctx: GenericEndpointContext) =>
+		ctx.context.adapter as unknown as Adapter;
+	// At warn, Better Auth's default level: who connected what, and where, must not be dropped.
+	const audit = (ctx: GenericEndpointContext, actor: Actor, what: string) =>
+		ctx.context.logger.warn(
+			`[scim] registry: user ${actor.userId}${actor.host ? " (host administrator)" : ""} ${what}`,
+		);
+	/** The same, in the audit history (with the plugin's `audit`). */
+	const record = (
+		ctx: GenericEndpointContext,
+		actor: Actor,
+		row: { targetId: string; organizationId: string },
+		action: AuditAction,
+		detail: Record<string, unknown>,
+	) =>
+		instance(ctx).audit.record({
+			targetId: row.targetId,
+			organizationId: row.organizationId,
+			actor: `user:${actor.userId}`,
+			action,
+			detail: { ...(actor.host ? { hostAdministrator: true } : {}), ...detail },
+		});
+	const instance = (ctx: GenericEndpointContext) => {
+		const i = host.instance(ctx);
+		if (!i) throw new Error("[scim] not initialised");
+		return i;
+	};
 
-  /**
-   * Who may decommission: `registry.decommissionRoles` (owners, by default) among those who may
-   * manage targets at all (organizationRoles), and the host's administrators; signed in within
-   * `decommissionFreshAge` to change anything.
-   */
-  const decommissionActor = (ctx: GenericEndpointContext, change: boolean) => {
-    const managing = host.options?.organizationRoles ?? ["owner", "admin"];
-    const roles = (host.options?.decommissionRoles ?? ["owner"]).filter((r) => managing.includes(r));
-    return actorOf(ctx, host.options, change ? { change: true, roles, freshAge: host.options?.decommissionFreshAge ?? 900 } : { roles });
-  };
+	/**
+	 * Who may decommission: `registry.decommissionRoles` (owners, by default) among those who may
+	 * manage targets at all (organizationRoles), and the host's administrators; signed in within
+	 * `decommissionFreshAge` to change anything.
+	 */
+	const decommissionActor = (ctx: GenericEndpointContext, change: boolean) => {
+		const managing = host.options?.organizationRoles ?? ["owner", "admin"];
+		const roles = (host.options?.decommissionRoles ?? ["owner"]).filter((r) =>
+			managing.includes(r),
+		);
+		return actorOf(
+			ctx,
+			host.options,
+			change
+				? {
+						change: true,
+						roles,
+						freshAge: host.options?.decommissionFreshAge ?? 900,
+					}
+				: { roles },
+		);
+	};
 
-  /**
-   * A target being decommissioned, or decommissioned: removing it (or pausing it) would undo or stop
-   * that, so only those who may decommission may, freshly signed in.
-   */
-  async function guardRetiring(ctx: GenericEndpointContext, row: TargetRow, what: string) {
-    const state = await instance(ctx).decommission?.state(row.targetId);
-    if (state !== "running" && state !== "complete") return;
-    const actor = await decommissionActor(ctx, true).catch(() => null);
-    if (!actor || !may(actor, row.organizationId)) throw refuse("FORBIDDEN", `its decommission is ${state}: only those who may decommission it may ${what} it (registry.decommissionRoles)`);
-  }
+	/**
+	 * A target being decommissioned, or decommissioned: removing it (or pausing it) would undo or stop
+	 * that, so only those who may decommission may, freshly signed in.
+	 */
+	async function guardRetiring(
+		ctx: GenericEndpointContext,
+		row: TargetRow,
+		what: string,
+	) {
+		const state = await instance(ctx).decommission?.state(row.targetId);
+		if (state !== "running" && state !== "complete") return;
+		const actor = await decommissionActor(ctx, true).catch(() => null);
+		if (!actor || !may(actor, row.organizationId))
+			throw refuse(
+				"FORBIDDEN",
+				`its decommission is ${state}: only those who may decommission it may ${what} it (registry.decommissionRoles)`,
+			);
+	}
 
-  /** The row with this id, if the actor may see it; otherwise 404, so others' targets aren't confirmed to exist. */
-  async function rowFor(ctx: GenericEndpointContext, actor: Actor, id: string): Promise<TargetRow> {
-    const rows = (await adapterOf(ctx).findMany({ model: TARGET_MODEL, where: [{ field: "targetId", value: id }], limit: 2 })) as TargetRow[];
-    const row = rows.find((r) => r.targetId === id);
-    if (!row || !may(actor, row.organizationId)) throw refuse("NOT_FOUND", `no target ${id}`);
-    return row;
-  }
+	/** The row with this id, if the actor may see it; otherwise 404, so others' targets aren't confirmed to exist. */
+	async function rowFor(
+		ctx: GenericEndpointContext,
+		actor: Actor,
+		id: string,
+	): Promise<TargetRow> {
+		const rows = (await adapterOf(ctx).findMany({
+			model: TARGET_MODEL,
+			where: [{ field: "targetId", value: id }],
+			limit: 2,
+		})) as TargetRow[];
+		const row = rows.find((r) => r.targetId === id);
+		if (!row || !may(actor, row.organizationId))
+			throw refuse("NOT_FOUND", `no target ${id}`);
+		return row;
+	}
 
-  const settingsOf = (row: TargetRow): StoredSettings => {
-    try {
-      return storedSettingsSchema.parse(JSON.parse(row.config));
-    } catch {
-      return {};
-    }
-  };
+	const settingsOf = (row: TargetRow): StoredSettings => {
+		try {
+			return storedSettingsSchema.parse(JSON.parse(row.config));
+		} catch {
+			return {};
+		}
+	};
 
-  function view(row: TargetRow, credentials: StoredCredentials | null): StoredTargetView {
-    const settings = settingsOf(row);
-    return {
-      id: row.targetId,
-      organizationId: row.organizationId,
-      type: row.type,
-      enabled: truthy(row.enabled),
-      settings: { ...settings, ...(settings.url !== undefined ? { url: shownUrl(row.type, settings.url) } : {}) },
-      credentials: { kind: credentials ? credentialsKind(credentials) : "unreadable" },
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    };
-  }
-  const readable = async (ctx: GenericEndpointContext, row: TargetRow) => unseal(key(ctx), row).catch(() => null);
+	function view(
+		row: TargetRow,
+		credentials: StoredCredentials | null,
+	): StoredTargetView {
+		const settings = settingsOf(row);
+		return {
+			id: row.targetId,
+			organizationId: row.organizationId,
+			type: row.type,
+			enabled: truthy(row.enabled),
+			settings: {
+				...settings,
+				...(settings.url !== undefined
+					? { url: shownUrl(row.type, settings.url) }
+					: {}),
+			},
+			credentials: {
+				kind: credentials ? credentialsKind(credentials) : "unreadable",
+			},
+			createdAt: row.createdAt,
+			updatedAt: row.updatedAt,
+		};
+	}
+	const readable = async (ctx: GenericEndpointContext, row: TargetRow) =>
+		unseal(key(ctx), row).catch(() => null);
 
-  /** Throws 400 for settings too large to store, before anything parses them (GHSA-mrhx-c7xc-m3w5). */
-  const sized = (rawSettings: unknown) => {
-    if (JSON.stringify(rawSettings ?? {}).length > MAX_CONFIG_BYTES) throw refuse("BAD_REQUEST", "settings are too large");
-  };
+	/** Throws 400 for settings too large to store, before anything parses them (GHSA-mrhx-c7xc-m3w5). */
+	const sized = (rawSettings: unknown) => {
+		if (JSON.stringify(rawSettings ?? {}).length > MAX_CONFIG_BYTES)
+			throw refuse("BAD_REQUEST", "settings are too large");
+	};
 
-  /** Settings and credentials checked as a whole target; throws 400 with every problem. */
-  function check(ids: { targetId: string; organizationId: string }, rawSettings: unknown, rawCredentials: unknown) {
-    sized(rawSettings);
-    const settings = storedSettingsSchema.safeParse(rawSettings ?? {});
-    const credentials = storedCredentialsSchema.safeParse(rawCredentials);
-    const issues = [
-      ...(settings.success ? [] : settings.error.issues.map((i) => `settings${i.path.length ? `.${i.path.join(".")}` : ""}: ${i.message}`)),
-      ...(credentials.success ? [] : ["credentials: give token, auth, secret or privateKey (see the docs for each type), within their size limits"]),
-    ];
-    if (settings.success && credentials.success) {
-      issues.push(...storedProblems(settings.data, credentials.data, host.options?.allowHosts, host.options?.enterpriseFields, host.options?.attributeFields, host.userFields()));
-      if (!issues.length) {
-        // A profile refuses what its app can't do (githubEnterprise: deprovision "delete") by throwing.
-        let whole: Target | null = null;
-        try {
-          whole = assemble(ids, settings.data, credentials.data);
-        } catch (e) {
-          issues.push(`settings: ${(e as Error).message.replace(/^\[scim\]\s*/, "")}`);
-        }
-        if (whole) issues.push(...host.targetProblems(whole));
-      }
-    }
-    if (issues.length) throw refuse("BAD_REQUEST", "invalid target", issues);
-    const c = credentials.data as StoredCredentials;
-    // A token that's a JWT says when it expires: kept in the settings, so the scheduled run's
-    // check reads it there instead of decrypting every target's credentials.
-    const own = (settings.data as StoredSettings).credentialsExpireAt === undefined ? jwtExpiry("token" in c ? c.token : "auth" in c && c.auth.type === "header" ? c.auth.value.split(" ").pop() : undefined) : null;
-    return { settings: { ...(settings.data as StoredSettings), ...(own ? { credentialsExpireAt: own.toISOString() } : {}) }, credentials: c };
-  }
+	/** Settings and credentials checked as a whole target; throws 400 with every problem. */
+	function check(
+		ids: { targetId: string; organizationId: string },
+		rawSettings: unknown,
+		rawCredentials: unknown,
+	) {
+		sized(rawSettings);
+		const settings = storedSettingsSchema.safeParse(rawSettings ?? {});
+		const credentials = storedCredentialsSchema.safeParse(rawCredentials);
+		const issues = [
+			...(settings.success
+				? []
+				: settings.error.issues.map(
+						(i) =>
+							`settings${i.path.length ? `.${i.path.join(".")}` : ""}: ${i.message}`,
+					)),
+			...(credentials.success
+				? []
+				: [
+						"credentials: give token, auth, secret or privateKey (see the docs for each type), within their size limits",
+					]),
+		];
+		if (settings.success && credentials.success) {
+			issues.push(
+				...storedProblems(
+					settings.data,
+					credentials.data,
+					host.options?.allowHosts,
+					host.options?.enterpriseFields,
+					host.options?.attributeFields,
+					host.userFields(),
+				),
+			);
+			if (!issues.length) {
+				// A profile refuses what its app can't do (githubEnterprise: deprovision "delete") by throwing.
+				let whole: Target | null = null;
+				try {
+					whole = assemble(ids, settings.data, credentials.data);
+				} catch (e) {
+					issues.push(
+						`settings: ${(e as Error).message.replace(/^\[scim\]\s*/, "")}`,
+					);
+				}
+				if (whole) issues.push(...host.targetProblems(whole));
+			}
+		}
+		if (issues.length) throw refuse("BAD_REQUEST", "invalid target", issues);
+		const c = credentials.data as StoredCredentials;
+		// A token that's a JWT says when it expires: kept in the settings, so the scheduled run's
+		// check reads it there instead of decrypting every target's credentials.
+		const own =
+			(settings.data as StoredSettings).credentialsExpireAt === undefined
+				? jwtExpiry(
+						"token" in c
+							? c.token
+							: "auth" in c && c.auth.type === "header"
+								? c.auth.value.split(" ").pop()
+								: undefined,
+					)
+				: null;
+		return {
+			settings: {
+				...(settings.data as StoredSettings),
+				...(own ? { credentialsExpireAt: own.toISOString() } : {}),
+			},
+			credentials: c,
+		};
+	}
 
-  const page = z.object({ organizationId: z.string().min(1).max(256).optional(), limit: z.coerce.number().int().min(1).max(500).optional(), offset: z.coerce.number().int().min(0).optional() }).optional();
+	const page = z
+		.object({
+			organizationId: z.string().min(1).max(256).optional(),
+			limit: z.coerce.number().int().min(1).max(500).optional(),
+			offset: z.coerce.number().int().min(0).optional(),
+		})
+		.optional();
 
-  return {
-    /**
-     * The targets stored for an organization (one you administer), or, for a host administrator
-     * without `organizationId`, every one; `limit` (100) and `offset` for more.
-     */
-    scimProvisioningListTargets: createAuthEndpoint("/scim-provisioning/targets", { method: "GET", use: [sensitiveSessionMiddleware], query: page }, async (ctx) => {
-      const actor = await actorOf(ctx, host.options);
-      let organizationId = ctx.query?.organizationId;
-      if (!actor.host && organizationId === undefined) {
-        if (actor.organizations.size > 1) throw refuse("BAD_REQUEST", "organizationId: required (you administer several organizations)");
-        organizationId = [...actor.organizations][0];
-      }
-      if (organizationId !== undefined && !may(actor, organizationId)) throw refuse("FORBIDDEN", "not allowed");
-      const limit = ctx.query?.limit ?? 100;
-      const rows = (await adapterOf(ctx).findMany({
-        model: TARGET_MODEL,
-        ...(organizationId !== undefined ? { where: [{ field: "organizationId", value: organizationId }] } : {}),
-        limit: limit + 1,
-        offset: ctx.query?.offset ?? 0,
-        sortBy: { field: "targetId", direction: "asc" },
-      })) as TargetRow[];
-      const targets: StoredTargetView[] = [];
-      for (const r of rows.slice(0, limit)) if (organizationId === undefined || r.organizationId === organizationId) targets.push(view(r, await readable(ctx, r)));
-      return ctx.json({ targets, more: rows.length > limit });
-    }),
+	return {
+		/**
+		 * The targets stored for an organization (one you administer), or, for a host administrator
+		 * without `organizationId`, every one; `limit` (100) and `offset` for more.
+		 */
+		scimProvisioningListTargets: createAuthEndpoint(
+			"/scim-provisioning/targets",
+			{ method: "GET", use: [sensitiveSessionMiddleware], query: page },
+			async (ctx) => {
+				const actor = await actorOf(ctx, host.options);
+				let organizationId = ctx.query?.organizationId;
+				if (!actor.host && organizationId === undefined) {
+					if (actor.organizations.size > 1)
+						throw refuse(
+							"BAD_REQUEST",
+							"organizationId: required (you administer several organizations)",
+						);
+					organizationId = [...actor.organizations][0];
+				}
+				if (organizationId !== undefined && !may(actor, organizationId))
+					throw refuse("FORBIDDEN", "not allowed");
+				const limit = ctx.query?.limit ?? 100;
+				const rows = (await adapterOf(ctx).findMany({
+					model: TARGET_MODEL,
+					...(organizationId !== undefined
+						? { where: [{ field: "organizationId", value: organizationId }] }
+						: {}),
+					limit: limit + 1,
+					offset: ctx.query?.offset ?? 0,
+					sortBy: { field: "targetId", direction: "asc" },
+				})) as TargetRow[];
+				const targets: StoredTargetView[] = [];
+				for (const r of rows.slice(0, limit))
+					if (
+						organizationId === undefined ||
+						r.organizationId === organizationId
+					)
+						targets.push(view(r, await readable(ctx, r)));
+				return ctx.json({ targets, more: rows.length > limit });
+			},
+		),
 
-    /** Connect an app (or Google Workspace domain, or webhook) to an organization. Its id is generated. */
-    scimProvisioningCreateTarget: createAuthEndpoint(
-      "/scim-provisioning/targets/create",
-      {
-        method: "POST",
-        use: [sensitiveSessionMiddleware],
-        body: z.strictObject({
-          organizationId: z.string().min(1).max(256),
-          settings: z.unknown(),
-          credentials: z.unknown(),
-          enabled: z.boolean().optional(),
-          requestId: z.string().regex(REQUEST_ID, "8 to 128 letters, digits, and . _ : -").optional(),
-        }),
-      },
-      async (ctx) => {
-        const actor = await actorOf(ctx, host.options, { change: true });
-        const { organizationId, requestId } = ctx.body;
-        if (!may(actor, organizationId)) throw refuse("FORBIDDEN", "not allowed");
-        const adapter = adapterOf(ctx);
-        const org = (await adapter.findOne({ model: "organization", where: [{ field: "id", value: organizationId }] })) as { id: string } | null;
-        if (!org || org.id !== organizationId) throw refuse("BAD_REQUEST", `no organization ${organizationId}`);
-        let targetId = requestId ? await requestTargetId(organizationId, requestId) : `t-${crypto.randomUUID()}`;
-        while (!requestId && host.codeIds.some((c) => c.toLowerCase() === targetId)) targetId = `t-${crypto.randomUUID()}`;
-        if (host.codeIds.some((c) => c.toLowerCase() === targetId)) throw refuse("CONFLICT", "requestId: use another");
-        const { settings, credentials } = check({ targetId, organizationId }, ctx.body.settings, ctx.body.credentials);
-        const enabled = ctx.body.enabled ?? true;
-        /**
-         * A create with this requestId was made before: the same target again, or 409 if this asks
-         * for another. Queued again (one job, however many repeats), in case the first was cut
-         * short after the target was made, before its members were queued.
-         */
-        const replay = async (row: TargetRow) => {
-          const stored = await readable(ctx, row);
-          if (stored === null) throw refuse("CONFLICT", "requestId: the target it created has credentials that can't be read (was Better Auth's secret changed?); a new create needs a new requestId");
-          const same =
-            row.organizationId === organizationId &&
-            truthy(row.enabled) === enabled &&
-            canonical(settingsOf(row)) === canonical(settings) &&
-            canonical(stored) === canonical(credentials);
-          if (!same) throw refuse("CONFLICT", "requestId: already used to create a target with other settings, credentials or enabled (or it was changed since); a new create needs a new requestId");
-          await instance(ctx).resync(targetId, { resume: false });
-          return ctx.json({ target: view(row, credentials), replayed: true as const });
-        };
-        const made = async () => ((await adapter.findMany({ model: TARGET_MODEL, where: [{ field: "targetId", value: targetId }], limit: 2 })) as TargetRow[]).find((r) => r.targetId === targetId);
-        if (requestId) {
-          const before = await made();
-          if (before) return replay(before);
-          // Removed since: making it again would give a new target the old one's id, and its history
-          // (as long as the history keeps the old one's events: keepDays removes them).
-          if (instance(ctx).audit.on && (await instance(ctx).audit.list({ targetId, limit: 1 })).items.length)
-            throw refuse("CONFLICT", "requestId: the target it created was removed since; a new create needs a new requestId");
-        }
-        // Counted, then created: two creates at once can pass one over the cap; it's a guard against
-        // runaway use, not a quota. A repeat of a create (above) isn't counted again.
-        const max = host.options?.maxTargetsPerOrganization ?? 10;
-        const existing = ((await adapter.findMany({ model: TARGET_MODEL, where: [{ field: "organizationId", value: organizationId }], limit: max + 1 })) as TargetRow[]).filter((r) => r.organizationId === organizationId);
-        if (existing.length >= max) throw refuse("CONFLICT", `an organization has at most ${max} targets`);
-        const now = new Date();
-        let row: TargetRow;
-        try {
-          row = (await adapter.create({
-            model: TARGET_MODEL,
-            data: { targetId, organizationId, type: settings.type ?? "scim", config: JSON.stringify(settings), sealed: await seal(key(ctx), targetId, organizationId, credentials, settings), enabled, createdAt: now, updatedAt: now },
-          })) as TargetRow;
-        } catch (e) {
-          // Two at once with one requestId: the id is unique, so one is made, and the other is a repeat of it.
-          const winner = requestId ? await made() : undefined;
-          if (!winner) throw e;
-          return replay(winner);
-        }
-        await record(ctx, actor, { targetId, organizationId }, "target.created", { type: settings.type ?? "scim", url: settings.url !== undefined ? shownUrl(settings.type ?? "scim", settings.url) : (settings.google?.adminEmail.split("@")[1] ?? null), enabled });
-        audit(ctx, actor, `created target ${targetId} (${settings.type ?? "scim"}, ${settings.url !== undefined ? new URL(settings.url).host : (settings.google?.adminEmail.split("@")[1] ?? "")}) for organization ${organizationId}`);
-        // The organization's members and groups, queued (a disabled target's wait).
-        await instance(ctx).resync(targetId, { resume: false });
-        return ctx.json({ target: view(row, credentials) });
-      },
-    ),
+		/** Connect an app (or Google Workspace domain, or webhook) to an organization. Its id is generated. */
+		scimProvisioningCreateTarget: createAuthEndpoint(
+			"/scim-provisioning/targets/create",
+			{
+				method: "POST",
+				use: [sensitiveSessionMiddleware],
+				body: z.strictObject({
+					organizationId: z.string().min(1).max(256),
+					settings: z.unknown(),
+					credentials: z.unknown(),
+					enabled: z.boolean().optional(),
+					requestId: z
+						.string()
+						.regex(REQUEST_ID, "8 to 128 letters, digits, and . _ : -")
+						.optional(),
+				}),
+			},
+			async (ctx) => {
+				const actor = await actorOf(ctx, host.options, { change: true });
+				const { organizationId, requestId } = ctx.body;
+				if (!may(actor, organizationId))
+					throw refuse("FORBIDDEN", "not allowed");
+				const adapter = adapterOf(ctx);
+				const org = (await adapter.findOne({
+					model: "organization",
+					where: [{ field: "id", value: organizationId }],
+				})) as { id: string } | null;
+				if (!org || org.id !== organizationId)
+					throw refuse("BAD_REQUEST", `no organization ${organizationId}`);
+				let targetId = requestId
+					? await requestTargetId(organizationId, requestId)
+					: `t-${crypto.randomUUID()}`;
+				while (
+					!requestId &&
+					host.codeIds.some((c) => c.toLowerCase() === targetId)
+				)
+					targetId = `t-${crypto.randomUUID()}`;
+				if (host.codeIds.some((c) => c.toLowerCase() === targetId))
+					throw refuse("CONFLICT", "requestId: use another");
+				const { settings, credentials } = check(
+					{ targetId, organizationId },
+					ctx.body.settings,
+					ctx.body.credentials,
+				);
+				const enabled = ctx.body.enabled ?? true;
+				/**
+				 * A create with this requestId was made before: the same target again, or 409 if this asks
+				 * for another. Queued again (one job, however many repeats), in case the first was cut
+				 * short after the target was made, before its members were queued.
+				 */
+				const replay = async (row: TargetRow) => {
+					const stored = await readable(ctx, row);
+					if (stored === null)
+						throw refuse(
+							"CONFLICT",
+							"requestId: the target it created has credentials that can't be read (was Better Auth's secret changed?); a new create needs a new requestId",
+						);
+					const same =
+						row.organizationId === organizationId &&
+						truthy(row.enabled) === enabled &&
+						canonical(settingsOf(row)) === canonical(settings) &&
+						canonical(stored) === canonical(credentials);
+					if (!same)
+						throw refuse(
+							"CONFLICT",
+							"requestId: already used to create a target with other settings, credentials or enabled (or it was changed since); a new create needs a new requestId",
+						);
+					await instance(ctx).resync(targetId, { resume: false });
+					return ctx.json({
+						target: view(row, credentials),
+						replayed: true as const,
+					});
+				};
+				const made = async () =>
+					(
+						(await adapter.findMany({
+							model: TARGET_MODEL,
+							where: [{ field: "targetId", value: targetId }],
+							limit: 2,
+						})) as TargetRow[]
+					).find((r) => r.targetId === targetId);
+				if (requestId) {
+					const before = await made();
+					if (before) return replay(before);
+					// Removed since: making it again would give a new target the old one's id, and its history
+					// (as long as the history keeps the old one's events: keepDays removes them).
+					if (
+						instance(ctx).audit.on &&
+						(await instance(ctx).audit.list({ targetId, limit: 1 })).items
+							.length
+					)
+						throw refuse(
+							"CONFLICT",
+							"requestId: the target it created was removed since; a new create needs a new requestId",
+						);
+				}
+				// Counted, then created: two creates at once can pass one over the cap; it's a guard against
+				// runaway use, not a quota. A repeat of a create (above) isn't counted again.
+				const max = host.options?.maxTargetsPerOrganization ?? 10;
+				const existing = (
+					(await adapter.findMany({
+						model: TARGET_MODEL,
+						where: [{ field: "organizationId", value: organizationId }],
+						limit: max + 1,
+					})) as TargetRow[]
+				).filter((r) => r.organizationId === organizationId);
+				if (existing.length >= max)
+					throw refuse(
+						"CONFLICT",
+						`an organization has at most ${max} targets`,
+					);
+				const now = new Date();
+				let row: TargetRow;
+				try {
+					row = (await adapter.create({
+						model: TARGET_MODEL,
+						data: {
+							targetId,
+							organizationId,
+							type: settings.type ?? "scim",
+							config: JSON.stringify(settings),
+							sealed: await seal(
+								key(ctx),
+								targetId,
+								organizationId,
+								credentials,
+								settings,
+							),
+							enabled,
+							createdAt: now,
+							updatedAt: now,
+						},
+					})) as TargetRow;
+				} catch (e) {
+					// Two at once with one requestId: the id is unique, so one is made, and the other is a repeat of it.
+					const winner = requestId ? await made() : undefined;
+					if (!winner) throw e;
+					return replay(winner);
+				}
+				await record(
+					ctx,
+					actor,
+					{ targetId, organizationId },
+					"target.created",
+					{
+						type: settings.type ?? "scim",
+						url:
+							settings.url !== undefined
+								? shownUrl(settings.type ?? "scim", settings.url)
+								: (settings.google?.adminEmail.split("@")[1] ?? null),
+						enabled,
+					},
+				);
+				audit(
+					ctx,
+					actor,
+					`created target ${targetId} (${settings.type ?? "scim"}, ${settings.url !== undefined ? new URL(settings.url).host : (settings.google?.adminEmail.split("@")[1] ?? "")}) for organization ${organizationId}`,
+				);
+				// The organization's members and groups, queued (a disabled target's wait).
+				await instance(ctx).resync(targetId, { resume: false });
+				return ctx.json({ target: view(row, credentials) });
+			},
+		),
 
-    /**
-     * Change a target: `settings` replaces its settings (its type stays), `credentials` its
-     * credentials, `enabled` pauses or resumes it (a paused target's jobs wait). What isn't
-     * given stays as it was, except that changing where it sends (its URL, or Google's
-     * service account or admin) needs the credentials given again. Any change queues the
-     * organization again, so it applies to everyone at once.
-     */
-    scimProvisioningUpdateTarget: createAuthEndpoint(
-      "/scim-provisioning/targets/update",
-      {
-        method: "POST",
-        use: [sensitiveSessionMiddleware],
-        body: z.strictObject({ id: z.string().min(1).max(100), settings: z.unknown().optional(), credentials: z.unknown().optional(), enabled: z.boolean().optional() }),
-      },
-      async (ctx) => {
-        const actor = await actorOf(ctx, host.options, { change: true });
-        const row = await rowFor(ctx, actor, ctx.body.id);
-        const update: Record<string, unknown> = { updatedAt: new Date() };
-        let current: StoredCredentials | null = null;
-        const before = settingsOf(row);
-        let after = before;
-        if (ctx.body.settings !== undefined || ctx.body.credentials !== undefined) {
-          // New credentials come with their own expiry: the old one goes, unless the settings give it.
-          const { credentialsExpireAt: _old, ...kept } = before;
-          const settings = ctx.body.settings !== undefined ? ctx.body.settings : ctx.body.credentials !== undefined ? kept : before;
-          const type = (settings as { type?: unknown } | null)?.type ?? "scim";
-          if (type !== row.type) throw refuse("BAD_REQUEST", `a target's type can't change (it's ${row.type}): remove it and connect a new one`);
-          sized(settings);
-          const parsed = storedSettingsSchema.safeParse(settings);
-          const moves = parsed.success && destination(parsed.data) !== destination(before);
-          if (ctx.body.credentials === undefined) {
-            if (moves) throw refuse("BAD_REQUEST", "changing where a target sends (its URL, or Google's clientEmail or adminEmail) needs its credentials given again");
-            current = await readable(ctx, row);
-            if (!current) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give credentials too");
-          }
-          // Its accounts are at this app: a decommission under way, or done, stays with it.
-          const decommission = moves ? await instance(ctx).decommission?.state(row.targetId) : null;
-          if (decommission === "running" || decommission === "complete") throw refuse("BAD_REQUEST", "a target being decommissioned (or decommissioned) can't be pointed at another app: connect a new target for that");
-          const checked = check(row, settings, ctx.body.credentials ?? current);
-          current = checked.credentials;
-          after = checked.settings;
-          update.config = JSON.stringify(checked.settings);
-          if (ctx.body.credentials !== undefined) update.sealed = await seal(key(ctx), row.targetId, row.organizationId, checked.credentials, checked.settings);
-        }
-        if (ctx.body.enabled === false && truthy(row.enabled)) await guardRetiring(ctx, row, "pause");
-        if (ctx.body.enabled !== undefined) update.enabled = ctx.body.enabled;
-        // Only over the row as read: two changes at once mustn't mix one's URL with the other's
-        // credentials. The loser is told to try again.
-        const written = await adapterOf(ctx).updateMany({
-          model: TARGET_MODEL,
-          where: [
-            { field: "id", value: row.id },
-            { field: "config", value: row.config },
-            { field: "sealed", value: row.sealed },
-          ],
-          update,
-        });
-        if (written === 0) throw refuse("CONFLICT", "the target was changed meanwhile: read it again and retry");
-        const saved = { ...row, ...update } as TargetRow;
-        // Settings are written again with new credentials: changed only if they differ.
-        const changed = Object.keys(update)
-          .filter((k) => k !== "updatedAt" && (k !== "config" || update.config !== row.config))
-          .map((k) => (k === "sealed" ? "credentials" : k === "config" ? "settings" : k));
-        await record(ctx, actor, row, "target.updated", { changed, ...(changed.includes("settings") && after.url !== undefined ? { url: shownUrl(row.type, after.url) } : {}), enabled: truthy(saved.enabled) });
-        audit(ctx, actor, `updated target ${row.targetId} (${Object.keys(update).filter((k) => k !== "updatedAt").map((k) => (k === "sealed" ? "credentials" : k === "config" ? "settings" : k)).join(", ") || "nothing"})`);
-        // What's to be sent changed (settings beyond the label, new credentials, enabled): queued
-        // again for everyone, and what was waiting or failed goes again (new credentials or a
-        // re-enabled target). Pausing, or renaming the label, sends nothing new.
-        const { name: _a, credentialsExpireAt: _c, ...sendsBefore } = before;
-        const { name: _b, credentialsExpireAt: _d, ...sendsAfter } = after;
-        const settingsChanged = JSON.stringify(sendsBefore) !== JSON.stringify(sendsAfter);
-        const resume = ctx.body.credentials !== undefined || (ctx.body.enabled === true && !truthy(row.enabled));
-        if (settingsChanged || resume) await instance(ctx).resync(row.targetId, { resume });
-        return ctx.json({ target: view(saved, current ?? (await readable(ctx, saved))) });
-      },
-    ),
+		/**
+		 * Change a target: `settings` replaces its settings (its type stays), `credentials` its
+		 * credentials, `enabled` pauses or resumes it (a paused target's jobs wait). What isn't
+		 * given stays as it was, except that changing where it sends (its URL, or Google's
+		 * service account or admin) needs the credentials given again. Any change queues the
+		 * organization again, so it applies to everyone at once.
+		 */
+		scimProvisioningUpdateTarget: createAuthEndpoint(
+			"/scim-provisioning/targets/update",
+			{
+				method: "POST",
+				use: [sensitiveSessionMiddleware],
+				body: z.strictObject({
+					id: z.string().min(1).max(100),
+					settings: z.unknown().optional(),
+					credentials: z.unknown().optional(),
+					enabled: z.boolean().optional(),
+				}),
+			},
+			async (ctx) => {
+				const actor = await actorOf(ctx, host.options, { change: true });
+				const row = await rowFor(ctx, actor, ctx.body.id);
+				const update: Record<string, unknown> = { updatedAt: new Date() };
+				let current: StoredCredentials | null = null;
+				const before = settingsOf(row);
+				let after = before;
+				if (
+					ctx.body.settings !== undefined ||
+					ctx.body.credentials !== undefined
+				) {
+					// New credentials come with their own expiry: the old one goes, unless the settings give it.
+					const { credentialsExpireAt: _old, ...kept } = before;
+					const settings =
+						ctx.body.settings !== undefined
+							? ctx.body.settings
+							: ctx.body.credentials !== undefined
+								? kept
+								: before;
+					const type = (settings as { type?: unknown } | null)?.type ?? "scim";
+					if (type !== row.type)
+						throw refuse(
+							"BAD_REQUEST",
+							`a target's type can't change (it's ${row.type}): remove it and connect a new one`,
+						);
+					sized(settings);
+					const parsed = storedSettingsSchema.safeParse(settings);
+					const moves =
+						parsed.success && destination(parsed.data) !== destination(before);
+					if (ctx.body.credentials === undefined) {
+						if (moves)
+							throw refuse(
+								"BAD_REQUEST",
+								"changing where a target sends (its URL, or Google's clientEmail or adminEmail) needs its credentials given again",
+							);
+						current = await readable(ctx, row);
+						if (!current)
+							throw refuse(
+								"BAD_REQUEST",
+								"its stored credentials can't be read (was the secret changed?): give credentials too",
+							);
+					}
+					// Its accounts are at this app: a decommission under way, or done, stays with it.
+					const decommission = moves
+						? await instance(ctx).decommission?.state(row.targetId)
+						: null;
+					if (decommission === "running" || decommission === "complete")
+						throw refuse(
+							"BAD_REQUEST",
+							"a target being decommissioned (or decommissioned) can't be pointed at another app: connect a new target for that",
+						);
+					const checked = check(row, settings, ctx.body.credentials ?? current);
+					current = checked.credentials;
+					after = checked.settings;
+					update.config = JSON.stringify(checked.settings);
+					if (ctx.body.credentials !== undefined)
+						update.sealed = await seal(
+							key(ctx),
+							row.targetId,
+							row.organizationId,
+							checked.credentials,
+							checked.settings,
+						);
+				}
+				if (ctx.body.enabled === false && truthy(row.enabled))
+					await guardRetiring(ctx, row, "pause");
+				if (ctx.body.enabled !== undefined) update.enabled = ctx.body.enabled;
+				// Only over the row as read: two changes at once mustn't mix one's URL with the other's
+				// credentials. The loser is told to try again.
+				const written = await adapterOf(ctx).updateMany({
+					model: TARGET_MODEL,
+					where: [
+						{ field: "id", value: row.id },
+						{ field: "config", value: row.config },
+						{ field: "sealed", value: row.sealed },
+					],
+					update,
+				});
+				if (written === 0)
+					throw refuse(
+						"CONFLICT",
+						"the target was changed meanwhile: read it again and retry",
+					);
+				const saved = { ...row, ...update } as TargetRow;
+				// Settings are written again with new credentials: changed only if they differ.
+				const changed = Object.keys(update)
+					.filter(
+						(k) =>
+							k !== "updatedAt" &&
+							(k !== "config" || update.config !== row.config),
+					)
+					.map((k) =>
+						k === "sealed" ? "credentials" : k === "config" ? "settings" : k,
+					);
+				await record(ctx, actor, row, "target.updated", {
+					changed,
+					...(changed.includes("settings") && after.url !== undefined
+						? { url: shownUrl(row.type, after.url) }
+						: {}),
+					enabled: truthy(saved.enabled),
+				});
+				audit(
+					ctx,
+					actor,
+					`updated target ${row.targetId} (${
+						Object.keys(update)
+							.filter((k) => k !== "updatedAt")
+							.map((k) =>
+								k === "sealed"
+									? "credentials"
+									: k === "config"
+										? "settings"
+										: k,
+							)
+							.join(", ") || "nothing"
+					})`,
+				);
+				// What's to be sent changed (settings beyond the label, new credentials, enabled): queued
+				// again for everyone, and what was waiting or failed goes again (new credentials or a
+				// re-enabled target). Pausing, or renaming the label, sends nothing new.
+				const { name: _a, credentialsExpireAt: _c, ...sendsBefore } = before;
+				const { name: _b, credentialsExpireAt: _d, ...sendsAfter } = after;
+				const settingsChanged =
+					JSON.stringify(sendsBefore) !== JSON.stringify(sendsAfter);
+				const resume =
+					ctx.body.credentials !== undefined ||
+					(ctx.body.enabled === true && !truthy(row.enabled));
+				if (settingsChanged || resume)
+					await instance(ctx).resync(row.targetId, { resume });
+				return ctx.json({
+					target: view(saved, current ?? (await readable(ctx, saved))),
+				});
+			},
+		),
 
-    /**
-     * Remove a target, with its queued jobs and its record of the accounts and groups it made.
-     * The accounts at the app stay as they are, and nothing tells the app any more: decommission
-     * it first if they should go. Says what it left there (`abandoned`: accounts still active,
-     * groups). With `registry.deleteRequiresDecommission`, refused while accounts are still active,
-     * unless `abandon: true` (an app that's gone).
-     */
-    scimProvisioningDeleteTarget: createAuthEndpoint(
-      "/scim-provisioning/targets/delete",
-      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100), abandon: z.literal(true).optional() }) },
-      async (ctx) => {
-        const actor = await actorOf(ctx, host.options, { change: true });
-        const row = await rowFor(ctx, actor, ctx.body.id);
-        await guardRetiring(ctx, row, "remove");
-        const adapter = adapterOf(ctx);
-        const abandoned = await instance(ctx).counts(row.targetId);
-        if (host.options?.deleteRequiresDecommission && abandoned.accounts > 0 && !ctx.body.abandon)
-          throw refuse("CONFLICT", `${abandoned.accounts} accounts made through this target are still active at the app: decommission it first, or delete with abandon: true to leave them as they are`);
-        // The target first: deliveries look it up each time, so none starts after this. One
-        // already under way can still record its account; that record is of a target that no
-        // longer exists, and nothing reads it. Generated ids never differ from another target's
-        // only in case, so these can't reach another's rows on a case-insensitive database.
-        await adapter.deleteMany({ model: TARGET_MODEL, where: [{ field: "id", value: row.id }] });
-        for (const model of [JOB_MODEL, LINK_MODEL, GROUP_LINK_MODEL, ...(instance(ctx).decommission ? [DECOMMISSION_MODEL] : [])]) await adapter.deleteMany({ model, where: [{ field: "targetId", value: row.targetId }] });
-        await adapter.deleteMany({ model: JOB_MODEL, where: [{ field: "key", value: credentialsMarkerKey(row.targetId) }] });
-        await record(ctx, actor, row, "target.deleted", { abandoned });
-        audit(ctx, actor, `deleted target ${row.targetId} of organization ${row.organizationId}${abandoned.accounts || abandoned.groups ? `, leaving ${abandoned.accounts} active accounts and ${abandoned.groups} groups at the app` : ""}`);
-        return ctx.json({ deleted: true, abandoned });
-      },
-    ),
+		/**
+		 * Remove a target, with its queued jobs and its record of the accounts and groups it made.
+		 * The accounts at the app stay as they are, and nothing tells the app any more: decommission
+		 * it first if they should go. Says what it left there (`abandoned`: accounts still active,
+		 * groups). With `registry.deleteRequiresDecommission`, refused while accounts are still active,
+		 * unless `abandon: true` (an app that's gone).
+		 */
+		scimProvisioningDeleteTarget: createAuthEndpoint(
+			"/scim-provisioning/targets/delete",
+			{
+				method: "POST",
+				use: [sensitiveSessionMiddleware],
+				body: z.strictObject({
+					id: z.string().min(1).max(100),
+					abandon: z.literal(true).optional(),
+				}),
+			},
+			async (ctx) => {
+				const actor = await actorOf(ctx, host.options, { change: true });
+				const row = await rowFor(ctx, actor, ctx.body.id);
+				await guardRetiring(ctx, row, "remove");
+				const adapter = adapterOf(ctx);
+				const abandoned = await instance(ctx).counts(row.targetId);
+				if (
+					host.options?.deleteRequiresDecommission &&
+					abandoned.accounts > 0 &&
+					!ctx.body.abandon
+				)
+					throw refuse(
+						"CONFLICT",
+						`${abandoned.accounts} accounts made through this target are still active at the app: decommission it first, or delete with abandon: true to leave them as they are`,
+					);
+				// The target first: deliveries look it up each time, so none starts after this. One
+				// already under way can still record its account; that record is of a target that no
+				// longer exists, and nothing reads it. Generated ids never differ from another target's
+				// only in case, so these can't reach another's rows on a case-insensitive database.
+				await adapter.deleteMany({
+					model: TARGET_MODEL,
+					where: [{ field: "id", value: row.id }],
+				});
+				for (const model of [
+					JOB_MODEL,
+					LINK_MODEL,
+					GROUP_LINK_MODEL,
+					...(instance(ctx).decommission ? [DECOMMISSION_MODEL] : []),
+				])
+					await adapter.deleteMany({
+						model,
+						where: [{ field: "targetId", value: row.targetId }],
+					});
+				await adapter.deleteMany({
+					model: JOB_MODEL,
+					where: [{ field: "key", value: credentialsMarkerKey(row.targetId) }],
+				});
+				await record(ctx, actor, row, "target.deleted", { abandoned });
+				audit(
+					ctx,
+					actor,
+					`deleted target ${row.targetId} of organization ${row.organizationId}${abandoned.accounts || abandoned.groups ? `, leaving ${abandoned.accounts} active accounts and ${abandoned.groups} groups at the app` : ""}`,
+				);
+				return ctx.json({ deleted: true, abandoned });
+			},
+		),
 
-    /**
-     * Try a target's URL and credentials without changing anything: a lookup of a user who
-     * doesn't exist (SCIM; Google Workspace, in the admin's domain). Webhooks have no request
-     * that changes nothing. Says what went wrong in broad terms only.
-     */
-    scimProvisioningCheckTarget: createAuthEndpoint(
-      "/scim-provisioning/targets/check",
-      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100) }) },
-      async (ctx) => {
-        const actor = await actorOf(ctx, host.options);
-        const row = await rowFor(ctx, actor, ctx.body.id);
-        const credentials = await readable(ctx, row);
-        if (!credentials) return ctx.json({ ok: false, problem: "its stored credentials can't be read (was the secret changed?): give them again" });
-        const settings = settingsOf(row);
-        // Through the same fetch as deliveries: the registry's own, or the resolving guard.
-        const target = assemble(row, settings, credentials, host.options?.fetch ?? guardedFetch(host.options?.allowHosts));
-        if (target.type === "webhook") return ctx.json({ ok: null, problem: "a webhook has no request that changes nothing: its first event is the check" });
-        const domain = target.type === "google-workspace" ? (settings.google?.adminEmail.split("@")[1] ?? "example.invalid") : "example.invalid";
-        try {
-          await clientFor(target).findByUserName(`scim-provisioning-check-${crypto.randomUUID().slice(0, 8)}@${domain}`);
-          return ctx.json({ ok: true });
-        } catch (e) {
-          return ctx.json(checkResult(e));
-        }
-      },
-    ),
+		/**
+		 * Try a target's URL and credentials without changing anything: a lookup of a user who
+		 * doesn't exist (SCIM; Google Workspace, in the admin's domain). Webhooks have no request
+		 * that changes nothing. Says what went wrong in broad terms only.
+		 */
+		scimProvisioningCheckTarget: createAuthEndpoint(
+			"/scim-provisioning/targets/check",
+			{
+				method: "POST",
+				use: [sensitiveSessionMiddleware],
+				body: z.strictObject({ id: z.string().min(1).max(100) }),
+			},
+			async (ctx) => {
+				const actor = await actorOf(ctx, host.options);
+				const row = await rowFor(ctx, actor, ctx.body.id);
+				const credentials = await readable(ctx, row);
+				if (!credentials)
+					return ctx.json({
+						ok: false,
+						problem:
+							"its stored credentials can't be read (was the secret changed?): give them again",
+					});
+				const settings = settingsOf(row);
+				// Through the same fetch as deliveries: the registry's own, or the resolving guard.
+				const target = assemble(
+					row,
+					settings,
+					credentials,
+					host.options?.fetch ?? guardedFetch(host.options?.allowHosts),
+				);
+				if (target.type === "webhook")
+					return ctx.json({
+						ok: null,
+						problem:
+							"a webhook has no request that changes nothing: its first event is the check",
+					});
+				const domain =
+					target.type === "google-workspace"
+						? (settings.google?.adminEmail.split("@")[1] ?? "example.invalid")
+						: "example.invalid";
+				try {
+					await clientFor(target).findByUserName(
+						`scim-provisioning-check-${crypto.randomUUID().slice(0, 8)}@${domain}`,
+					);
+					return ctx.json({ ok: true });
+				} catch (e) {
+					return ctx.json(checkResult(e));
+				}
+			},
+		),
 
-    /** A target's deliveries: what's queued, waiting, stuck and failed, and the latest failures (their status, not the app's words). */
-    scimProvisioningTargetStatus: createAuthEndpoint(
-      "/scim-provisioning/targets/status",
-      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100) }) },
-      async (ctx) => {
-        const actor = await actorOf(ctx, host.options);
-        const row = await rowFor(ctx, actor, ctx.body.id);
-        const i = instance(ctx);
-        return ctx.json({ ...(await i.status(row.targetId)), failures: await i.failures(row.targetId), ...(i.decommission ? { decommission: await i.decommission.status(row.targetId) } : {}) });
-      },
-    ),
+		/** A target's deliveries: what's queued, waiting, stuck and failed, and the latest failures (their status, not the app's words). */
+		scimProvisioningTargetStatus: createAuthEndpoint(
+			"/scim-provisioning/targets/status",
+			{
+				method: "POST",
+				use: [sensitiveSessionMiddleware],
+				body: z.strictObject({ id: z.string().min(1).max(100) }),
+			},
+			async (ctx) => {
+				const actor = await actorOf(ctx, host.options);
+				const row = await rowFor(ctx, actor, ctx.body.id);
+				const i = instance(ctx);
+				return ctx.json({
+					...(await i.status(row.targetId)),
+					failures: await i.failures(row.targetId),
+					...(i.decommission
+						? { decommission: await i.decommission.status(row.targetId) }
+						: {}),
+				});
+			},
+		),
 
-    /**
-     * Decommission a target (with the plugin's `decommission`): deactivate every account and empty
-     * every group made through it, deleting nothing (see `scimProvisioningDecommission`).
-     * `preview: true` says how many; starting needs `confirm` equal to the accounts it showed.
-     * `cancel: true`, before it completes, stops it and switches back on those still wanted. Only
-     * `registry.decommissionRoles` (owners, by default) and the host's administrators, signed in
-     * within `registry.decommissionFreshAge` (15 minutes). Its progress is in the status route.
-     */
-    scimProvisioningDecommissionTarget: createAuthEndpoint(
-      "/scim-provisioning/targets/decommission",
-      {
-        method: "POST",
-        use: [sensitiveSessionMiddleware],
-        body: z
-          .strictObject({
-            id: z.string().min(1).max(100),
-            phase: z.enum(["deactivate", "purge"]).optional(),
-            preview: z.literal(true).optional(),
-            confirm: z.number().int().min(0).optional(),
-            cancel: z.literal(true).optional(),
-            forget: z.array(z.string().min(1).max(256)).min(1).max(100).optional(),
-          })
-          .refine((b) => !(b.preview && b.cancel), "preview or cancel, not both")
-          .refine((b) => !b.forget || (!b.preview && !b.cancel && b.confirm === undefined), "forget goes alone"),
-      },
-      async (ctx) => {
-        const preview = ctx.body.preview === true;
-        const actor = await decommissionActor(ctx, !preview);
-        const row = await rowFor(ctx, actor, ctx.body.id);
-        const i = instance(ctx);
-        const d = i.decommission;
-        if (!d) throw refuse("BAD_REQUEST", "decommissioning isn't enabled (the plugin's decommission option)");
-        const by = `user:${actor.userId}`;
-        if (ctx.body.forget) {
-          const done = await d.forget(row.targetId, ctx.body.forget, by);
-          if (done === null) throw refuse("BAD_REQUEST", "accounts are forgotten only while a decommission runs, or once it's complete");
-          if (done.forgotten.length) {
-            await record(ctx, actor, row, "decommission.forgot", { userIds: done.forgotten, skipped: done.skipped.length });
-            audit(ctx, actor, `forgot ${done.forgotten.length} accounts of target ${row.targetId} of organization ${row.organizationId}, left at the app as they are: ${done.forgotten.join(", ")}`);
-          }
-          i.kick(row.targetId);
-          return ctx.json({ forgotten: done.forgotten.length, skipped: done.skipped, decommission: await d.status(row.targetId) });
-        }
-        if (ctx.body.cancel) {
-          if (!(await d.cancel(row.targetId, by))) throw refuse("BAD_REQUEST", "no decommission is running that can be cancelled (a complete one, or a purge, can't be)");
-          const left = await i.counts(row.targetId);
-          await record(ctx, actor, row, "decommission.cancelled", left);
-          audit(ctx, actor, `cancelled the decommission of target ${row.targetId} of organization ${row.organizationId}: ${left.accounts} accounts still active there; every account and group queued again`);
-          i.kick(row.targetId);
-          return ctx.json({ decommission: await d.status(row.targetId) });
-        }
-        if (ctx.body.phase === "purge") {
-          const counts = await i.counts(row.targetId, "purge");
-          if (preview) return ctx.json({ ...counts, shared: await i.shared(row.targetId, "purge"), decommission: await d.status(row.targetId) });
-          const current = await d.row(row.targetId);
-          if (current?.phase === "purge" && current.state === "complete") throw refuse("BAD_REQUEST", "its purge is complete");
-          if (current?.phase !== "purge") {
-            if (current?.state !== "complete") throw refuse("BAD_REQUEST", "a purge comes after a complete decommission");
-            if (!truthy(row.enabled)) throw refuse("BAD_REQUEST", "the target is disabled: enable it first");
-            if (!(await readable(ctx, row))) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give them again first");
-            if (counts.accounts > PURGE_CONFIRM_ABOVE && ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)`);
-            if (await d.purge(row.targetId, by)) {
-              await record(ctx, actor, row, "purge.started", counts);
-              audit(ctx, actor, `started purging target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts and ${counts.groups} groups to delete`);
-            }
-          } else await d.purge(row.targetId, by);
-          i.kick(row.targetId);
-          return ctx.json({ decommission: await d.status(row.targetId) });
-        }
-        const counts = await i.counts(row.targetId);
-        if (preview) return ctx.json({ ...counts, shared: await i.shared(row.targetId), decommission: await d.status(row.targetId) });
-        const state = await d.state(row.targetId);
-        if (state === "complete") throw refuse("BAD_REQUEST", "its decommission is complete");
-        if (state !== "running") {
-          // Its deliveries must be able to reach the app.
-          if (!truthy(row.enabled)) throw refuse("BAD_REQUEST", "the target is disabled: enable it first");
-          if (!(await readable(ctx, row))) throw refuse("BAD_REQUEST", "its stored credentials can't be read (was the secret changed?): give them again first");
-          if (ctx.body.confirm !== counts.accounts) throw refuse("BAD_REQUEST", `confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)`);
-          if (await d.start(row.targetId, by)) {
-            await record(ctx, actor, row, "decommission.started", counts);
-            audit(ctx, actor, `started decommissioning target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`);
-          }
-        } else await d.start(row.targetId, by);
-        i.kick(row.targetId);
-        return ctx.json({ decommission: await d.status(row.targetId) });
-      },
-    ),
+		/**
+		 * Decommission a target (with the plugin's `decommission`): deactivate every account and empty
+		 * every group made through it, deleting nothing (see `scimProvisioningDecommission`).
+		 * `preview: true` says how many; starting needs `confirm` equal to the accounts it showed.
+		 * `cancel: true`, before it completes, stops it and switches back on those still wanted. Only
+		 * `registry.decommissionRoles` (owners, by default) and the host's administrators, signed in
+		 * within `registry.decommissionFreshAge` (15 minutes). Its progress is in the status route.
+		 */
+		scimProvisioningDecommissionTarget: createAuthEndpoint(
+			"/scim-provisioning/targets/decommission",
+			{
+				method: "POST",
+				use: [sensitiveSessionMiddleware],
+				body: z
+					.strictObject({
+						id: z.string().min(1).max(100),
+						phase: z.enum(["deactivate", "purge"]).optional(),
+						preview: z.literal(true).optional(),
+						confirm: z.number().int().min(0).optional(),
+						cancel: z.literal(true).optional(),
+						forget: z
+							.array(z.string().min(1).max(256))
+							.min(1)
+							.max(100)
+							.optional(),
+					})
+					.refine(
+						(b) => !(b.preview && b.cancel),
+						"preview or cancel, not both",
+					)
+					.refine(
+						(b) =>
+							!b.forget || (!b.preview && !b.cancel && b.confirm === undefined),
+						"forget goes alone",
+					),
+			},
+			async (ctx) => {
+				const preview = ctx.body.preview === true;
+				const actor = await decommissionActor(ctx, !preview);
+				const row = await rowFor(ctx, actor, ctx.body.id);
+				const i = instance(ctx);
+				const d = i.decommission;
+				if (!d)
+					throw refuse(
+						"BAD_REQUEST",
+						"decommissioning isn't enabled (the plugin's decommission option)",
+					);
+				const by = `user:${actor.userId}`;
+				if (ctx.body.forget) {
+					const done = await d.forget(row.targetId, ctx.body.forget, by);
+					if (done === null)
+						throw refuse(
+							"BAD_REQUEST",
+							"accounts are forgotten only while a decommission runs, or once it's complete",
+						);
+					if (done.forgotten.length) {
+						await record(ctx, actor, row, "decommission.forgot", {
+							userIds: done.forgotten,
+							skipped: done.skipped.length,
+						});
+						audit(
+							ctx,
+							actor,
+							`forgot ${done.forgotten.length} accounts of target ${row.targetId} of organization ${row.organizationId}, left at the app as they are: ${done.forgotten.join(", ")}`,
+						);
+					}
+					i.kick(row.targetId);
+					return ctx.json({
+						forgotten: done.forgotten.length,
+						skipped: done.skipped,
+						decommission: await d.status(row.targetId),
+					});
+				}
+				if (ctx.body.cancel) {
+					if (!(await d.cancel(row.targetId, by)))
+						throw refuse(
+							"BAD_REQUEST",
+							"no decommission is running that can be cancelled (a complete one, or a purge, can't be)",
+						);
+					const left = await i.counts(row.targetId);
+					await record(ctx, actor, row, "decommission.cancelled", left);
+					audit(
+						ctx,
+						actor,
+						`cancelled the decommission of target ${row.targetId} of organization ${row.organizationId}: ${left.accounts} accounts still active there; every account and group queued again`,
+					);
+					i.kick(row.targetId);
+					return ctx.json({ decommission: await d.status(row.targetId) });
+				}
+				if (ctx.body.phase === "purge") {
+					const counts = await i.counts(row.targetId, "purge");
+					if (preview)
+						return ctx.json({
+							...counts,
+							shared: await i.shared(row.targetId, "purge"),
+							decommission: await d.status(row.targetId),
+						});
+					const current = await d.row(row.targetId);
+					if (current?.phase === "purge" && current.state === "complete")
+						throw refuse("BAD_REQUEST", "its purge is complete");
+					if (current?.phase !== "purge") {
+						if (current?.state !== "complete")
+							throw refuse(
+								"BAD_REQUEST",
+								"a purge comes after a complete decommission",
+							);
+						if (!truthy(row.enabled))
+							throw refuse(
+								"BAD_REQUEST",
+								"the target is disabled: enable it first",
+							);
+						if (!(await readable(ctx, row)))
+							throw refuse(
+								"BAD_REQUEST",
+								"its stored credentials can't be read (was the secret changed?): give them again first",
+							);
+						if (
+							counts.accounts > PURGE_CONFIRM_ABOVE &&
+							ctx.body.confirm !== counts.accounts
+						)
+							throw refuse(
+								"BAD_REQUEST",
+								`confirm the number of accounts to delete: ${counts.accounts} (preview: true shows it)`,
+							);
+						if (await d.purge(row.targetId, by)) {
+							await record(ctx, actor, row, "purge.started", counts);
+							audit(
+								ctx,
+								actor,
+								`started purging target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts and ${counts.groups} groups to delete`,
+							);
+						}
+					} else await d.purge(row.targetId, by);
+					i.kick(row.targetId);
+					return ctx.json({ decommission: await d.status(row.targetId) });
+				}
+				const counts = await i.counts(row.targetId);
+				if (preview)
+					return ctx.json({
+						...counts,
+						shared: await i.shared(row.targetId),
+						decommission: await d.status(row.targetId),
+					});
+				const state = await d.state(row.targetId);
+				if (state === "complete")
+					throw refuse("BAD_REQUEST", "its decommission is complete");
+				if (state !== "running") {
+					// Its deliveries must be able to reach the app.
+					if (!truthy(row.enabled))
+						throw refuse(
+							"BAD_REQUEST",
+							"the target is disabled: enable it first",
+						);
+					if (!(await readable(ctx, row)))
+						throw refuse(
+							"BAD_REQUEST",
+							"its stored credentials can't be read (was the secret changed?): give them again first",
+						);
+					if (ctx.body.confirm !== counts.accounts)
+						throw refuse(
+							"BAD_REQUEST",
+							`confirm the number of accounts to deactivate: ${counts.accounts} (preview: true shows it)`,
+						);
+					if (await d.start(row.targetId, by)) {
+						await record(ctx, actor, row, "decommission.started", counts);
+						audit(
+							ctx,
+							actor,
+							`started decommissioning target ${row.targetId} of organization ${row.organizationId}: ${counts.accounts} accounts to deactivate, ${counts.groups} groups to empty`,
+						);
+					}
+				} else await d.start(row.targetId, by);
+				i.kick(row.targetId);
+				return ctx.json({ decommission: await d.status(row.targetId) });
+			},
+		),
 
-    /**
-     * The audit history of an organization's targets (with the plugin's `audit`), removed ones'
-     * included, newest first: `id` for one target's; `limit` (100, at most 500), then `after: next`.
-     * Who connected, changed, removed or decommissioned what, and when; never secrets.
-     */
-    scimProvisioningTargetEvents: createAuthEndpoint(
-      "/scim-provisioning/targets/events",
-      {
-        method: "POST",
-        use: [sensitiveSessionMiddleware],
-        body: z.strictObject({ organizationId: z.string().min(1).max(256).optional(), id: z.string().min(1).max(100).optional(), after: z.string().max(64).optional(), limit: z.number().int().min(1).max(AUDIT_PAGE_MAX).optional() }),
-      },
-      async (ctx) => {
-        const actor = await actorOf(ctx, host.options);
-        const i = instance(ctx);
-        if (!i.audit.on) throw refuse("BAD_REQUEST", "the audit history isn't enabled (the plugin's audit option)");
-        let organizationId = ctx.body.organizationId;
-        if (!actor.host && organizationId === undefined) {
-          if (actor.organizations.size > 1) throw refuse("BAD_REQUEST", "organizationId: required (you administer several organizations)");
-          organizationId = [...actor.organizations][0];
-        }
-        if (organizationId !== undefined && !may(actor, organizationId)) throw refuse("FORBIDDEN", "not allowed");
-        try {
-          return ctx.json(await i.audit.list({ organizationId, targetId: ctx.body.id, after: ctx.body.after, limit: ctx.body.limit }));
-        } catch (e) {
-          throw refuse("BAD_REQUEST", (e as Error).message);
-        }
-      },
-    ),
+		/**
+		 * The audit history of an organization's targets (with the plugin's `audit`), removed ones'
+		 * included, newest first: `id` for one target's; `limit` (100, at most 500), then `after: next`.
+		 * Who connected, changed, removed or decommissioned what, and when; never secrets.
+		 */
+		scimProvisioningTargetEvents: createAuthEndpoint(
+			"/scim-provisioning/targets/events",
+			{
+				method: "POST",
+				use: [sensitiveSessionMiddleware],
+				body: z.strictObject({
+					organizationId: z.string().min(1).max(256).optional(),
+					id: z.string().min(1).max(100).optional(),
+					after: z.string().max(64).optional(),
+					limit: z.number().int().min(1).max(AUDIT_PAGE_MAX).optional(),
+				}),
+			},
+			async (ctx) => {
+				const actor = await actorOf(ctx, host.options);
+				const i = instance(ctx);
+				if (!i.audit.on)
+					throw refuse(
+						"BAD_REQUEST",
+						"the audit history isn't enabled (the plugin's audit option)",
+					);
+				let organizationId = ctx.body.organizationId;
+				if (!actor.host && organizationId === undefined) {
+					if (actor.organizations.size > 1)
+						throw refuse(
+							"BAD_REQUEST",
+							"organizationId: required (you administer several organizations)",
+						);
+					organizationId = [...actor.organizations][0];
+				}
+				if (organizationId !== undefined && !may(actor, organizationId))
+					throw refuse("FORBIDDEN", "not allowed");
+				try {
+					return ctx.json(
+						await i.audit.list({
+							organizationId,
+							targetId: ctx.body.id,
+							after: ctx.body.after,
+							limit: ctx.body.limit,
+						}),
+					);
+				} catch (e) {
+					throw refuse("BAD_REQUEST", (e as Error).message);
+				}
+			},
+		),
 
-    /** The accounts made through a target, a page at a time (`limit`, 100 by default; then `after: next`): to keep a record before abandoning them. */
-    scimProvisioningTargetAccounts: createAuthEndpoint(
-      "/scim-provisioning/targets/accounts",
-      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100), after: z.string().max(256).optional(), limit: z.number().int().min(1).max(1000).optional() }) },
-      async (ctx) => {
-        const actor = await actorOf(ctx, host.options);
-        const row = await rowFor(ctx, actor, ctx.body.id);
-        return ctx.json(await instance(ctx).accounts(row.targetId, ctx.body.after ?? null, ctx.body.limit ?? 100));
-      },
-    ),
+		/** The accounts made through a target, a page at a time (`limit`, 100 by default; then `after: next`): to keep a record before abandoning them. */
+		scimProvisioningTargetAccounts: createAuthEndpoint(
+			"/scim-provisioning/targets/accounts",
+			{
+				method: "POST",
+				use: [sensitiveSessionMiddleware],
+				body: z.strictObject({
+					id: z.string().min(1).max(100),
+					after: z.string().max(256).optional(),
+					limit: z.number().int().min(1).max(1000).optional(),
+				}),
+			},
+			async (ctx) => {
+				const actor = await actorOf(ctx, host.options);
+				const row = await rowFor(ctx, actor, ctx.body.id);
+				return ctx.json(
+					await instance(ctx).accounts(
+						row.targetId,
+						ctx.body.after ?? null,
+						ctx.body.limit ?? 100,
+					),
+				);
+			},
+		),
 
-    /**
-     * Drift: a page of what's at the app that isn't as we'd have it (see `scimProvisioningDrift`):
-     * accounts nobody manages, ours without a link, and linked ones that differ. Read only, and
-     * the app's accounts are the organization's own to see. A failure is said in broad terms.
-     */
-    scimProvisioningTargetDrift: createAuthEndpoint(
-      "/scim-provisioning/targets/drift",
-      { method: "POST", use: [sensitiveSessionMiddleware], body: z.strictObject({ id: z.string().min(1).max(100), after: z.string().max(4096).optional(), limit: z.number().int().min(1).max(1000).optional() }) },
-      async (ctx) => {
-        const actor = await actorOf(ctx, host.options);
-        const row = await rowFor(ctx, actor, ctx.body.id);
-        if (row.type === "webhook") return ctx.json({ ok: null, problem: "a webhook receiver can't be listed, so it has no drift to report" });
-        // As the check route: a target whose credentials can't be read sends nothing.
-        if (!(await readable(ctx, row))) return ctx.json({ ok: false, problem: "its stored credentials can't be read (was the secret changed?): give them again" });
-        try {
-          return ctx.json({ ok: true, ...(await instance(ctx).drift(row.targetId, ctx.body.after ?? null, ctx.body.limit ?? 100)) });
-        } catch (e) {
-          if (e instanceof APIError) throw e;
-          return ctx.json(checkResult(e));
-        }
-      },
-    ),
-  };
+		/**
+		 * Drift: a page of what's at the app that isn't as we'd have it (see `scimProvisioningDrift`):
+		 * accounts nobody manages, ours without a link, and linked ones that differ. Read only, and
+		 * the app's accounts are the organization's own to see. A failure is said in broad terms.
+		 */
+		scimProvisioningTargetDrift: createAuthEndpoint(
+			"/scim-provisioning/targets/drift",
+			{
+				method: "POST",
+				use: [sensitiveSessionMiddleware],
+				body: z.strictObject({
+					id: z.string().min(1).max(100),
+					after: z.string().max(4096).optional(),
+					limit: z.number().int().min(1).max(1000).optional(),
+				}),
+			},
+			async (ctx) => {
+				const actor = await actorOf(ctx, host.options);
+				const row = await rowFor(ctx, actor, ctx.body.id);
+				if (row.type === "webhook")
+					return ctx.json({
+						ok: null,
+						problem:
+							"a webhook receiver can't be listed, so it has no drift to report",
+					});
+				// As the check route: a target whose credentials can't be read sends nothing.
+				if (!(await readable(ctx, row)))
+					return ctx.json({
+						ok: false,
+						problem:
+							"its stored credentials can't be read (was the secret changed?): give them again",
+					});
+				try {
+					return ctx.json({
+						ok: true,
+						...(await instance(ctx).drift(
+							row.targetId,
+							ctx.body.after ?? null,
+							ctx.body.limit ?? 100,
+						)),
+					});
+				} catch (e) {
+					if (e instanceof APIError) throw e;
+					return ctx.json(checkResult(e));
+				}
+			},
+		),
+	};
 }

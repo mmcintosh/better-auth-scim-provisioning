@@ -5,423 +5,755 @@
 // each with an email address derived from its externalId (so a rename never changes it), marked
 // ours in its description, with members added and removed one at a time.
 import { credentials } from "./credentials";
-import { ADDRESS_PARTS, fetchFailure, retryAfterMs, SCIM_ENTERPRISE_USER_SCHEMA, ScimError, type ScimGroup, type ScimUser, type scimClient, trimSlashes } from "./scim-client";
+import {
+	ADDRESS_PARTS,
+	fetchFailure,
+	retryAfterMs,
+	SCIM_ENTERPRISE_USER_SCHEMA,
+	ScimError,
+	type ScimGroup,
+	type ScimUser,
+	type scimClient,
+	trimSlashes,
+} from "./scim-client";
 import type { AttributeFields, Target } from "./types";
 
-export const GOOGLE_DIRECTORY_URL = "https://admin.googleapis.com/admin/directory/v1";
+export const GOOGLE_DIRECTORY_URL =
+	"https://admin.googleapis.com/admin/directory/v1";
 const SCOPE = "https://www.googleapis.com/auth/admin.directory.user";
 /** Asked for only by a target with groups: domain-wide delegation must allow it too. */
 const GROUP_SCOPE = "https://www.googleapis.com/auth/admin.directory.group";
 /** The start of the description that marks a Google Group as ours; the externalId follows. */
-const MANAGED = "Managed by Better Auth (better-auth-scim-provisioning). externalId: ";
+const MANAGED =
+	"Managed by Better Auth (better-auth-scim-provisioning). externalId: ";
 /** The `externalIds` entry that marks a Workspace user as ours. */
 const OURS = { type: "custom", customType: "better-auth" } as const;
 
 /** One of a Google user's organizations; `primary` is the one the Enterprise User attributes go in. */
-type GoogleOrganization = { primary?: boolean; name?: string; department?: string; costCenter?: string; description?: string } & Record<string, unknown>;
+type GoogleOrganization = {
+	primary?: boolean;
+	name?: string;
+	department?: string;
+	costCenter?: string;
+	description?: string;
+} & Record<string, unknown>;
 
 interface GoogleUser {
-  suspended?: boolean;
-  /** Archived (an Archived User licence): can't sign in, like a suspended one. */
-  archived?: boolean;
-  /** Why it's suspended: "ADMIN" (an admin, or us through the API), or Google's own holds ("WEB_LOGIN_REQUIRED", "ABUSE"…). */
-  suspensionReason?: string;
-  id?: string;
-  primaryEmail?: string;
-  externalIds?: { value?: string; type?: string; customType?: string }[];
-  organizations?: GoogleOrganization[];
-  relations?: { value?: string; type?: string; customType?: string }[];
-  phones?: ({ value?: string; type?: string; primary?: boolean } & Record<string, unknown>)[];
-  addresses?: ({ type?: string; primary?: boolean } & Record<string, unknown>)[];
-  /** Groups. */
-  email?: string;
-  name?: string | { givenName?: string; familyName?: string };
-  description?: string;
-  /** A page of a group's members. */
-  members?: { id?: string; type?: string }[];
-  /** A page of the Workspace's users. */
-  users?: GoogleUser[];
-  nextPageToken?: string;
+	suspended?: boolean;
+	/** Archived (an Archived User licence): can't sign in, like a suspended one. */
+	archived?: boolean;
+	/** Why it's suspended: "ADMIN" (an admin, or us through the API), or Google's own holds ("WEB_LOGIN_REQUIRED", "ABUSE"…). */
+	suspensionReason?: string;
+	id?: string;
+	primaryEmail?: string;
+	externalIds?: { value?: string; type?: string; customType?: string }[];
+	organizations?: GoogleOrganization[];
+	relations?: { value?: string; type?: string; customType?: string }[];
+	phones?: ({ value?: string; type?: string; primary?: boolean } & Record<
+		string,
+		unknown
+	>)[];
+	addresses?: ({ type?: string; primary?: boolean } & Record<
+		string,
+		unknown
+	>)[];
+	/** Groups. */
+	email?: string;
+	name?: string | { givenName?: string; familyName?: string };
+	description?: string;
+	/** A page of a group's members. */
+	members?: { id?: string; type?: string }[];
+	/** A page of the Workspace's users. */
+	users?: GoogleUser[];
+	nextPageToken?: string;
 }
 
 /** The SCIM client's operations; `replace` also takes whether this is a reactivation (see update). */
-export type GoogleWorkspaceClient = Omit<ReturnType<typeof scimClient>, "replace"> & { replace(id: string, user: ScimUser, o?: { reactivate?: boolean }): Promise<void> };
+export type GoogleWorkspaceClient = Omit<
+	ReturnType<typeof scimClient>,
+	"replace"
+> & {
+	replace(
+		id: string,
+		user: ScimUser,
+		o?: { reactivate?: boolean },
+	): Promise<void>;
+};
 
 /** `owns`: the attributes the target reads (`attributes`, resolved), so only those are touched at Google. */
-export function googleWorkspaceClient(target: Target, owns?: AttributeFields | null): GoogleWorkspaceClient {
-  const google = target.google;
-  if (!google) throw new Error(`[scim] target ${target.id}: type "google-workspace" needs google`);
-  const base = trimSlashes(target.url ?? GOOGLE_DIRECTORY_URL);
-  const doFetch = target.fetch ?? fetch;
-  const timeoutMs = target.timeoutMs ?? 10_000;
-  const creds = credentials(
-    { type: "google", clientEmail: google.clientEmail, privateKey: google.privateKey, subject: google.adminEmail, scopes: target.groups || target.teamGroups || target.roleGroups ? [SCOPE, GROUP_SCOPE] : [SCOPE], tokenUrl: google.tokenUrl },
-    { fetch: doFetch, timeoutMs },
-  );
+export function googleWorkspaceClient(
+	target: Target,
+	owns?: AttributeFields | null,
+): GoogleWorkspaceClient {
+	const google = target.google;
+	if (!google)
+		throw new Error(
+			`[scim] target ${target.id}: type "google-workspace" needs google`,
+		);
+	const base = trimSlashes(target.url ?? GOOGLE_DIRECTORY_URL);
+	const doFetch = target.fetch ?? fetch;
+	const timeoutMs = target.timeoutMs ?? 10_000;
+	const creds = credentials(
+		{
+			type: "google",
+			clientEmail: google.clientEmail,
+			privateKey: google.privateKey,
+			subject: google.adminEmail,
+			scopes:
+				target.groups || target.teamGroups || target.roleGroups
+					? [SCOPE, GROUP_SCOPE]
+					: [SCOPE],
+			tokenUrl: google.tokenUrl,
+		},
+		{ fetch: doFetch, timeoutMs },
+	);
 
-  /** One Directory API call. A 404 comes back as null only when Google itself says the user doesn't exist. */
-  async function request(method: string, path: string, body?: unknown, retried = false): Promise<GoogleUser | null> {
-    let res: Response;
-    const authorization = await creds.headers();
-    try {
-      res = await doFetch(`${base}${path}`, {
-        method,
-        headers: { ...authorization, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        redirect: "manual",
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch (e) {
-      throw new ScimError(`${method} ${path}: ${fetchFailure(e, timeoutMs)}`, null, true);
-    }
-    const text = await res.text();
-    let json: { error?: { code?: unknown; message?: unknown; errors?: { reason?: unknown }[] } } & GoogleUser = {};
-    try {
-      json = text ? JSON.parse(text) : {};
-    } catch {}
-    if (res.ok) return json;
-    if (res.status === 401 && !retried && creds.rejected()) return request(method, path, body, true);
-    // Retried: a passing redirect (maintenance) clears by itself, and a wrong URL is the host's to fix.
-    if (res.status >= 300 && res.status < 400) throw new ScimError(`${method} ${path}: redirected (${res.status}); check the target's url`, res.status, true, retryAfterMs(res.headers.get("retry-after")));
-    const google404 = res.status === 404 && typeof json.error?.code === "number";
-    // Not Google's own "not found" (a wrong URL answers 404 for everything): the host's to fix.
-    const misplaced = res.status === 404 && !google404;
-    // Google's rate limits can answer 403, not 429: waited out like a 429, not taken for the credentials.
-    const limited = res.status === 403 && (Array.isArray(json.error?.errors) ? json.error.errors : []).some((e) => e?.reason === "rateLimitExceeded" || e?.reason === "userRateLimitExceeded");
-    const auth = (res.status === 401 || res.status === 403) && !limited;
-    // 412 "User creation is not complete": Google is still making a user created seconds ago. But
-    // a 412 "Cannot restore a user suspended for abuse" is Google's own hold on the account, which
-    // only a person lifts (found live): not retried.
-    const held = res.status === 412 && /suspended for abuse/i.test(String(json.error?.message ?? ""));
-    const creating = res.status === 412 && !held;
-    const retryable = res.status === 408 || creating || res.status === 429 || limited || res.status >= 500 || auth || misplaced;
-    const message = typeof json.error?.message === "string" ? ` ${json.error.message.slice(0, 300)}` : "";
-    throw new ScimError(
-      `${method} ${path}: ${res.status}${auth ? " (check the service account, its domain-wide delegation and the admin)" : misplaced ? " (check the target's url)" : creating ? " (Google is still creating the user; retrying)" : held ? " (Google suspended the account itself; the user signing in, or an admin in the Admin console, lifts it)" : limited ? " (Google's rate limit)" : ""}${message}`,
-      res.status,
-      retryable,
-      retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
-      undefined,
-      limited || undefined,
-    );
-  }
+	/** One Directory API call. A 404 comes back as null only when Google itself says the user doesn't exist. */
+	async function request(
+		method: string,
+		path: string,
+		body?: unknown,
+		retried = false,
+	): Promise<GoogleUser | null> {
+		let res: Response;
+		const authorization = await creds.headers();
+		try {
+			res = await doFetch(`${base}${path}`, {
+				method,
+				headers: {
+					...authorization,
+					accept: "application/json",
+					...(body === undefined ? {} : { "content-type": "application/json" }),
+				},
+				...(body === undefined ? {} : { body: JSON.stringify(body) }),
+				redirect: "manual",
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+		} catch (e) {
+			throw new ScimError(
+				`${method} ${path}: ${fetchFailure(e, timeoutMs)}`,
+				null,
+				true,
+			);
+		}
+		const text = await res.text();
+		let json: {
+			error?: {
+				code?: unknown;
+				message?: unknown;
+				errors?: { reason?: unknown }[];
+			};
+		} & GoogleUser = {};
+		try {
+			json = text ? JSON.parse(text) : {};
+		} catch {}
+		if (res.ok) return json;
+		if (res.status === 401 && !retried && creds.rejected())
+			return request(method, path, body, true);
+		// Retried: a passing redirect (maintenance) clears by itself, and a wrong URL is the host's to fix.
+		if (res.status >= 300 && res.status < 400)
+			throw new ScimError(
+				`${method} ${path}: redirected (${res.status}); check the target's url`,
+				res.status,
+				true,
+				retryAfterMs(res.headers.get("retry-after")),
+			);
+		const google404 =
+			res.status === 404 && typeof json.error?.code === "number";
+		// Not Google's own "not found" (a wrong URL answers 404 for everything): the host's to fix.
+		const misplaced = res.status === 404 && !google404;
+		// Google's rate limits can answer 403, not 429: waited out like a 429, not taken for the credentials.
+		const limited =
+			res.status === 403 &&
+			(Array.isArray(json.error?.errors) ? json.error.errors : []).some(
+				(e) =>
+					e?.reason === "rateLimitExceeded" ||
+					e?.reason === "userRateLimitExceeded",
+			);
+		const auth = (res.status === 401 || res.status === 403) && !limited;
+		// 412 "User creation is not complete": Google is still making a user created seconds ago. But
+		// a 412 "Cannot restore a user suspended for abuse" is Google's own hold on the account, which
+		// only a person lifts (found live): not retried.
+		const held =
+			res.status === 412 &&
+			/suspended for abuse/i.test(String(json.error?.message ?? ""));
+		const creating = res.status === 412 && !held;
+		const retryable =
+			res.status === 408 ||
+			creating ||
+			res.status === 429 ||
+			limited ||
+			res.status >= 500 ||
+			auth ||
+			misplaced;
+		const message =
+			typeof json.error?.message === "string"
+				? ` ${json.error.message.slice(0, 300)}`
+				: "";
+		throw new ScimError(
+			`${method} ${path}: ${res.status}${auth ? " (check the service account, its domain-wide delegation and the admin)" : misplaced ? " (check the target's url)" : creating ? " (Google is still creating the user; retrying)" : held ? " (Google suspended the account itself; the user signing in, or an admin in the Admin console, lifts it)" : limited ? " (Google's rate limit)" : ""}${message}`,
+			res.status,
+			retryable,
+			retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
+			undefined,
+			limited || undefined,
+		);
+	}
 
-  const path = (key: string) => `/users/${encodeURIComponent(key)}`;
-  const oursIn = (u: GoogleUser) => u.externalIds?.find((x) => x.type === OURS.type && x.customType === OURS.customType)?.value || null;
+	const path = (key: string) => `/users/${encodeURIComponent(key)}`;
+	const oursIn = (u: GoogleUser) =>
+		u.externalIds?.find(
+			(x) => x.type === OURS.type && x.customType === OURS.customType,
+		)?.value || null;
 
-  /** The Directory API user for a SCIM user: everything but the password. */
-  function toGoogle(user: ScimUser) {
-    const [first, ...rest] = (user.displayName ?? user.userName).split(" ");
-    return {
-      primaryEmail: user.userName,
-      // Google requires both names.
-      name: { givenName: user.name?.givenName || first || user.userName, familyName: user.name?.familyName || rest.join(" ") || first || user.userName },
-      suspended: !user.active,
-    };
-  }
+	/** The Directory API user for a SCIM user: everything but the password. */
+	function toGoogle(user: ScimUser) {
+		const [first, ...rest] = (user.displayName ?? user.userName).split(" ");
+		return {
+			primaryEmail: user.userName,
+			// Google requires both names.
+			name: {
+				givenName: user.name?.givenName || first || user.userName,
+				familyName:
+					user.name?.familyName || rest.join(" ") || first || user.userName,
+			},
+			suspended: !user.active,
+		};
+	}
 
-  /**
-   * The user as Google has them now. For a few seconds after a create, Google answers 404 by id
-   * (found live) though the user is there by email, and updates by id already work: so a 404 by id
-   * is asked again by email, and taken only if it's the same user.
-   */
-  async function current(id: string, userName: string): Promise<GoogleUser | null> {
-    try {
-      return await request("GET", path(id));
-    } catch (e) {
-      if (!(e instanceof ScimError && e.status === 404 && !e.retryable)) throw e;
-      const byEmail = await request("GET", path(userName)).catch(() => null);
-      if (byEmail?.id === id) return byEmail;
-      throw e;
-    }
-  }
+	/**
+	 * The user as Google has them now. For a few seconds after a create, Google answers 404 by id
+	 * (found live) though the user is there by email, and updates by id already work: so a 404 by id
+	 * is asked again by email, and taken only if it's the same user.
+	 */
+	async function current(
+		id: string,
+		userName: string,
+	): Promise<GoogleUser | null> {
+		try {
+			return await request("GET", path(id));
+		} catch (e) {
+			if (!(e instanceof ScimError && e.status === 404 && !e.retryable))
+				throw e;
+			const byEmail = await request("GET", path(userName)).catch(() => null);
+			if (byEmail?.id === id) return byEmail;
+			throw e;
+		}
+	}
 
-  /**
-   * The Enterprise User attributes, where Google keeps them, merged into what the user has now
-   * (nothing, for a new user). Only the attributes the target names are touched (their keys are in
-   * the extension, undefined when empty); anything else an admin set at Google is left alone:
-   * - organization, department, cost center and division (as `description`) in the primary
-   *   organization, keeping its other fields (an admin's job title, say);
-   * - the employee number as the `organization` external id;
-   * - the manager as the `manager` relation, by their address; other relations are kept.
-   * An attribute without a value is removed.
-   */
-  function enterprise(user: ScimUser, now: GoogleUser | null): Partial<Pick<GoogleUser, "organizations" | "relations">> & { employeeNumber?: string | null } {
-    const e = user[SCIM_ENTERPRISE_USER_SCHEMA];
-    if (!e) return {};
-    const named = (a: keyof typeof e) => Object.hasOwn(e, a);
-    const out: Partial<Pick<GoogleUser, "organizations" | "relations">> & { employeeNumber?: string | null } = {};
-    const orgParts = (["organization", "department", "costCenter", "division"] as const).filter(named);
-    if (orgParts.length) {
-      const orgs = now?.organizations ?? [];
-      const primary: GoogleOrganization = { ...(orgs.find((o) => o.primary) ?? {}) };
-      const theirs = { organization: "name", department: "department", costCenter: "costCenter", division: "description" } as const;
-      for (const ours of orgParts) {
-        if (e[ours]) primary[theirs[ours]] = e[ours];
-        else delete primary[theirs[ours]];
-      }
-      const { primary: _, ...rest } = primary;
-      out.organizations = [...orgs.filter((o) => !o.primary), ...(Object.keys(rest).length ? [{ ...rest, primary: true }] : [])];
-    }
-    if (named("manager")) out.relations = [...(now?.relations ?? []).filter((r) => r.type !== "manager"), ...(e.manager ? [{ type: "manager", value: e.manager.value }] : [])];
-    if (named("employeeNumber")) out.employeeNumber = e.employeeNumber ?? null;
-    return out;
-  }
+	/**
+	 * The Enterprise User attributes, where Google keeps them, merged into what the user has now
+	 * (nothing, for a new user). Only the attributes the target names are touched (their keys are in
+	 * the extension, undefined when empty); anything else an admin set at Google is left alone:
+	 * - organization, department, cost center and division (as `description`) in the primary
+	 *   organization, keeping its other fields (an admin's job title, say);
+	 * - the employee number as the `organization` external id;
+	 * - the manager as the `manager` relation, by their address; other relations are kept.
+	 * An attribute without a value is removed.
+	 */
+	function enterprise(
+		user: ScimUser,
+		now: GoogleUser | null,
+	): Partial<Pick<GoogleUser, "organizations" | "relations">> & {
+		employeeNumber?: string | null;
+	} {
+		const e = user[SCIM_ENTERPRISE_USER_SCHEMA];
+		if (!e) return {};
+		const named = (a: keyof typeof e) => Object.hasOwn(e, a);
+		const out: Partial<Pick<GoogleUser, "organizations" | "relations">> & {
+			employeeNumber?: string | null;
+		} = {};
+		const orgParts = (
+			["organization", "department", "costCenter", "division"] as const
+		).filter(named);
+		if (orgParts.length) {
+			const orgs = now?.organizations ?? [];
+			const primary: GoogleOrganization = {
+				...(orgs.find((o) => o.primary) ?? {}),
+			};
+			const theirs = {
+				organization: "name",
+				department: "department",
+				costCenter: "costCenter",
+				division: "description",
+			} as const;
+			for (const ours of orgParts) {
+				if (e[ours]) primary[theirs[ours]] = e[ours];
+				else delete primary[theirs[ours]];
+			}
+			const { primary: _, ...rest } = primary;
+			out.organizations = [
+				...orgs.filter((o) => !o.primary),
+				...(Object.keys(rest).length ? [{ ...rest, primary: true }] : []),
+			];
+		}
+		if (named("manager"))
+			out.relations = [
+				...(now?.relations ?? []).filter((r) => r.type !== "manager"),
+				...(e.manager ? [{ type: "manager", value: e.manager.value }] : []),
+			];
+		if (named("employeeNumber")) out.employeeNumber = e.employeeNumber ?? null;
+		return out;
+	}
 
-  /**
-   * The attributes a target reads (`attributes`), and any a `mapUser` sets, where Google keeps
-   * them, merged into what the user has now: the title in the primary organization (its other
-   * fields kept); the phones by type (the work and mobile numbers the target reads, and any type a
-   * mapUser sends; an admin's other numbers kept); the addresses by type too, the work one with
-   * its named parts set or removed and its other parts kept. Google allows one primary entry per
-   * list: when ours is primary, a kept entry's flag goes. Only what's ours is touched.
-   */
-  function details(user: ScimUser, now: GoogleUser | null, organizations: GoogleOrganization[] | undefined): Partial<Pick<GoogleUser, "organizations" | "phones" | "addresses">> {
-    const sent = { title: Object.hasOwn(user, "title"), phones: Object.hasOwn(user, "phoneNumbers"), addresses: Object.hasOwn(user, "addresses") };
-    const out: Partial<Pick<GoogleUser, "organizations" | "phones" | "addresses">> = {};
-    /** Kept entries lose their primary flag when ours carries it. */
-    const unprimary = <T extends { primary?: boolean | undefined }>(entries: T[], oursPrimary: boolean) => (oursPrimary ? entries.map(({ primary: _, ...e }) => e as T) : entries);
-    if (owns?.title || sent.title) {
-      const orgs = organizations ?? now?.organizations ?? [];
-      const primary: GoogleOrganization = { ...(orgs.find((o) => o.primary) ?? {}) };
-      if (user.title) primary.title = user.title;
-      else delete primary.title;
-      const { primary: _, ...rest } = primary;
-      out.organizations = [...orgs.filter((o) => !o.primary), ...(Object.keys(rest).length ? [{ ...rest, primary: true }] : [])];
-    }
-    if (owns?.phone || owns?.mobile || sent.phones) {
-      const list = (user.phoneNumbers ?? []).map((p) => ({ value: p.value, type: p.type ?? "work", ...(p.primary ? { primary: true } : {}) }));
-      const ours = new Set([...(owns?.phone ? ["work"] : []), ...(owns?.mobile ? ["mobile"] : []), ...list.map((p) => p.type)]);
-      const kept = (now?.phones ?? []).filter((p) => !ours.has(p.type ?? ""));
-      out.phones = [...unprimary(kept, list.some((p) => p.primary)), ...list];
-    }
-    const addresses = (user.addresses ?? []).map((a) => ({ ...a, type: a.type ?? "work" }));
-    const work = addresses.find((a) => a.type === "work");
-    const parts = ADDRESS_PARTS.filter((part) => owns?.[part] || (work && work[part] !== undefined));
-    if (parts.length || sent.addresses) {
-      const ours = new Set([...(parts.length ? ["work"] : []), ...addresses.map((a) => a.type)]);
-      const kept = (now?.addresses ?? []).filter((a) => !ours.has(a.type ?? ""));
-      // Other types a mapUser sends go as they are; the work entry keeps its parts we don't name.
-      const others = addresses.filter((a) => a.type !== "work").map((a) => Object.fromEntries(Object.entries(a).filter(([, v]) => v !== undefined)));
-      const merged: Record<string, unknown> = { ...((now?.addresses ?? []).find((a) => a.type === "work") ?? {}) };
-      for (const part of parts) {
-        const v = work?.[part];
-        if (v) merged[part] = v;
-        else delete merged[part];
-      }
-      const { type: _t, primary: _p, ...rest } = merged;
-      const workEntry = ours.has("work") && Object.keys(rest).length ? [{ ...rest, type: "work", primary: true }] : [];
-      out.addresses = [...unprimary(kept, workEntry.length > 0 || others.some((a) => a.primary)), ...others, ...workEntry];
-    }
-    return out;
-  }
+	/**
+	 * The attributes a target reads (`attributes`), and any a `mapUser` sets, where Google keeps
+	 * them, merged into what the user has now: the title in the primary organization (its other
+	 * fields kept); the phones by type (the work and mobile numbers the target reads, and any type a
+	 * mapUser sends; an admin's other numbers kept); the addresses by type too, the work one with
+	 * its named parts set or removed and its other parts kept. Google allows one primary entry per
+	 * list: when ours is primary, a kept entry's flag goes. Only what's ours is touched.
+	 */
+	function details(
+		user: ScimUser,
+		now: GoogleUser | null,
+		organizations: GoogleOrganization[] | undefined,
+	): Partial<Pick<GoogleUser, "organizations" | "phones" | "addresses">> {
+		const sent = {
+			title: Object.hasOwn(user, "title"),
+			phones: Object.hasOwn(user, "phoneNumbers"),
+			addresses: Object.hasOwn(user, "addresses"),
+		};
+		const out: Partial<
+			Pick<GoogleUser, "organizations" | "phones" | "addresses">
+		> = {};
+		/** Kept entries lose their primary flag when ours carries it. */
+		const unprimary = <T extends { primary?: boolean | undefined }>(
+			entries: T[],
+			oursPrimary: boolean,
+		) =>
+			oursPrimary ? entries.map(({ primary: _, ...e }) => e as T) : entries;
+		if (owns?.title || sent.title) {
+			const orgs = organizations ?? now?.organizations ?? [];
+			const primary: GoogleOrganization = {
+				...(orgs.find((o) => o.primary) ?? {}),
+			};
+			if (user.title) primary.title = user.title;
+			else delete primary.title;
+			const { primary: _, ...rest } = primary;
+			out.organizations = [
+				...orgs.filter((o) => !o.primary),
+				...(Object.keys(rest).length ? [{ ...rest, primary: true }] : []),
+			];
+		}
+		if (owns?.phone || owns?.mobile || sent.phones) {
+			const list = (user.phoneNumbers ?? []).map((p) => ({
+				value: p.value,
+				type: p.type ?? "work",
+				...(p.primary ? { primary: true } : {}),
+			}));
+			const ours = new Set([
+				...(owns?.phone ? ["work"] : []),
+				...(owns?.mobile ? ["mobile"] : []),
+				...list.map((p) => p.type),
+			]);
+			const kept = (now?.phones ?? []).filter((p) => !ours.has(p.type ?? ""));
+			out.phones = [
+				...unprimary(
+					kept,
+					list.some((p) => p.primary),
+				),
+				...list,
+			];
+		}
+		const addresses = (user.addresses ?? []).map((a) => ({
+			...a,
+			type: a.type ?? "work",
+		}));
+		const work = addresses.find((a) => a.type === "work");
+		const parts = ADDRESS_PARTS.filter(
+			(part) => owns?.[part] || (work && work[part] !== undefined),
+		);
+		if (parts.length || sent.addresses) {
+			const ours = new Set([
+				...(parts.length ? ["work"] : []),
+				...addresses.map((a) => a.type),
+			]);
+			const kept = (now?.addresses ?? []).filter(
+				(a) => !ours.has(a.type ?? ""),
+			);
+			// Other types a mapUser sends go as they are; the work entry keeps its parts we don't name.
+			const others = addresses
+				.filter((a) => a.type !== "work")
+				.map((a) =>
+					Object.fromEntries(
+						Object.entries(a).filter(([, v]) => v !== undefined),
+					),
+				);
+			const merged: Record<string, unknown> = {
+				...((now?.addresses ?? []).find((a) => a.type === "work") ?? {}),
+			};
+			for (const part of parts) {
+				const v = work?.[part];
+				if (v) merged[part] = v;
+				else delete merged[part];
+			}
+			const { type: _t, primary: _p, ...rest } = merged;
+			const workEntry =
+				ours.has("work") && Object.keys(rest).length
+					? [{ ...rest, type: "work", primary: true }]
+					: [];
+			out.addresses = [
+				...unprimary(
+					kept,
+					workEntry.length > 0 || others.some((a) => a.primary),
+				),
+				...others,
+				...workEntry,
+			];
+		}
+		return out;
+	}
 
-  /** Our entry in externalIds, and the employee number if the target sends it, keeping any others (an admin's own ids, say). */
-  function externalIdsOf(now: GoogleUser | null, externalId: string | undefined, employeeNumber?: string | null) {
-    const others = (now?.externalIds ?? []).filter((x) => !(x.type === OURS.type && x.customType === OURS.customType) && (employeeNumber === undefined || x.type !== "organization"));
-    return [...others, ...(employeeNumber ? [{ type: "organization", value: employeeNumber }] : []), ...(externalId ? [{ ...OURS, value: externalId }] : [])];
-  }
+	/** Our entry in externalIds, and the employee number if the target sends it, keeping any others (an admin's own ids, say). */
+	function externalIdsOf(
+		now: GoogleUser | null,
+		externalId: string | undefined,
+		employeeNumber?: string | null,
+	) {
+		const others = (now?.externalIds ?? []).filter(
+			(x) =>
+				!(x.type === OURS.type && x.customType === OURS.customType) &&
+				(employeeNumber === undefined || x.type !== "organization"),
+		);
+		return [
+			...others,
+			...(employeeNumber
+				? [{ type: "organization", value: employeeNumber }]
+				: []),
+			...(externalId ? [{ ...OURS, value: externalId }] : []),
+		];
+	}
 
-  /**
-   * A change to an existing user. While Google applies an email change (a rename, for a minute or
-   * more), it answers further changes with 409 "Entity already exists" (found live): retried, or a
-   * ban right after an email change would fail for good. Only a new address that another account
-   * holds is a real conflict.
-   */
-  async function change(id: string, body: Record<string, unknown>, newEmail?: string) {
-    try {
-      await request("PATCH", path(id), body);
-    } catch (e) {
-      if (!(e instanceof ScimError && e.status === 409)) throw e;
-      if (newEmail) {
-        const holder = await request("GET", path(newEmail)).catch(() => null);
-        if (holder?.id && holder.id !== id) throw new ScimError(`PATCH ${path(id)}: ${newEmail} belongs to another Workspace account`, 409, false);
-      }
-      throw new ScimError(`PATCH ${path(id)}: 409 (Google is still applying an earlier change, such as a new email; retrying)`, 409, true);
-    }
-  }
+	/**
+	 * A change to an existing user. While Google applies an email change (a rename, for a minute or
+	 * more), it answers further changes with 409 "Entity already exists" (found live): retried, or a
+	 * ban right after an email change would fail for good. Only a new address that another account
+	 * holds is a real conflict.
+	 */
+	async function change(
+		id: string,
+		body: Record<string, unknown>,
+		newEmail?: string,
+	) {
+		try {
+			await request("PATCH", path(id), body);
+		} catch (e) {
+			if (!(e instanceof ScimError && e.status === 409)) throw e;
+			if (newEmail) {
+				const holder = await request("GET", path(newEmail)).catch(() => null);
+				if (holder?.id && holder.id !== id)
+					throw new ScimError(
+						`PATCH ${path(id)}: ${newEmail} belongs to another Workspace account`,
+						409,
+						false,
+					);
+			}
+			throw new ScimError(
+				`PATCH ${path(id)}: 409 (Google is still applying an earlier change, such as a new email; retrying)`,
+				409,
+				true,
+			);
+		}
+	}
 
-  /**
-   * A change to an existing user. `suspended` is only ever set to suspend (the user left), or to
-   * lift a suspension the plugin itself made (`reactivate`: the user is back after a ban or a
-   * removal). Otherwise it's left as it is at Google: an admin's suspension, say during an
-   * incident, isn't undone by a rename or a manager's change; nor is a hold of Google's own
-   * (WEB_LOGIN_REQUIRED on new accounts, abuse), which the API can't lift (412; found live).
-   */
-  async function update(id: string, user: ScimUser, o: { reactivate?: boolean } = {}) {
-    const now = await current(id, user.userName);
-    const { employeeNumber, ...extra } = enterprise(user, now);
-    const body: Record<string, unknown> = { ...toGoogle(user), ...extra, ...details(user, now, extra.organizations), externalIds: externalIdsOf(now, user.externalId, employeeNumber) };
-    const googlesHold = !!(now?.suspended && now.suspensionReason && now.suspensionReason !== "ADMIN");
-    if (user.active && (!o.reactivate || googlesHold)) delete body.suspended;
-    await change(id, body, user.userName);
-  }
+	/**
+	 * A change to an existing user. `suspended` is only ever set to suspend (the user left), or to
+	 * lift a suspension the plugin itself made (`reactivate`: the user is back after a ban or a
+	 * removal). Otherwise it's left as it is at Google: an admin's suspension, say during an
+	 * incident, isn't undone by a rename or a manager's change; nor is a hold of Google's own
+	 * (WEB_LOGIN_REQUIRED on new accounts, abuse), which the API can't lift (412; found live).
+	 */
+	async function update(
+		id: string,
+		user: ScimUser,
+		o: { reactivate?: boolean } = {},
+	) {
+		const now = await current(id, user.userName);
+		const { employeeNumber, ...extra } = enterprise(user, now);
+		const body: Record<string, unknown> = {
+			...toGoogle(user),
+			...extra,
+			...details(user, now, extra.organizations),
+			externalIds: externalIdsOf(now, user.externalId, employeeNumber),
+		};
+		const googlesHold = !!(
+			now?.suspended &&
+			now.suspensionReason &&
+			now.suspensionReason !== "ADMIN"
+		);
+		if (user.active && (!o.reactivate || googlesHold)) delete body.suspended;
+		await change(id, body, user.userName);
+	}
 
-  // ---- Groups ----
+	// ---- Groups ----
 
-  const gpath = (key: string) => `/groups/${encodeURIComponent(key)}`;
-  const groupDomain = google.groupDomain ?? google.adminEmail.split("@")[1] ?? "";
-  const hex = async (s: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))].map((b) => b.toString(16).padStart(2, "0")).join("");
-  /** A group's address: stable, from its externalId, so it's found again after a rename. */
-  async function groupEmail(externalId: string): Promise<string> {
-    if (google?.groupEmail) return google.groupEmail(externalId);
-    let local = `ba-${externalId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
-    // An address's local part is at most 64 characters.
-    if (local.length > 60) local = `ba-${(await hex(externalId)).slice(0, 32)}`;
-    return `${local}@${groupDomain}`;
-  }
-  const markerOf = (description: string | undefined) => (description?.startsWith(MANAGED) ? description.slice(MANAGED.length).trim() || null : null);
-  const notFoundAtGoogle = (e: unknown) => e instanceof ScimError && e.status === 404 && !e.retryable;
+	const gpath = (key: string) => `/groups/${encodeURIComponent(key)}`;
+	const groupDomain =
+		google.groupDomain ?? google.adminEmail.split("@")[1] ?? "";
+	const hex = async (s: string) =>
+		[
+			...new Uint8Array(
+				await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)),
+			),
+		]
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
+	/** A group's address: stable, from its externalId, so it's found again after a rename. */
+	async function groupEmail(externalId: string): Promise<string> {
+		if (google?.groupEmail) return google.groupEmail(externalId);
+		let local = `ba-${externalId
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")}`;
+		// An address's local part is at most 64 characters.
+		if (local.length > 60) local = `ba-${(await hex(externalId)).slice(0, 32)}`;
+		return `${local}@${groupDomain}`;
+	}
+	const markerOf = (description: string | undefined) =>
+		description?.startsWith(MANAGED)
+			? description.slice(MANAGED.length).trim() || null
+			: null;
+	const notFoundAtGoogle = (e: unknown) =>
+		e instanceof ScimError && e.status === 404 && !e.retryable;
 
-  /** The group's user members (nested groups and the like are left alone). */
-  async function memberIds(groupId: string): Promise<string[]> {
-    const ids: string[] = [];
-    for (let token = "", pages = 0; pages < 1000; pages++) {
-      const page = await request("GET", `${gpath(groupId)}/members?maxResults=200${token ? `&pageToken=${encodeURIComponent(token)}` : ""}`);
-      for (const m of page?.members ?? []) if (m.id && (m.type ?? "USER") === "USER") ids.push(m.id);
-      if (!page?.nextPageToken) break;
-      token = page.nextPageToken;
-    }
-    return ids;
-  }
+	/** The group's user members (nested groups and the like are left alone). */
+	async function memberIds(groupId: string): Promise<string[]> {
+		const ids: string[] = [];
+		for (let token = "", pages = 0; pages < 1000; pages++) {
+			const page = await request(
+				"GET",
+				`${gpath(groupId)}/members?maxResults=200${token ? `&pageToken=${encodeURIComponent(token)}` : ""}`,
+			);
+			for (const m of page?.members ?? [])
+				if (m.id && (m.type ?? "USER") === "USER") ids.push(m.id);
+			if (!page?.nextPageToken) break;
+			token = page.nextPageToken;
+		}
+		return ids;
+	}
 
-  /** Make the group's user members exactly `wanted`: one request per member added or removed. */
-  async function setMembers(groupId: string, wanted: string[], current?: string[]) {
-    const have = new Set(current ?? (await memberIds(groupId)));
-    const want = new Set(wanted);
-    for (const id of want) {
-      if (have.has(id)) continue;
-      try {
-        await request("POST", `${gpath(groupId)}/members`, { id, role: "MEMBER" });
-      } catch (e) {
-        if (!(e instanceof ScimError && e.status === 409)) throw e; // already a member
-      }
-    }
-    for (const id of have) {
-      if (want.has(id)) continue;
-      try {
-        await request("DELETE", `${gpath(groupId)}/members/${encodeURIComponent(id)}`);
-      } catch (e) {
-        if (!notFoundAtGoogle(e)) throw e; // already gone
-      }
-    }
-  }
-  const memberValues = (group: ScimGroup) => (group.members ?? []).map((m) => m.value);
+	/** Make the group's user members exactly `wanted`: one request per member added or removed. */
+	async function setMembers(
+		groupId: string,
+		wanted: string[],
+		current?: string[],
+	) {
+		const have = new Set(current ?? (await memberIds(groupId)));
+		const want = new Set(wanted);
+		for (const id of want) {
+			if (have.has(id)) continue;
+			try {
+				await request("POST", `${gpath(groupId)}/members`, {
+					id,
+					role: "MEMBER",
+				});
+			} catch (e) {
+				if (!(e instanceof ScimError && e.status === 409)) throw e; // already a member
+			}
+		}
+		for (const id of have) {
+			if (want.has(id)) continue;
+			try {
+				await request(
+					"DELETE",
+					`${gpath(groupId)}/members/${encodeURIComponent(id)}`,
+				);
+			} catch (e) {
+				if (!notFoundAtGoogle(e)) throw e; // already gone
+			}
+		}
+	}
+	const memberValues = (group: ScimGroup) =>
+		(group.members ?? []).map((m) => m.value);
 
-  /** Ours if its description carries our marker; an address taken by another group is someone else's. */
-  async function findGroup(externalId: string | null | undefined): Promise<{ id: string; externalId: string | null } | null> {
-    if (!externalId) return null;
-    const email = await groupEmail(externalId);
-    try {
-      const g = await request("GET", gpath(email));
-      // Google also answers for a group's alias: only the exact address is a match.
-      if (!g?.id || g.email?.toLowerCase() !== email.toLowerCase()) return null;
-      return { id: g.id, externalId: markerOf(g.description) };
-    } catch (e) {
-      if (notFoundAtGoogle(e)) return null;
-      throw e;
-    }
-  }
+	/** Ours if its description carries our marker; an address taken by another group is someone else's. */
+	async function findGroup(
+		externalId: string | null | undefined,
+	): Promise<{ id: string; externalId: string | null } | null> {
+		if (!externalId) return null;
+		const email = await groupEmail(externalId);
+		try {
+			const g = await request("GET", gpath(email));
+			// Google also answers for a group's alias: only the exact address is a match.
+			if (!g?.id || g.email?.toLowerCase() !== email.toLowerCase()) return null;
+			return { id: g.id, externalId: markerOf(g.description) };
+		} catch (e) {
+			if (notFoundAtGoogle(e)) return null;
+			throw e;
+		}
+	}
 
-  async function createGroup(group: ScimGroup): Promise<string> {
-    const externalId = group.externalId as string;
-    const created = await request("POST", "/groups", { email: await groupEmail(externalId), name: group.displayName, description: `${MANAGED}${externalId}` });
-    if (!created?.id) throw new ScimError("POST /groups: the response has no id", null, false);
-    try {
-      await setMembers(created.id, memberValues(group), []);
-    } catch (e) {
-      // Like users, a group made seconds ago can answer 404: retried, and found again by its address.
-      if (notFoundAtGoogle(e)) throw new ScimError(`group ${group.displayName}: Google is still creating it; retrying`, null, true);
-      throw e;
-    }
-    return created.id;
-  }
+	async function createGroup(group: ScimGroup): Promise<string> {
+		const externalId = group.externalId as string;
+		const created = await request("POST", "/groups", {
+			email: await groupEmail(externalId),
+			name: group.displayName,
+			description: `${MANAGED}${externalId}`,
+		});
+		if (!created?.id)
+			throw new ScimError("POST /groups: the response has no id", null, false);
+		try {
+			await setMembers(created.id, memberValues(group), []);
+		} catch (e) {
+			// Like users, a group made seconds ago can answer 404: retried, and found again by its address.
+			if (notFoundAtGoogle(e))
+				throw new ScimError(
+					`group ${group.displayName}: Google is still creating it; retrying`,
+					null,
+					true,
+				);
+			throw e;
+		}
+		return created.id;
+	}
 
-  async function updateGroup(id: string, group: ScimGroup) {
-    try {
-      await request("PATCH", gpath(id), { name: group.displayName });
-      await setMembers(id, memberValues(group));
-    } catch (e) {
-      if (!notFoundAtGoogle(e)) throw e;
-      // A 404 for a group that's there by its address: Google hasn't finished creating it.
-      const found = await findGroup(group.externalId);
-      if (found?.id === id) throw new ScimError(`group ${group.displayName}: Google is still creating it; retrying`, null, true);
-      throw e;
-    }
-  }
+	async function updateGroup(id: string, group: ScimGroup) {
+		try {
+			await request("PATCH", gpath(id), { name: group.displayName });
+			await setMembers(id, memberValues(group));
+		} catch (e) {
+			if (!notFoundAtGoogle(e)) throw e;
+			// A 404 for a group that's there by its address: Google hasn't finished creating it.
+			const found = await findGroup(group.externalId);
+			if (found?.id === id)
+				throw new ScimError(
+					`group ${group.displayName}: Google is still creating it; retrying`,
+					null,
+					true,
+				);
+			throw e;
+		}
+	}
 
-  return {
-    async findByUserName(userName: string) {
-      try {
-        const u = await request("GET", path(userName));
-        // Google also answers for an alias, which is someone else's account: only an exact primary email is a match.
-        if (!u?.id || u.primaryEmail?.toLowerCase() !== userName.toLowerCase()) return null;
-        return { id: u.id, externalId: oursIn(u), active: u.suspended !== true };
-      } catch (e) {
-        if (e instanceof ScimError && e.status === 404 && e.retryable === false) return null;
-        throw e;
-      }
-    },
-    async create(user: ScimUser) {
-      // Required by Google; users sign in through your identity provider, so it's never used.
-      const password = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24))));
-      // orgUnitPath only here: where new users go, never moving a user an admin placed elsewhere.
-      let created: GoogleUser | null;
-      try {
-        const { employeeNumber, ...extra } = enterprise(user, null);
-        const ids = externalIdsOf(null, user.externalId, employeeNumber);
-        // Nothing to send for an attribute is left out of a create (an empty list says nothing).
-        const more = Object.fromEntries(Object.entries({ ...extra, ...details(user, null, extra.organizations) }).filter(([, v]) => !(Array.isArray(v) && !v.length)));
-        created = await request("POST", "/users", { ...toGoogle(user), ...more, password, ...(google?.orgUnitPath ? { orgUnitPath: google.orgUnitPath } : {}), ...(ids.length ? { externalIds: ids } : {}) });
-      } catch (e) {
-        // Taken as another account's alias: that account is someone else's, and no retry changes it.
-        // Not reported as a 409, which would send the outbox looking for an account to adopt.
-        if (e instanceof ScimError && e.status === 409) {
-          const holder = await request("GET", path(user.userName)).catch(() => null);
-          if (holder?.primaryEmail && holder.primaryEmail.toLowerCase() !== user.userName.toLowerCase())
-            throw new ScimError(`POST /users: ${user.userName} is an alias of another Workspace account`, null, false);
-          // No user holds it: a Google Group might (an address is a user's or a group's, never
-          // both). Otherwise it would read as "not visible yet" and be retried for ever. Needs
-          // the group scope; without it this is skipped.
-          if (!holder) {
-            const group = await request("GET", `/groups/${encodeURIComponent(user.userName)}`).catch(() => null);
-            if (group?.email) throw new ScimError(`POST /users: ${user.userName} is a Google Group's address; give the user another address, or rename the group`, null, false);
-          }
-        }
-        throw e;
-      }
-      if (!created?.id) throw new ScimError("POST /users: the response has no id", null, false);
-      return created.id;
-    },
-    /** A page of the Workspace's users (the admin's customer, every domain), for drift detection. */
-    async listUsers(cursor: string | null, count: number) {
-      const page = await request("GET", `/users?customer=my_customer&orderBy=email&maxResults=${Math.min(Math.max(1, count), 500)}${cursor ? `&pageToken=${encodeURIComponent(cursor)}` : ""}`);
-      const users = (page?.users ?? []).filter((u): u is GoogleUser & { id: string; primaryEmail: string } => !!u.id && !!u.primaryEmail).map((u) => ({ id: u.id, userName: u.primaryEmail, externalId: oursIn(u), active: !(u.suspended === true || u.archived === true) }));
-      return { users, next: page?.nextPageToken || null };
-    },
-    replace: update,
-    patch: (id: string, user: ScimUser) => update(id, user),
-    async setActive(id: string, active: boolean) {
-      await change(id, { suspended: !active });
-    },
-    async remove(id: string) {
-      try {
-        await request("DELETE", path(id));
-      } catch (e) {
-        if (e instanceof ScimError && e.status === 409) throw new ScimError(`DELETE ${path(id)}: 409 (Google is still applying an earlier change; retrying)`, 409, true);
-        throw e;
-      }
-    },
-    // By address, from the externalId: Google Groups can't be found by name, and a rename never moves them.
-    findGroupByName: async (_displayName: string, externalId?: string | null) => findGroup(externalId),
-    // Groups are found by our marker (externalId), never by name alone, so no members are needed.
-    groupMembers: async () => [],
-    createGroup,
-    createGroupInBatches: async (group: ScimGroup) => createGroup(group),
-    replaceGroup: updateGroup,
-    patchGroup: async (id: string, group: ScimGroup) => updateGroup(id, group),
-    async removeGroup(id: string) {
-      await request("DELETE", gpath(id));
-    },
-  };
+	return {
+		async findByUserName(userName: string) {
+			try {
+				const u = await request("GET", path(userName));
+				// Google also answers for an alias, which is someone else's account: only an exact primary email is a match.
+				if (!u?.id || u.primaryEmail?.toLowerCase() !== userName.toLowerCase())
+					return null;
+				return {
+					id: u.id,
+					externalId: oursIn(u),
+					active: u.suspended !== true,
+				};
+			} catch (e) {
+				if (e instanceof ScimError && e.status === 404 && e.retryable === false)
+					return null;
+				throw e;
+			}
+		},
+		async create(user: ScimUser) {
+			// Required by Google; users sign in through your identity provider, so it's never used.
+			const password = btoa(
+				String.fromCharCode(...crypto.getRandomValues(new Uint8Array(24))),
+			);
+			// orgUnitPath only here: where new users go, never moving a user an admin placed elsewhere.
+			let created: GoogleUser | null;
+			try {
+				const { employeeNumber, ...extra } = enterprise(user, null);
+				const ids = externalIdsOf(null, user.externalId, employeeNumber);
+				// Nothing to send for an attribute is left out of a create (an empty list says nothing).
+				const more = Object.fromEntries(
+					Object.entries({
+						...extra,
+						...details(user, null, extra.organizations),
+					}).filter(([, v]) => !(Array.isArray(v) && !v.length)),
+				);
+				created = await request("POST", "/users", {
+					...toGoogle(user),
+					...more,
+					password,
+					...(google?.orgUnitPath ? { orgUnitPath: google.orgUnitPath } : {}),
+					...(ids.length ? { externalIds: ids } : {}),
+				});
+			} catch (e) {
+				// Taken as another account's alias: that account is someone else's, and no retry changes it.
+				// Not reported as a 409, which would send the outbox looking for an account to adopt.
+				if (e instanceof ScimError && e.status === 409) {
+					const holder = await request("GET", path(user.userName)).catch(
+						() => null,
+					);
+					if (
+						holder?.primaryEmail &&
+						holder.primaryEmail.toLowerCase() !== user.userName.toLowerCase()
+					)
+						throw new ScimError(
+							`POST /users: ${user.userName} is an alias of another Workspace account`,
+							null,
+							false,
+						);
+					// No user holds it: a Google Group might (an address is a user's or a group's, never
+					// both). Otherwise it would read as "not visible yet" and be retried for ever. Needs
+					// the group scope; without it this is skipped.
+					if (!holder) {
+						const group = await request(
+							"GET",
+							`/groups/${encodeURIComponent(user.userName)}`,
+						).catch(() => null);
+						if (group?.email)
+							throw new ScimError(
+								`POST /users: ${user.userName} is a Google Group's address; give the user another address, or rename the group`,
+								null,
+								false,
+							);
+					}
+				}
+				throw e;
+			}
+			if (!created?.id)
+				throw new ScimError("POST /users: the response has no id", null, false);
+			return created.id;
+		},
+		/** A page of the Workspace's users (the admin's customer, every domain), for drift detection. */
+		async listUsers(cursor: string | null, count: number) {
+			const page = await request(
+				"GET",
+				`/users?customer=my_customer&orderBy=email&maxResults=${Math.min(Math.max(1, count), 500)}${cursor ? `&pageToken=${encodeURIComponent(cursor)}` : ""}`,
+			);
+			const users = (page?.users ?? [])
+				.filter(
+					(u): u is GoogleUser & { id: string; primaryEmail: string } =>
+						!!u.id && !!u.primaryEmail,
+				)
+				.map((u) => ({
+					id: u.id,
+					userName: u.primaryEmail,
+					externalId: oursIn(u),
+					active: !(u.suspended === true || u.archived === true),
+				}));
+			return { users, next: page?.nextPageToken || null };
+		},
+		replace: update,
+		patch: (id: string, user: ScimUser) => update(id, user),
+		async setActive(id: string, active: boolean) {
+			await change(id, { suspended: !active });
+		},
+		async remove(id: string) {
+			try {
+				await request("DELETE", path(id));
+			} catch (e) {
+				if (e instanceof ScimError && e.status === 409)
+					throw new ScimError(
+						`DELETE ${path(id)}: 409 (Google is still applying an earlier change; retrying)`,
+						409,
+						true,
+					);
+				throw e;
+			}
+		},
+		// By address, from the externalId: Google Groups can't be found by name, and a rename never moves them.
+		findGroupByName: async (_displayName: string, externalId?: string | null) =>
+			findGroup(externalId),
+		// Groups are found by our marker (externalId), never by name alone, so no members are needed.
+		groupMembers: async () => [],
+		createGroup,
+		createGroupInBatches: async (group: ScimGroup) => createGroup(group),
+		replaceGroup: updateGroup,
+		patchGroup: async (id: string, group: ScimGroup) => updateGroup(id, group),
+		async removeGroup(id: string) {
+			await request("DELETE", gpath(id));
+		},
+	};
 }

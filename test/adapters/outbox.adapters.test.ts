@@ -11,479 +11,992 @@ import { mockScim } from "../support/mock-scim";
 
 const KIND = process.env.ADAPTER_DB;
 const URL_ = process.env.ADAPTER_URL ?? "";
-if (process.env.ADAPTER_REQUIRED && (!KIND || (!URL_ && KIND !== "d1"))) throw new Error("ADAPTER_REQUIRED is set, but ADAPTER_DB or ADAPTER_URL is empty");
+if (process.env.ADAPTER_REQUIRED && (!KIND || (!URL_ && KIND !== "d1")))
+	throw new Error(
+		"ADAPTER_REQUIRED is set, but ADAPTER_DB or ADAPTER_URL is empty",
+	);
 
-const fresh = () => `scim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+const fresh = () =>
+	`scim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 
 type Db = HostDatabase & { close(): Promise<void> };
 
 /** Better Auth's own migrator creates the tables on the raw connection, as `npx auth migrate` would. */
 async function migrated(raw: Db): Promise<Db> {
-  const { getMigrations } = await import("better-auth/db/migration");
-  await (await getMigrations(schemaOptions(raw.database) as never)).runMigrations();
-  return raw;
+	const { getMigrations } = await import("better-auth/db/migration");
+	await (
+		await getMigrations(schemaOptions(raw.database) as never)
+	).runMigrations();
+	return raw;
 }
 
 /** Drizzle over the same server, with a schema built from Better Auth's table definitions. */
 async function withDrizzle(raw: Db, provider: "pg" | "mysql"): Promise<Db> {
-  await migrated(raw);
-  const { drizzleAdapter } = await import("better-auth/adapters/drizzle");
-  const schemas = await import("./orm-schemas");
-  const db = provider === "pg" ? (await import("drizzle-orm/node-postgres")).drizzle(raw.database as never) : (await import("drizzle-orm/mysql2")).drizzle(raw.database as never);
-  const schema = provider === "pg" ? await schemas.drizzlePgSchema(schemaOptions() as never) : await schemas.drizzleMysqlSchema(schemaOptions() as never);
-  return { database: drizzleAdapter(db as never, { provider, schema: schema as never }), migrate: false, close: raw.close };
+	await migrated(raw);
+	const { drizzleAdapter } = await import("better-auth/adapters/drizzle");
+	const schemas = await import("./orm-schemas");
+	const db =
+		provider === "pg"
+			? (await import("drizzle-orm/node-postgres")).drizzle(
+					raw.database as never,
+				)
+			: (await import("drizzle-orm/mysql2")).drizzle(raw.database as never);
+	const schema =
+		provider === "pg"
+			? await schemas.drizzlePgSchema(schemaOptions() as never)
+			: await schemas.drizzleMysqlSchema(schemaOptions() as never);
+	return {
+		database: drizzleAdapter(db as never, {
+			provider,
+			schema: schema as never,
+		}),
+		migrate: false,
+		close: raw.close,
+	};
 }
 
 /** Prisma 7 over Postgres: a client generated from a schema built from the same definitions. */
 async function withPrisma(raw: Db & { url: string }): Promise<Db> {
-  await migrated(raw);
-  const { mkdirSync, mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
-  const { join } = await import("node:path");
-  const { execFileSync } = await import("node:child_process");
-  const { pathToFileURL } = await import("node:url");
-  // Inside the project, so the generated client resolves the installed @prisma/client.
-  const cache = join(process.cwd(), "node_modules/.cache");
-  mkdirSync(cache, { recursive: true });
-  const dir = mkdtempSync(join(cache, "scim-prisma-"));
-  const { prismaSchema } = await import("./orm-schemas");
-  writeFileSync(join(dir, "schema.prisma"), prismaSchema(schemaOptions() as never, join(dir, "client")));
-  execFileSync(join(process.cwd(), "node_modules/.bin/prisma"), ["generate", "--schema", join(dir, "schema.prisma")], { stdio: "pipe" });
-  // The prisma-client generator writes TypeScript (client.ts), which Vitest loads directly.
-  const { PrismaClient } = (await import(pathToFileURL(join(dir, "client/client.ts")).href)) as { PrismaClient: new (o: unknown) => { $disconnect(): Promise<void> } };
-  const { PrismaPg } = await import("@prisma/adapter-pg");
-  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: raw.url }) });
-  const { prismaAdapter } = await import("better-auth/adapters/prisma");
-  return {
-    database: prismaAdapter(prisma as never, { provider: "postgresql" }),
-    migrate: false,
-    async close() {
-      await prisma.$disconnect();
-      await raw.close();
-      rmSync(dir, { recursive: true, force: true });
-    },
-  };
+	await migrated(raw);
+	const { mkdirSync, mkdtempSync, writeFileSync, rmSync } = await import(
+		"node:fs"
+	);
+	const { join } = await import("node:path");
+	const { execFileSync } = await import("node:child_process");
+	const { pathToFileURL } = await import("node:url");
+	// Inside the project, so the generated client resolves the installed @prisma/client.
+	const cache = join(process.cwd(), "node_modules/.cache");
+	mkdirSync(cache, { recursive: true });
+	const dir = mkdtempSync(join(cache, "scim-prisma-"));
+	const { prismaSchema } = await import("./orm-schemas");
+	writeFileSync(
+		join(dir, "schema.prisma"),
+		prismaSchema(schemaOptions() as never, join(dir, "client")),
+	);
+	execFileSync(
+		join(process.cwd(), "node_modules/.bin/prisma"),
+		["generate", "--schema", join(dir, "schema.prisma")],
+		{ stdio: "pipe" },
+	);
+	// The prisma-client generator writes TypeScript (client.ts), which Vitest loads directly.
+	const { PrismaClient } = (await import(
+		pathToFileURL(join(dir, "client/client.ts")).href
+	)) as { PrismaClient: new (o: unknown) => { $disconnect(): Promise<void> } };
+	const { PrismaPg } = await import("@prisma/adapter-pg");
+	const prisma = new PrismaClient({
+		adapter: new PrismaPg({ connectionString: raw.url }),
+	});
+	const { prismaAdapter } = await import("better-auth/adapters/prisma");
+	return {
+		database: prismaAdapter(prisma as never, { provider: "postgresql" }),
+		migrate: false,
+		async close() {
+			await prisma.$disconnect();
+			await raw.close();
+			rmSync(dir, { recursive: true, force: true });
+		},
+	};
 }
 
 const databases: Record<string, () => Promise<Db>> = {
-  async postgres() {
-    const { Pool } = await import("pg");
-    const name = fresh();
-    const admin = new Pool({ connectionString: URL_ });
-    await admin.query(`CREATE DATABASE ${name}`);
-    const url = new URL(URL_);
-    url.pathname = `/${name}`;
-    const pool = new Pool({ connectionString: url.toString(), max: 10 });
-    pool.on("error", () => {});
-    return {
-      database: pool,
-      migrate: true,
-      url: url.toString(),
-      async close() {
-        await pool.end();
-        await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-        await admin.end();
-      },
-    };
-  },
-  async mysql() {
-    const mysql = await import("mysql2/promise");
-    const name = fresh();
-    const admin = await mysql.createConnection(URL_);
-    await admin.query(`CREATE DATABASE ${name}`);
-    const url = new URL(URL_);
-    url.pathname = `/${name}`;
-    const pool = mysql.createPool({ uri: url.toString(), connectionLimit: 10, timezone: "Z" });
-    return {
-      database: pool,
-      migrate: true,
-      async close() {
-        await pool.end();
-        await admin.query(`DROP DATABASE IF EXISTS ${name}`);
-        await admin.end();
-      },
-    };
-  },
-  async mongodb() {
-    const { MongoClient } = await import("mongodb");
-    const { mongodbAdapter } = await import("better-auth/adapters/mongodb");
-    const client = new MongoClient(URL_);
-    await client.connect();
-    const db = client.db(fresh());
-    return {
-      // No migrations: the adapter creates collections and (UNIQUE) indexes on first use.
-      database: mongodbAdapter(db, { client }),
-      migrate: false,
-      async close() {
-        await db.dropDatabase();
-        await client.close();
-      },
-    };
-  },
-  "drizzle-postgres": async () => withDrizzle(await databases.postgres!(), "pg"),
-  "drizzle-mysql": async () => withDrizzle(await databases.mysql!(), "mysql"),
-  "prisma-postgres": async () => withPrisma((await databases.postgres!()) as Db & { url: string }),
-  // Cloudflare D1, run locally by Miniflare: the SQLite that Workers apps actually use, with D1's
-  // limits (at most 100 bound parameters per query, which reconcile's `in` queries once exceeded).
-  async d1() {
-    const { Miniflare, convertV4MiniflareOptions } = await import("miniflare");
-    const mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: "export default { fetch: () => new Response(null) }", d1Databases: ["DB"] }));
-    return { database: await mf.getD1Database("DB"), migrate: true, close: () => mf.dispose() };
-  },
+	async postgres() {
+		const { Pool } = await import("pg");
+		const name = fresh();
+		const admin = new Pool({ connectionString: URL_ });
+		await admin.query(`CREATE DATABASE ${name}`);
+		const url = new URL(URL_);
+		url.pathname = `/${name}`;
+		const pool = new Pool({ connectionString: url.toString(), max: 10 });
+		pool.on("error", () => {});
+		return {
+			database: pool,
+			migrate: true,
+			url: url.toString(),
+			async close() {
+				await pool.end();
+				await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+				await admin.end();
+			},
+		};
+	},
+	async mysql() {
+		const mysql = await import("mysql2/promise");
+		const name = fresh();
+		const admin = await mysql.createConnection(URL_);
+		await admin.query(`CREATE DATABASE ${name}`);
+		const url = new URL(URL_);
+		url.pathname = `/${name}`;
+		const pool = mysql.createPool({
+			uri: url.toString(),
+			connectionLimit: 10,
+			timezone: "Z",
+		});
+		return {
+			database: pool,
+			migrate: true,
+			async close() {
+				await pool.end();
+				await admin.query(`DROP DATABASE IF EXISTS ${name}`);
+				await admin.end();
+			},
+		};
+	},
+	async mongodb() {
+		const { MongoClient } = await import("mongodb");
+		const { mongodbAdapter } = await import("better-auth/adapters/mongodb");
+		const client = new MongoClient(URL_);
+		await client.connect();
+		const db = client.db(fresh());
+		return {
+			// No migrations: the adapter creates collections and (UNIQUE) indexes on first use.
+			database: mongodbAdapter(db, { client }),
+			migrate: false,
+			async close() {
+				await db.dropDatabase();
+				await client.close();
+			},
+		};
+	},
+	"drizzle-postgres": async () =>
+		withDrizzle(await databases.postgres!(), "pg"),
+	"drizzle-mysql": async () => withDrizzle(await databases.mysql!(), "mysql"),
+	"prisma-postgres": async () =>
+		withPrisma((await databases.postgres!()) as Db & { url: string }),
+	// Cloudflare D1, run locally by Miniflare: the SQLite that Workers apps actually use, with D1's
+	// limits (at most 100 bound parameters per query, which reconcile's `in` queries once exceeded).
+	async d1() {
+		const { Miniflare, convertV4MiniflareOptions } = await import("miniflare");
+		const mf = new Miniflare(
+			convertV4MiniflareOptions({
+				modules: true,
+				script: "export default { fetch: () => new Response(null) }",
+				d1Databases: ["DB"],
+			}),
+		);
+		return {
+			database: await mf.getD1Database("DB"),
+			migrate: true,
+			close: () => mf.dispose(),
+		};
+	},
 };
 
 const open: { close(): Promise<void> }[] = [];
 afterEach(async () => {
-  for (const d of open.splice(0)) await d.close();
+	for (const d of open.splice(0)) await d.close();
 });
 
 async function host(o: Parameters<typeof createHost>[0] = {}) {
-  const make = databases[KIND as string];
-  if (!make) throw new Error(`unknown ADAPTER_DB ${KIND}`);
-  const database = await make();
-  open.push(database);
-  return createHost({ ...o, database });
+	const make = databases[KIND as string];
+	if (!make) throw new Error(`unknown ADAPTER_DB ${KIND}`);
+	const database = await make();
+	open.push(database);
+	return createHost({ ...o, database });
 }
 
-const appUsers = (app: { users: Map<string, unknown> }) => [...app.users.values()] as Record<string, any>[];
+const appUsers = (app: { users: Map<string, unknown> }) =>
+	[...app.users.values()] as Record<string, any>[];
 
-describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(`the outbox on ${KIND}`, () => {
-  it("a user's life: create, change, ban, unban, delete", async () => {
-    const h = await host();
-    const u = await h.user("Ada King Lovelace");
-    expect(appUsers(h.app)).toEqual([expect.objectContaining({ externalId: u.id, active: true, name: expect.objectContaining({ familyName: "Lovelace" }) })]);
-    await h.ctx.internalAdapter.updateUser(u.id, { name: "Ada Byron" });
-    await h.settle();
-    expect(appUsers(h.app)[0]?.displayName).toBe("Ada Byron");
-    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
-    await h.settle();
-    expect(appUsers(h.app)[0]?.active).toBe(false);
-    await h.ctx.internalAdapter.updateUser(u.id, { banned: false });
-    await h.settle();
-    expect(appUsers(h.app)[0]?.active).toBe(true);
-    await h.ctx.internalAdapter.deleteUser(u.id);
-    await h.settle();
-    expect(appUsers(h.app)[0]?.active).toBe(false);
-    expect(await h.jobs()).toEqual([]);
-  });
+describe.skipIf(!KIND || (!URL_ && KIND !== "d1"))(
+	`the outbox on ${KIND}`,
+	() => {
+		it("a user's life: create, change, ban, unban, delete", async () => {
+			const h = await host();
+			const u = await h.user("Ada King Lovelace");
+			expect(appUsers(h.app)).toEqual([
+				expect.objectContaining({
+					externalId: u.id,
+					active: true,
+					name: expect.objectContaining({ familyName: "Lovelace" }),
+				}),
+			]);
+			await h.ctx.internalAdapter.updateUser(u.id, { name: "Ada Byron" });
+			await h.settle();
+			expect(appUsers(h.app)[0]?.displayName).toBe("Ada Byron");
+			await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+			await h.settle();
+			expect(appUsers(h.app)[0]?.active).toBe(false);
+			await h.ctx.internalAdapter.updateUser(u.id, { banned: false });
+			await h.settle();
+			expect(appUsers(h.app)[0]?.active).toBe(true);
+			await h.ctx.internalAdapter.deleteUser(u.id);
+			await h.settle();
+			expect(appUsers(h.app)[0]?.active).toBe(false);
+			expect(await h.jobs()).toEqual([]);
+		});
 
-  it("two workers on one job: exactly one delivers (the lease)", async () => {
-    const h = await host({ retry: { baseDelayMs: 0 } });
-    h.app.fail({ status: 503 });
-    await h.user();
-    const runs = await Promise.all([1, 2, 3].map(() => h.auth.api.scimProvisioningRun({ body: {} })));
-    expect(runs.reduce((n, r) => n + r.done, 0)).toBe(1);
-    expect(h.app.users.size).toBe(1);
-    expect(h.app.requests.filter((r) => r.method === "POST")).toHaveLength(2); // the 503, then the one delivery
-  });
+		it("two workers on one job: exactly one delivers (the lease)", async () => {
+			const h = await host({ retry: { baseDelayMs: 0 } });
+			h.app.fail({ status: 503 });
+			await h.user();
+			const runs = await Promise.all(
+				[1, 2, 3].map(() => h.auth.api.scimProvisioningRun({ body: {} })),
+			);
+			expect(runs.reduce((n, r) => n + r.done, 0)).toBe(1);
+			expect(h.app.users.size).toBe(1);
+			expect(h.app.requests.filter((r) => r.method === "POST")).toHaveLength(2); // the 503, then the one delivery
+		});
 
-  it("a change during delivery is delivered too (the version check)", async () => {
-    const h = await host();
-    const u = await h.user("First Name");
-    const release = h.app.hold();
-    await h.ctx.internalAdapter.updateUser(u.id, { name: "Second Name" });
-    await new Promise((r) => setTimeout(r, 50));
-    await h.ctx.internalAdapter.updateUser(u.id, { name: "Third Name" });
-    release();
-    await h.settle();
-    expect(appUsers(h.app)[0]?.displayName).toBe("Third Name");
-    expect(await h.jobs()).toEqual([]);
-  });
+		it("a change during delivery is delivered too (the version check)", async () => {
+			const h = await host();
+			const u = await h.user("First Name");
+			const release = h.app.hold();
+			await h.ctx.internalAdapter.updateUser(u.id, { name: "Second Name" });
+			await new Promise((r) => setTimeout(r, 50));
+			await h.ctx.internalAdapter.updateUser(u.id, { name: "Third Name" });
+			release();
+			await h.settle();
+			expect(appUsers(h.app)[0]?.displayName).toBe("Third Name");
+			expect(await h.jobs()).toEqual([]);
+		});
 
-  it("retries wait for their time (dates), and failed jobs stay out of the run (booleans)", async () => {
-    const h = await host({ retry: { baseDelayMs: 60_000 } });
-    h.app.fail({ status: 503 });
-    await h.user();
-    expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 0, retry: 0 });
-    const h2 = await host({ retry: { baseDelayMs: 0 } });
-    h2.app.fail({ status: 400 });
-    await h2.user();
-    expect(await h2.jobs()).toEqual([expect.objectContaining({ failed: true })]);
-    expect(await h2.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 0 });
-  });
+		it("retries wait for their time (dates), and failed jobs stay out of the run (booleans)", async () => {
+			const h = await host({ retry: { baseDelayMs: 60_000 } });
+			h.app.fail({ status: 503 });
+			await h.user();
+			expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({
+				done: 0,
+				retry: 0,
+			});
+			const h2 = await host({ retry: { baseDelayMs: 0 } });
+			h2.app.fail({ status: 400 });
+			await h2.user();
+			expect(await h2.jobs()).toEqual([
+				expect.objectContaining({ failed: true }),
+			]);
+			expect(await h2.auth.api.scimProvisioningRun({ body: {} })).toMatchObject(
+				{ done: 0 },
+			);
+		});
 
-  it("adoption refuses another user's account", async () => {
-    const h = await host();
-    const a = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "First Owner", emailVerified: true }, { method: "admin" });
-    await h.settle();
-    await h.ctx.internalAdapter.deleteUser(a.id);
-    await h.settle();
-    const b = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "Second Person", emailVerified: true }, { method: "admin" });
-    await h.settle();
-    expect(appUsers(h.app)).toEqual([expect.objectContaining({ externalId: a.id, active: false })]);
-    expect(await h.jobs()).toEqual([expect.objectContaining({ userId: b.id, failed: true })]);
-  });
+		it("adoption refuses another user's account", async () => {
+			const h = await host();
+			const a = await h.ctx.internalAdapter.createUser(
+				{ email: "same@example.com", name: "First Owner", emailVerified: true },
+				{ method: "admin" },
+			);
+			await h.settle();
+			await h.ctx.internalAdapter.deleteUser(a.id);
+			await h.settle();
+			const b = await h.ctx.internalAdapter.createUser(
+				{
+					email: "same@example.com",
+					name: "Second Person",
+					emailVerified: true,
+				},
+				{ method: "admin" },
+			);
+			await h.settle();
+			expect(appUsers(h.app)).toEqual([
+				expect.objectContaining({ externalId: a.id, active: false }),
+			]);
+			expect(await h.jobs()).toEqual([
+				expect.objectContaining({ userId: b.id, failed: true }),
+			]);
+		});
 
-  it("status counts (count with ne, lt and gte)", async () => {
-    const h = await host({ retry: { maxAttempts: 1, baseDelayMs: 0 } });
-    await h.user("Ada Lovelace");
-    h.app.fail({ status: 503 });
-    await h.user("Bea Berg");
-    const status = await h.auth.api.scimProvisioningStatus({ body: {} });
-    expect(status.targets).toEqual([{ id: "app", queued: 0, waiting: 0, stuck: 1, failed: 0, rateLimited: 0, accounts: 1, groups: 0, credentialsExpireAt: null }]);
-  });
+		it("status counts (count with ne, lt and gte)", async () => {
+			const h = await host({ retry: { maxAttempts: 1, baseDelayMs: 0 } });
+			await h.user("Ada Lovelace");
+			h.app.fail({ status: 503 });
+			await h.user("Bea Berg");
+			const status = await h.auth.api.scimProvisioningStatus({ body: {} });
+			expect(status.targets).toEqual([
+				{
+					id: "app",
+					queued: 0,
+					waiting: 0,
+					stuck: 1,
+					failed: 0,
+					rateLimited: 0,
+					accounts: 1,
+					groups: 0,
+					credentialsExpireAt: null,
+				},
+			]);
+		});
 
-  it("failures are listed a page at a time (the database's id order, gt): none skipped", async () => {
-    // Enough of them, a few to a page, that mixed-case ids cross page boundaries: MySQL compares
-    // ids case-insensitively, and paging must follow the database's order, not JavaScript's.
-    const h = await host({ retry: { maxAttempts: 1, baseDelayMs: 0 } });
-    h.app.fail(...Array.from({ length: 8 }, (_, i) => ({ status: i % 2 ? 503 : 400 })));
-    const ids: string[] = [];
-    for (let i = 0; i < 8; i++) ids.push((await h.user(`Person Number${i}`)).id);
-    const seen: string[] = [];
-    let after: string | undefined;
-    for (let page = 0; page < 10; page++) {
-      const r: { items: { subjectId: string }[]; next: string | null } = await h.auth.api.scimProvisioningFailures({ body: { limit: 3, ...(after ? { after } : {}) } });
-      seen.push(...r.items.map((i) => i.subjectId));
-      if (!r.next) break;
-      after = r.next;
-    }
-    // Every user's failure, none skipped. (MongoDB, without the UNIQUE key index, can hold a
-    // duplicate job for a user, listed too.)
-    expect([...new Set(seen)].sort()).toEqual(ids.sort());
-  });
+		it("failures are listed a page at a time (the database's id order, gt): none skipped", async () => {
+			// Enough of them, a few to a page, that mixed-case ids cross page boundaries: MySQL compares
+			// ids case-insensitively, and paging must follow the database's order, not JavaScript's.
+			const h = await host({ retry: { maxAttempts: 1, baseDelayMs: 0 } });
+			h.app.fail(
+				...Array.from({ length: 8 }, (_, i) => ({ status: i % 2 ? 503 : 400 })),
+			);
+			const ids: string[] = [];
+			for (let i = 0; i < 8; i++)
+				ids.push((await h.user(`Person Number${i}`)).id);
+			const seen: string[] = [];
+			let after: string | undefined;
+			for (let page = 0; page < 10; page++) {
+				const r: { items: { subjectId: string }[]; next: string | null } =
+					await h.auth.api.scimProvisioningFailures({
+						body: { limit: 3, ...(after ? { after } : {}) },
+					});
+				seen.push(...r.items.map((i) => i.subjectId));
+				if (!r.next) break;
+				after = r.next;
+			}
+			// Every user's failure, none skipped. (MongoDB, without the UNIQUE key index, can hold a
+			// duplicate job for a user, listed too.)
+			expect([...new Set(seen)].sort()).toEqual(ids.sort());
+		});
 
-  it("roles differing only by case keep apart (MySQL compares keys case-insensitively)", async () => {
-    const h = await host({ targets: [{ id: "app", roleGroups: true }] });
-    const [a, b] = [await h.user("Ann Admin"), await h.user("Bob Admin")];
-    const org = await h.ctx.adapter.create<{ id: string }>({ model: "organization", data: { name: "Acme", slug: "acme", createdAt: new Date() } });
-    await h.ctx.adapter.create({ model: "member", data: { organizationId: org.id, userId: a.id, role: "Admin", createdAt: new Date() } });
-    await h.ctx.adapter.create({ model: "member", data: { organizationId: org.id, userId: b.id, role: "admin", createdAt: new Date() } });
-    // Queues both roles' groups, rather than failing on a duplicate key.
-    expect(await h.auth.api.scimProvisioningQueue({ body: { organizationId: org.id } })).toEqual({ queued: 2 });
-    await h.settle();
-    const jobs = (await h.jobs()) as { key: string }[];
-    const links = await h.ctx.adapter.findMany<{ key: string; subjectId: string }>({ model: "scimProvisioningGroupLink" });
-    // No two keys that differ only by case, among the jobs or among the links.
-    for (const keys of [jobs.map((j) => j.key), links.map((l) => l.key)]) expect(new Set(keys.map((k) => k.toLowerCase())).size).toBe(new Set(keys).size);
-    // "Acme / admin" is at the app; "Acme / Admin" is the same name to this app, and refused, not merged.
-    expect([...h.app.groups.values()].map((g) => g.displayName)).toHaveLength(1);
-    expect(links.every((l) => l.subjectId === `${org.id}:admin` || l.subjectId === `${org.id}:Admin`)).toBe(true);
-  });
+		it("roles differing only by case keep apart (MySQL compares keys case-insensitively)", async () => {
+			const h = await host({ targets: [{ id: "app", roleGroups: true }] });
+			const [a, b] = [await h.user("Ann Admin"), await h.user("Bob Admin")];
+			const org = await h.ctx.adapter.create<{ id: string }>({
+				model: "organization",
+				data: { name: "Acme", slug: "acme", createdAt: new Date() },
+			});
+			await h.ctx.adapter.create({
+				model: "member",
+				data: {
+					organizationId: org.id,
+					userId: a.id,
+					role: "Admin",
+					createdAt: new Date(),
+				},
+			});
+			await h.ctx.adapter.create({
+				model: "member",
+				data: {
+					organizationId: org.id,
+					userId: b.id,
+					role: "admin",
+					createdAt: new Date(),
+				},
+			});
+			// Queues both roles' groups, rather than failing on a duplicate key.
+			expect(
+				await h.auth.api.scimProvisioningQueue({
+					body: { organizationId: org.id },
+				}),
+			).toEqual({ queued: 2 });
+			await h.settle();
+			const jobs = (await h.jobs()) as { key: string }[];
+			const links = await h.ctx.adapter.findMany<{
+				key: string;
+				subjectId: string;
+			}>({ model: "scimProvisioningGroupLink" });
+			// No two keys that differ only by case, among the jobs or among the links.
+			for (const keys of [jobs.map((j) => j.key), links.map((l) => l.key)])
+				expect(new Set(keys.map((k) => k.toLowerCase())).size).toBe(
+					new Set(keys).size,
+				);
+			// "Acme / admin" is at the app; "Acme / Admin" is the same name to this app, and refused, not merged.
+			expect([...h.app.groups.values()].map((g) => g.displayName)).toHaveLength(
+				1,
+			);
+			expect(
+				links.every(
+					(l) =>
+						l.subjectId === `${org.id}:admin` ||
+						l.subjectId === `${org.id}:Admin`,
+				),
+			).toBe(true);
+		});
 
-  it("reconcile covers existing and deleted users", async () => {
-    const h = await host();
-    const kept = await h.user("Kept Person");
-    const gone = await h.user("Gone Person");
-    await h.ctx.adapter.delete({ model: "user", where: [{ field: "id", value: gone.id }] });
-    expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({ queued: 2, next: null });
-    await h.auth.api.scimProvisioningRun({ body: {} });
-    expect(appUsers(h.app)).toEqual(
-      expect.arrayContaining([expect.objectContaining({ externalId: kept.id, active: true }), expect.objectContaining({ externalId: gone.id, active: false })]),
-    );
-  });
+		it("reconcile covers existing and deleted users", async () => {
+			const h = await host();
+			const kept = await h.user("Kept Person");
+			const gone = await h.user("Gone Person");
+			await h.ctx.adapter.delete({
+				model: "user",
+				where: [{ field: "id", value: gone.id }],
+			});
+			expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({
+				queued: 2,
+				next: null,
+			});
+			await h.auth.api.scimProvisioningRun({ body: {} });
+			expect(appUsers(h.app)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ externalId: kept.id, active: true }),
+					expect.objectContaining({ externalId: gone.id, active: false }),
+				]),
+			);
+		});
 
-  it("reconcile with more linked users than one query may bind (D1 allows 100 parameters)", async () => {
-    const h = await host();
-    // 150 accounts at the app whose users are gone: reconcile looks their links up by user id.
-    for (let i = 0; i < 150; i++) {
-      await h.ctx.adapter.create({ model: "scimProvisioningLink", data: { key: `app:gone-${i}`, targetId: "app", userId: `gone-${i}`, remoteId: `r${i}`, userName: `gone-${i}@example.com`, active: false, syncedAt: new Date() } });
-    }
-    expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({ queued: 150, next: null });
-  }, 120_000); // 150 rows written one at a time: slow on local D1 under load
+		it("reconcile with more linked users than one query may bind (D1 allows 100 parameters)", async () => {
+			const h = await host();
+			// 150 accounts at the app whose users are gone: reconcile looks their links up by user id.
+			for (let i = 0; i < 150; i++) {
+				await h.ctx.adapter.create({
+					model: "scimProvisioningLink",
+					data: {
+						key: `app:gone-${i}`,
+						targetId: "app",
+						userId: `gone-${i}`,
+						remoteId: `r${i}`,
+						userName: `gone-${i}@example.com`,
+						active: false,
+						syncedAt: new Date(),
+					},
+				});
+			}
+			expect(await h.auth.api.scimProvisioningReconcile({ body: {} })).toEqual({
+				queued: 150,
+				next: null,
+			});
+		}, 120_000); // 150 rows written one at a time: slow on local D1 under load
 
-  it("reconcile in pages (id order, gt and in queries)", async () => {
-    const h = await host();
-    const users = [await h.user("One Person"), await h.user("Two Person"), await h.user("Three Person")];
-    const gone = await h.user("Gone Person");
-    await h.ctx.adapter.delete({ model: "user", where: [{ field: "id", value: gone.id }] });
-    let queued = 0;
-    let next: string | null | undefined;
-    do {
-      const r = await h.auth.api.scimProvisioningReconcile({ body: { limit: 1, ...(next ? { after: next } : {}) } });
-      queued += r.queued;
-      next = r.next;
-    } while (next);
-    expect(queued).toBe(4);
-    expect((await h.jobs()).map((j) => j.userId).sort()).toEqual([...users.map((u) => u.id), gone.id].sort());
-  });
+		it("reconcile in pages (id order, gt and in queries)", async () => {
+			const h = await host();
+			const users = [
+				await h.user("One Person"),
+				await h.user("Two Person"),
+				await h.user("Three Person"),
+			];
+			const gone = await h.user("Gone Person");
+			await h.ctx.adapter.delete({
+				model: "user",
+				where: [{ field: "id", value: gone.id }],
+			});
+			let queued = 0;
+			let next: string | null | undefined;
+			do {
+				const r = await h.auth.api.scimProvisioningReconcile({
+					body: { limit: 1, ...(next ? { after: next } : {}) },
+				});
+				queued += r.queued;
+				next = r.next;
+			} while (next);
+			expect(queued).toBe(4);
+			expect((await h.jobs()).map((j) => j.userId).sort()).toEqual(
+				[...users.map((u) => u.id), gone.id].sort(),
+			);
+		});
 
-  it("a lost create reply, then a ban: the pending link finds the account", async () => {
-    const h = await host({ retry: { baseDelayMs: 60_000 } });
-    h.app.fail({ lostReply: true });
-    const u = await h.user();
-    expect(await h.links()).toEqual([expect.objectContaining({ userId: u.id, remoteId: "" })]);
-    await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
-    await h.settle();
-    expect(appUsers(h.app)).toEqual([expect.objectContaining({ externalId: u.id, active: false })]);
-  });
+		it("a lost create reply, then a ban: the pending link finds the account", async () => {
+			const h = await host({ retry: { baseDelayMs: 60_000 } });
+			h.app.fail({ lostReply: true });
+			const u = await h.user();
+			expect(await h.links()).toEqual([
+				expect.objectContaining({ userId: u.id, remoteId: "" }),
+			]);
+			await h.ctx.internalAdapter.updateUser(u.id, { banned: true });
+			await h.settle();
+			expect(appUsers(h.app)).toEqual([
+				expect.objectContaining({ externalId: u.id, active: false }),
+			]);
+		});
 
-  it("adoption refuses an account linked to another user, by remoteId", async () => {
-    const h = await host({ targets: [{ id: "app", keepsExternalId: false }] });
-    const a = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "First Owner", emailVerified: true }, { method: "admin" });
-    await h.settle();
-    await h.ctx.internalAdapter.deleteUser(a.id);
-    await h.settle();
-    const b = await h.ctx.internalAdapter.createUser({ email: "same@example.com", name: "Second Person", emailVerified: true }, { method: "admin" });
-    await h.settle();
-    expect(appUsers(h.app)).toEqual([expect.objectContaining({ active: false, displayName: "First Owner" })]);
-    expect(await h.jobs()).toEqual([expect.objectContaining({ userId: b.id, failed: true })]);
-  });
+		it("adoption refuses an account linked to another user, by remoteId", async () => {
+			const h = await host({
+				targets: [{ id: "app", keepsExternalId: false }],
+			});
+			const a = await h.ctx.internalAdapter.createUser(
+				{ email: "same@example.com", name: "First Owner", emailVerified: true },
+				{ method: "admin" },
+			);
+			await h.settle();
+			await h.ctx.internalAdapter.deleteUser(a.id);
+			await h.settle();
+			const b = await h.ctx.internalAdapter.createUser(
+				{
+					email: "same@example.com",
+					name: "Second Person",
+					emailVerified: true,
+				},
+				{ method: "admin" },
+			);
+			await h.settle();
+			expect(appUsers(h.app)).toEqual([
+				expect.objectContaining({ active: false, displayName: "First Owner" }),
+			]);
+			expect(await h.jobs()).toEqual([
+				expect.objectContaining({ userId: b.id, failed: true }),
+			]);
+		});
 
-  it("groups: an organization's group with its members, following a leave (gt, in, kind)", async () => {
-    const h = await host({ targets: [{ id: "app", groups: true }] });
-    const signUp = await h.auth.api.signUpEmail({ body: { email: "owner@example.com", password: "correct-horse-battery", name: "Olive Owner" } });
-    await h.ctx.internalAdapter.updateUser(signUp.user.id, { emailVerified: true });
-    await h.settle();
-    const res = await h.auth.api.signInEmail({ body: { email: "owner@example.com", password: "correct-horse-battery" }, asResponse: true });
-    const headers = { cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") };
-    const org = await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers });
-    const ada = await h.user("Ada Lovelace");
-    await h.auth.api.addMember({ body: { userId: ada.id, organizationId: org!.id, role: "member" } });
-    await h.settle();
-    const members = () => [...h.app.groups.values()].map((g) => [g.displayName, g.members.length]);
-    expect(members()).toEqual([["Acme", 2]]);
-    await h.auth.api.removeMember({ body: { memberIdOrEmail: ada.email, organizationId: org!.id }, headers });
-    await h.settle();
-    expect(members()).toEqual([["Acme", 1]]);
-  });
+		it("groups: an organization's group with its members, following a leave (gt, in, kind)", async () => {
+			const h = await host({ targets: [{ id: "app", groups: true }] });
+			const signUp = await h.auth.api.signUpEmail({
+				body: {
+					email: "owner@example.com",
+					password: "correct-horse-battery",
+					name: "Olive Owner",
+				},
+			});
+			await h.ctx.internalAdapter.updateUser(signUp.user.id, {
+				emailVerified: true,
+			});
+			await h.settle();
+			const res = await h.auth.api.signInEmail({
+				body: { email: "owner@example.com", password: "correct-horse-battery" },
+				asResponse: true,
+			});
+			const headers = {
+				cookie: res.headers
+					.getSetCookie()
+					.map((c) => c.split(";")[0])
+					.join("; "),
+			};
+			const org = await h.auth.api.createOrganization({
+				body: { name: "Acme", slug: "acme" },
+				headers,
+			});
+			const ada = await h.user("Ada Lovelace");
+			await h.auth.api.addMember({
+				body: { userId: ada.id, organizationId: org!.id, role: "member" },
+			});
+			await h.settle();
+			const members = () =>
+				[...h.app.groups.values()].map((g) => [
+					g.displayName,
+					g.members.length,
+				]);
+			expect(members()).toEqual([["Acme", 2]]);
+			await h.auth.api.removeMember({
+				body: { memberIdOrEmail: ada.email, organizationId: org!.id },
+				headers,
+			});
+			await h.settle();
+			expect(members()).toEqual([["Acme", 1]]);
+		});
 
-  it("team and role groups (teamMember, comma-separated roles, group link kind)", async () => {
-    const h = await host({ targets: [{ id: "app", teamGroups: true, roleGroups: ["admin"] }] });
-    const signUp = await h.auth.api.signUpEmail({ body: { email: "owner@example.com", password: "correct-horse-battery", name: "Olive Owner" } });
-    await h.ctx.internalAdapter.updateUser(signUp.user.id, { emailVerified: true });
-    await h.settle();
-    const res = await h.auth.api.signInEmail({ body: { email: "owner@example.com", password: "correct-horse-battery" }, asResponse: true });
-    const headers = { cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") };
-    const org = await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers });
-    const ada = await h.user("Ada Lovelace");
-    await h.auth.api.addMember({ body: { userId: ada.id, organizationId: org!.id, role: ["admin", "member"] } });
-    const team = await h.auth.api.createTeam({ body: { name: "Red", organizationId: org!.id }, headers });
-    await h.auth.api.addTeamMember({ body: { teamId: team.id, userId: ada.id }, headers });
-    await h.settle();
-    const sizes = () => Object.fromEntries([...h.app.groups.values()].map((g) => [g.displayName, g.members.length]));
-    expect(sizes()).toMatchObject({ "Acme / Red": 1, "Acme / admin": 1 });
-  });
+		it("team and role groups (teamMember, comma-separated roles, group link kind)", async () => {
+			const h = await host({
+				targets: [{ id: "app", teamGroups: true, roleGroups: ["admin"] }],
+			});
+			const signUp = await h.auth.api.signUpEmail({
+				body: {
+					email: "owner@example.com",
+					password: "correct-horse-battery",
+					name: "Olive Owner",
+				},
+			});
+			await h.ctx.internalAdapter.updateUser(signUp.user.id, {
+				emailVerified: true,
+			});
+			await h.settle();
+			const res = await h.auth.api.signInEmail({
+				body: { email: "owner@example.com", password: "correct-horse-battery" },
+				asResponse: true,
+			});
+			const headers = {
+				cookie: res.headers
+					.getSetCookie()
+					.map((c) => c.split(";")[0])
+					.join("; "),
+			};
+			const org = await h.auth.api.createOrganization({
+				body: { name: "Acme", slug: "acme" },
+				headers,
+			});
+			const ada = await h.user("Ada Lovelace");
+			await h.auth.api.addMember({
+				body: {
+					userId: ada.id,
+					organizationId: org!.id,
+					role: ["admin", "member"],
+				},
+			});
+			const team = await h.auth.api.createTeam({
+				body: { name: "Red", organizationId: org!.id },
+				headers,
+			});
+			await h.auth.api.addTeamMember({
+				body: { teamId: team.id, userId: ada.id },
+				headers,
+			});
+			await h.settle();
+			const sizes = () =>
+				Object.fromEntries(
+					[...h.app.groups.values()].map((g) => [
+						g.displayName,
+						g.members.length,
+					]),
+				);
+			expect(sizes()).toMatchObject({ "Acme / Red": 1, "Acme / admin": 1 });
+		});
 
-  it("the registry: a stored target per organization (long sealed text, booleans, exact matches)", async () => {
-    // A long token: a sealed Google private key is thousands of characters, so the column must hold them.
-    const remote = mockScim({ token: "k".repeat(3000) });
-    const h = await host({ targets: [], registry: { fetch: remote.fetch } });
-    const signUp = await h.auth.api.signUpEmail({ body: { email: "owner@example.com", password: "correct-horse-battery", name: "Olive Owner" } });
-    await h.ctx.internalAdapter.updateUser(signUp.user.id, { emailVerified: true });
-    await h.settle();
-    const res = await h.auth.api.signInEmail({ body: { email: "owner@example.com", password: "correct-horse-battery" }, asResponse: true });
-    const headers = new Headers({ cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") });
-    const acme = (await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers }))!;
-    const { target } = await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, settings: { url: "https://app.example.com/scim/v2", groups: true }, credentials: { token: remote.token } }, headers });
-    await h.settle();
-    expect(appUsers(remote).map((u) => u.displayName)).toEqual(["Olive Owner"]);
-    // Someone outside Acme: nothing for Acme's app.
-    await h.user("Bob Builder");
-    expect(appUsers(remote)).toHaveLength(1);
-    await h.auth.api.scimProvisioningUpdateTarget({ body: { id: target.id, enabled: false }, headers });
-    expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ id: target.id, enabled: false, credentials: { kind: "bearer" } })]);
-    await h.auth.api.scimProvisioningDeleteTarget({ body: { id: target.id }, headers });
-    expect(await h.links()).toEqual([]);
-    // The largest credentials accepted (a 16 KB key, about 33 KB sealed) fit and read back: the
-    // columns are text (64 KB on MySQL), as Better Auth's migrator and generators make them.
-    const key = `-----BEGIN PRIVATE KEY-----${"k".repeat(16_384 - 54)}-----END PRIVATE KEY-----`;
-    const google = await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, enabled: false, settings: { type: "google-workspace", google: { clientEmail: "sa@p.iam.gserviceaccount.com", adminEmail: "admin@example.com" } }, credentials: { privateKey: key } }, headers });
-    expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ id: google.target.id, credentials: { kind: "google-service-account" } })]);
-    // A change is written only over the row as read: an equality match on the long sealed text.
-    await h.auth.api.scimProvisioningUpdateTarget({ body: { id: google.target.id, settings: { type: "google-workspace", name: "Workspace", google: { clientEmail: "sa@p.iam.gserviceaccount.com", adminEmail: "admin@example.com" } } }, headers });
-    expect((await h.auth.api.scimProvisioningListTargets({ headers })).targets).toEqual([expect.objectContaining({ settings: expect.objectContaining({ name: "Workspace" }) })]);
-    // A create with a requestId, twice at once: the unique target id makes it one (however the
-    // database refuses the second), and both get that target.
-    const twice = { organizationId: acme.id, enabled: false, settings: { url: "https://other.example.com/scim/v2" }, credentials: { token: remote.token }, requestId: "adapter-request-0001" };
-    const both = await Promise.all([0, 1].map(() => h.auth.api.scimProvisioningCreateTarget({ body: twice, headers })));
-    expect(both[0]!.target.id).toBe(both[1]!.target.id);
-    expect(await h.ctx.adapter.count({ model: "scimProvisioningTarget", where: [{ field: "targetId", value: both[0]!.target.id }] })).toBe(1);
-  });
+		it("the registry: a stored target per organization (long sealed text, booleans, exact matches)", async () => {
+			// A long token: a sealed Google private key is thousands of characters, so the column must hold them.
+			const remote = mockScim({ token: "k".repeat(3000) });
+			const h = await host({ targets: [], registry: { fetch: remote.fetch } });
+			const signUp = await h.auth.api.signUpEmail({
+				body: {
+					email: "owner@example.com",
+					password: "correct-horse-battery",
+					name: "Olive Owner",
+				},
+			});
+			await h.ctx.internalAdapter.updateUser(signUp.user.id, {
+				emailVerified: true,
+			});
+			await h.settle();
+			const res = await h.auth.api.signInEmail({
+				body: { email: "owner@example.com", password: "correct-horse-battery" },
+				asResponse: true,
+			});
+			const headers = new Headers({
+				cookie: res.headers
+					.getSetCookie()
+					.map((c) => c.split(";")[0])
+					.join("; "),
+			});
+			const acme = (await h.auth.api.createOrganization({
+				body: { name: "Acme", slug: "acme" },
+				headers,
+			}))!;
+			const { target } = await h.auth.api.scimProvisioningCreateTarget({
+				body: {
+					organizationId: acme.id,
+					settings: { url: "https://app.example.com/scim/v2", groups: true },
+					credentials: { token: remote.token },
+				},
+				headers,
+			});
+			await h.settle();
+			expect(appUsers(remote).map((u) => u.displayName)).toEqual([
+				"Olive Owner",
+			]);
+			// Someone outside Acme: nothing for Acme's app.
+			await h.user("Bob Builder");
+			expect(appUsers(remote)).toHaveLength(1);
+			await h.auth.api.scimProvisioningUpdateTarget({
+				body: { id: target.id, enabled: false },
+				headers,
+			});
+			expect(
+				(await h.auth.api.scimProvisioningListTargets({ headers })).targets,
+			).toEqual([
+				expect.objectContaining({
+					id: target.id,
+					enabled: false,
+					credentials: { kind: "bearer" },
+				}),
+			]);
+			await h.auth.api.scimProvisioningDeleteTarget({
+				body: { id: target.id },
+				headers,
+			});
+			expect(await h.links()).toEqual([]);
+			// The largest credentials accepted (a 16 KB key, about 33 KB sealed) fit and read back: the
+			// columns are text (64 KB on MySQL), as Better Auth's migrator and generators make them.
+			const key = `-----BEGIN PRIVATE KEY-----${"k".repeat(16_384 - 54)}-----END PRIVATE KEY-----`;
+			const google = await h.auth.api.scimProvisioningCreateTarget({
+				body: {
+					organizationId: acme.id,
+					enabled: false,
+					settings: {
+						type: "google-workspace",
+						google: {
+							clientEmail: "sa@p.iam.gserviceaccount.com",
+							adminEmail: "admin@example.com",
+						},
+					},
+					credentials: { privateKey: key },
+				},
+				headers,
+			});
+			expect(
+				(await h.auth.api.scimProvisioningListTargets({ headers })).targets,
+			).toEqual([
+				expect.objectContaining({
+					id: google.target.id,
+					credentials: { kind: "google-service-account" },
+				}),
+			]);
+			// A change is written only over the row as read: an equality match on the long sealed text.
+			await h.auth.api.scimProvisioningUpdateTarget({
+				body: {
+					id: google.target.id,
+					settings: {
+						type: "google-workspace",
+						name: "Workspace",
+						google: {
+							clientEmail: "sa@p.iam.gserviceaccount.com",
+							adminEmail: "admin@example.com",
+						},
+					},
+				},
+				headers,
+			});
+			expect(
+				(await h.auth.api.scimProvisioningListTargets({ headers })).targets,
+			).toEqual([
+				expect.objectContaining({
+					settings: expect.objectContaining({ name: "Workspace" }),
+				}),
+			]);
+			// A create with a requestId, twice at once: the unique target id makes it one (however the
+			// database refuses the second), and both get that target.
+			const twice = {
+				organizationId: acme.id,
+				enabled: false,
+				settings: { url: "https://other.example.com/scim/v2" },
+				credentials: { token: remote.token },
+				requestId: "adapter-request-0001",
+			};
+			const both = await Promise.all(
+				[0, 1].map(() =>
+					h.auth.api.scimProvisioningCreateTarget({ body: twice, headers }),
+				),
+			);
+			expect(both[0]!.target.id).toBe(both[1]!.target.id);
+			expect(
+				await h.ctx.adapter.count({
+					model: "scimProvisioningTarget",
+					where: [{ field: "targetId", value: both[0]!.target.id }],
+				}),
+			).toBe(1);
+		});
 
-  it("the registry: an organization queued a page at a time (member id order, gt)", async () => {
-    const remote = mockScim();
-    const h = await host({ targets: [], registry: { fetch: remote.fetch } });
-    const signUp = await h.auth.api.signUpEmail({ body: { email: "owner@example.com", password: "correct-horse-battery", name: "Olive Owner" } });
-    await h.ctx.internalAdapter.updateUser(signUp.user.id, { emailVerified: true });
-    await h.settle();
-    const res = await h.auth.api.signInEmail({ body: { email: "owner@example.com", password: "correct-horse-battery" }, asResponse: true });
-    const headers = new Headers({ cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") });
-    const acme = (await h.auth.api.createOrganization({ body: { name: "Acme", slug: "acme" }, headers }))!;
-    // More members than one page (100), written directly (no hooks).
-    for (let i = 0; i < 105; i++) {
-      const u = await h.ctx.adapter.create<Record<string, unknown>, { id: string }>({ model: "user", data: { email: `m${i}@example.com`, name: `Member ${i}`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() } });
-      await h.ctx.adapter.create({ model: "member", data: { userId: u.id, organizationId: acme.id, role: "member", createdAt: new Date() } });
-    }
-    await h.auth.api.scimProvisioningCreateTarget({ body: { organizationId: acme.id, settings: { url: "https://app.example.com/scim/v2" }, credentials: { token: remote.token } }, headers });
-    await h.settle();
-    for (let i = 0; i < 20 && (await h.jobs()).length; i++) {
-      await h.auth.api.scimProvisioningRun({ body: { limit: 100 } });
-      await h.settle();
-    }
-    expect(await h.jobs()).toEqual([]);
-    expect(appUsers(remote)).toHaveLength(106);
-  }, 120_000);
+		it("the registry: an organization queued a page at a time (member id order, gt)", async () => {
+			const remote = mockScim();
+			const h = await host({ targets: [], registry: { fetch: remote.fetch } });
+			const signUp = await h.auth.api.signUpEmail({
+				body: {
+					email: "owner@example.com",
+					password: "correct-horse-battery",
+					name: "Olive Owner",
+				},
+			});
+			await h.ctx.internalAdapter.updateUser(signUp.user.id, {
+				emailVerified: true,
+			});
+			await h.settle();
+			const res = await h.auth.api.signInEmail({
+				body: { email: "owner@example.com", password: "correct-horse-battery" },
+				asResponse: true,
+			});
+			const headers = new Headers({
+				cookie: res.headers
+					.getSetCookie()
+					.map((c) => c.split(";")[0])
+					.join("; "),
+			});
+			const acme = (await h.auth.api.createOrganization({
+				body: { name: "Acme", slug: "acme" },
+				headers,
+			}))!;
+			// More members than one page (100), written directly (no hooks).
+			for (let i = 0; i < 105; i++) {
+				const u = await h.ctx.adapter.create<
+					Record<string, unknown>,
+					{ id: string }
+				>({
+					model: "user",
+					data: {
+						email: `m${i}@example.com`,
+						name: `Member ${i}`,
+						emailVerified: true,
+						createdAt: new Date(),
+						updatedAt: new Date(),
+					},
+				});
+				await h.ctx.adapter.create({
+					model: "member",
+					data: {
+						userId: u.id,
+						organizationId: acme.id,
+						role: "member",
+						createdAt: new Date(),
+					},
+				});
+			}
+			await h.auth.api.scimProvisioningCreateTarget({
+				body: {
+					organizationId: acme.id,
+					settings: { url: "https://app.example.com/scim/v2" },
+					credentials: { token: remote.token },
+				},
+				headers,
+			});
+			await h.settle();
+			for (let i = 0; i < 20 && (await h.jobs()).length; i++) {
+				await h.auth.api.scimProvisioningRun({ body: { limit: 100 } });
+				await h.settle();
+			}
+			expect(await h.jobs()).toEqual([]);
+			expect(appUsers(remote)).toHaveLength(106);
+		}, 120_000);
 
-  it("a decommission: its walk, compare-and-set and counts (in on kind, OR connectors)", async () => {
-    const h = await host({ decommission: true });
-    for (const name of ["Ada Lovelace", "Bo Bell", "Cy Young"]) await h.user(name);
-    const adapter = h.ctx.adapter as unknown as Adapter;
-    const box = outbox({ decommission: true, targets: [{ id: "app", url: h.app.url, token: h.app.token, fetch: h.app.fetch, decommission: true }] }, adapter, { warn() {}, error() {} });
-    const target = (await box.source.get("app"))!;
-    expect(await box.decommissionCounts("app")).toEqual({ accounts: 3, groups: 0 });
-    const [a, b] = await Promise.all([box.startDecommission("app", "server"), box.startDecommission("app", "server")]);
-    expect(a.id).toBe(b.id);
-    for (let i = 0; i < 20 && (await box.decommissionOf("app"))?.state !== "complete"; i++) {
-      await box.runDue(200);
-      await adapter.updateMany({ model: "scimProvisioningJob", where: [{ field: "targetId", value: "app" }], update: { nextAttemptAt: new Date(Date.now() - 1000) } });
-    }
-    expect(await box.decommissionStatus(target)).toMatchObject({ phase: "deactivate", state: "complete", accounts: 0, total: 3 });
-    expect([...h.app.users.values()].map((u) => u.active)).toEqual([false, false, false]);
-    expect(await box.cancelDecommission("app", "server")).toBe(false);
-  });
+		it("a decommission: its walk, compare-and-set and counts (in on kind, OR connectors)", async () => {
+			const h = await host({ decommission: true });
+			for (const name of ["Ada Lovelace", "Bo Bell", "Cy Young"])
+				await h.user(name);
+			const adapter = h.ctx.adapter as unknown as Adapter;
+			const box = outbox(
+				{
+					decommission: true,
+					targets: [
+						{
+							id: "app",
+							url: h.app.url,
+							token: h.app.token,
+							fetch: h.app.fetch,
+							decommission: true,
+						},
+					],
+				},
+				adapter,
+				{ warn() {}, error() {} },
+			);
+			const target = (await box.source.get("app"))!;
+			expect(await box.decommissionCounts("app")).toEqual({
+				accounts: 3,
+				groups: 0,
+			});
+			const [a, b] = await Promise.all([
+				box.startDecommission("app", "server"),
+				box.startDecommission("app", "server"),
+			]);
+			expect(a.id).toBe(b.id);
+			for (
+				let i = 0;
+				i < 20 && (await box.decommissionOf("app"))?.state !== "complete";
+				i++
+			) {
+				await box.runDue(200);
+				await adapter.updateMany({
+					model: "scimProvisioningJob",
+					where: [{ field: "targetId", value: "app" }],
+					update: { nextAttemptAt: new Date(Date.now() - 1000) },
+				});
+			}
+			expect(await box.decommissionStatus(target)).toMatchObject({
+				phase: "deactivate",
+				state: "complete",
+				accounts: 0,
+				total: 3,
+			});
+			expect([...h.app.users.values()].map((u) => u.active)).toEqual([
+				false,
+				false,
+				false,
+			]);
+			expect(await box.cancelDecommission("app", "server")).toBe(false);
+		});
 
-  it("a decommission over several pages, and a cancel's restore walk (key ranges, in on keys)", async () => {
-    const h = await host({ decommission: true });
-    for (const name of ["Ada Lovelace", "Bo Bell", "Cy Young"]) await h.user(name);
-    const adapter = h.ctx.adapter as unknown as Adapter;
-    // Accounts made before, their users since gone: past a page of 50.
-    for (let i = 0; i < 60; i++) await adapter.create({ model: "scimProvisioningLink", data: { key: `app:old${String(i).padStart(2, "0")}`, targetId: "app", userId: `old${String(i).padStart(2, "0")}`, remoteId: `gone${i}`, userName: `old${i}@example.com`, active: true, syncedAt: new Date() } });
-    const box = outbox({ decommission: true, targets: [{ id: "app", url: h.app.url, token: h.app.token, fetch: h.app.fetch }] }, adapter, { warn() {}, error() {} });
-    await box.startDecommission("app", "server");
-    await box.runFor("app", "step", "decommission");
-    await box.runFor("app", "step", "decommission");
-    // Its groups, then the first page: 50 accounts queued, and the cursor on the 50th.
-    const users = async () => (await h.jobs()).filter((j) => (j.kind ?? "user") === "user").map((j) => j.userId);
-    expect(await users()).toHaveLength(50);
-    expect((await box.decommissionOf("app"))?.cursor).toMatch(/^l:/);
-    expect(await box.cancelDecommission("app", "server")).toBe(true);
-    for (let i = 0; i < 30 && (await h.jobs()).length > 0; i++) {
-      await box.runDue(200);
-      await adapter.updateMany({ model: "scimProvisioningJob", where: [{ field: "targetId", value: "app" }], update: { nextAttemptAt: new Date(Date.now() - 1000) } });
-    }
-    expect(await h.jobs()).toEqual([]);
-    expect(await box.decommissionOf("app")).toMatchObject({ state: "cancelled", cursor: "" });
-    expect([...h.app.users.values()].map((u) => u.active)).toEqual([true, true, true]);
-  });
+		it("a decommission over several pages, and a cancel's restore walk (key ranges, in on keys)", async () => {
+			const h = await host({ decommission: true });
+			for (const name of ["Ada Lovelace", "Bo Bell", "Cy Young"])
+				await h.user(name);
+			const adapter = h.ctx.adapter as unknown as Adapter;
+			// Accounts made before, their users since gone: past a page of 50.
+			for (let i = 0; i < 60; i++)
+				await adapter.create({
+					model: "scimProvisioningLink",
+					data: {
+						key: `app:old${String(i).padStart(2, "0")}`,
+						targetId: "app",
+						userId: `old${String(i).padStart(2, "0")}`,
+						remoteId: `gone${i}`,
+						userName: `old${i}@example.com`,
+						active: true,
+						syncedAt: new Date(),
+					},
+				});
+			const box = outbox(
+				{
+					decommission: true,
+					targets: [
+						{
+							id: "app",
+							url: h.app.url,
+							token: h.app.token,
+							fetch: h.app.fetch,
+						},
+					],
+				},
+				adapter,
+				{ warn() {}, error() {} },
+			);
+			await box.startDecommission("app", "server");
+			await box.runFor("app", "step", "decommission");
+			await box.runFor("app", "step", "decommission");
+			// Its groups, then the first page: 50 accounts queued, and the cursor on the 50th.
+			const users = async () =>
+				(await h.jobs())
+					.filter((j) => (j.kind ?? "user") === "user")
+					.map((j) => j.userId);
+			expect(await users()).toHaveLength(50);
+			expect((await box.decommissionOf("app"))?.cursor).toMatch(/^l:/);
+			expect(await box.cancelDecommission("app", "server")).toBe(true);
+			for (let i = 0; i < 30 && (await h.jobs()).length > 0; i++) {
+				await box.runDue(200);
+				await adapter.updateMany({
+					model: "scimProvisioningJob",
+					where: [{ field: "targetId", value: "app" }],
+					update: { nextAttemptAt: new Date(Date.now() - 1000) },
+				});
+			}
+			expect(await h.jobs()).toEqual([]);
+			expect(await box.decommissionOf("app")).toMatchObject({
+				state: "cancelled",
+				cursor: "",
+			});
+			expect([...h.app.users.values()].map((u) => u.active)).toEqual([
+				true,
+				true,
+				true,
+			]);
+		});
 
-  it("a run looks past a frozen target's backlog (ne), and a 429 holds the target's other jobs", async () => {
-    const h = await host({ decommission: true, targets: [] });
-    const [ada, bo] = [await h.user("Ada Lovelace"), await h.user("Bo Bell")];
-    const other = mockScim();
-    const adapter = h.ctx.adapter as unknown as Adapter;
-    const box = outbox({ decommission: true, targets: [{ id: "frozen", url: other.url, token: other.token, fetch: other.fetch, decommission: true }, { id: "app2", url: other.url, token: other.token, fetch: other.fetch }] }, adapter, { warn() {}, error() {} });
-    for (let i = 0; i < 210; i++) await box.enqueue("frozen", `f${i}`);
-    await box.enqueue("app2", ada.id);
-    expect(await box.runDue(50)).toMatchObject({ done: 1 });
-    expect(other.users.size).toBe(1);
-    await box.enqueue("app2", bo.id);
-    await h.ctx.internalAdapter.updateUser(ada.id, { name: "Ada King" });
-    await box.enqueue("app2", ada.id);
-    other.fail({ status: 429, retryAfter: "120" });
-    expect(await box.runFor("app2", ada.id)).toBe("retry");
-    const boJob = (await adapter.findOne({ model: "scimProvisioningJob", where: [{ field: "key", value: `app2:${bo.id}` }] })) as { attempts: number; lastStatus: number; nextAttemptAt: Date };
-    expect(boJob).toMatchObject({ attempts: 0, lastStatus: 429 });
-    expect(new Date(boJob.nextAttemptAt as Date).getTime()).toBeGreaterThan(Date.now() + 100_000);
-  });
+		it("a run looks past a frozen target's backlog (ne), and a 429 holds the target's other jobs", async () => {
+			const h = await host({ decommission: true, targets: [] });
+			const [ada, bo] = [await h.user("Ada Lovelace"), await h.user("Bo Bell")];
+			const other = mockScim();
+			const adapter = h.ctx.adapter as unknown as Adapter;
+			const box = outbox(
+				{
+					decommission: true,
+					targets: [
+						{
+							id: "frozen",
+							url: other.url,
+							token: other.token,
+							fetch: other.fetch,
+							decommission: true,
+						},
+						{
+							id: "app2",
+							url: other.url,
+							token: other.token,
+							fetch: other.fetch,
+						},
+					],
+				},
+				adapter,
+				{ warn() {}, error() {} },
+			);
+			for (let i = 0; i < 210; i++) await box.enqueue("frozen", `f${i}`);
+			await box.enqueue("app2", ada.id);
+			expect(await box.runDue(50)).toMatchObject({ done: 1 });
+			expect(other.users.size).toBe(1);
+			await box.enqueue("app2", bo.id);
+			await h.ctx.internalAdapter.updateUser(ada.id, { name: "Ada King" });
+			await box.enqueue("app2", ada.id);
+			other.fail({ status: 429, retryAfter: "120" });
+			expect(await box.runFor("app2", ada.id)).toBe("retry");
+			const boJob = (await adapter.findOne({
+				model: "scimProvisioningJob",
+				where: [{ field: "key", value: `app2:${bo.id}` }],
+			})) as { attempts: number; lastStatus: number; nextAttemptAt: Date };
+			expect(boJob).toMatchObject({ attempts: 0, lastStatus: 429 });
+			expect(new Date(boJob.nextAttemptAt as Date).getTime()).toBeGreaterThan(
+				Date.now() + 100_000,
+			);
+		});
 
-  it("a timed ban is lifted when it runs out", async () => {
-    const h = await host();
-    const u = await h.user();
-    await h.ctx.internalAdapter.updateUser(u.id, { banned: true, banExpires: new Date(Date.now() + 1500) });
-    await h.settle();
-    expect(appUsers(h.app)[0]?.active).toBe(false);
-    await new Promise((r) => setTimeout(r, 1600));
-    expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({ done: 1 });
-    expect(appUsers(h.app)[0]?.active).toBe(true);
-  });
-});
+		it("a timed ban is lifted when it runs out", async () => {
+			const h = await host();
+			const u = await h.user();
+			await h.ctx.internalAdapter.updateUser(u.id, {
+				banned: true,
+				banExpires: new Date(Date.now() + 1500),
+			});
+			await h.settle();
+			expect(appUsers(h.app)[0]?.active).toBe(false);
+			await new Promise((r) => setTimeout(r, 1600));
+			expect(await h.auth.api.scimProvisioningRun({ body: {} })).toMatchObject({
+				done: 1,
+			});
+			expect(appUsers(h.app)[0]?.active).toBe(true);
+		});
+	},
+);
