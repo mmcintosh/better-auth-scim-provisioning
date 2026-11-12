@@ -33,6 +33,7 @@ How it maps:
 
 Groups (`groups`, `teamGroups`, `roleGroups`, as for SCIM apps):
 - each group is a Google Group at an address made from its externalId, such as `ba-team-<team id>@your-domain.com`, so renaming an organization renames the group without moving it. Set `google.groupDomain` for another domain, or `google.groupEmail: (externalId) => string` to name them yourself, and keep it stable: the address is how the group is found again;
+- the address keeps only the externalId's letters and digits, in lower case. So two role groups in one organization whose role names differ only in case or in other characters get the same address: `billing_admin` and `billing-admin`, `Admin` and `admin`, or two names written only in other scripts, such as `管理者` and `編集者`. Only the first gets its group. The second's job fails with a 409 saying a group with that name already exists, and renaming the group or setting `roleGroupName` doesn't help, since neither changes the address. Give such roles names that differ in their letters or digits, or set `google.groupEmail` to tell them apart; if groups already exist, it must return the address each one already has ([#147](https://github.com/mmcintosh/better-auth-scim-provisioning/issues/147));
 - the description marks it ours. A group already at that address without our marker is someone else's, and is never taken over;
 - members are the provisioned users, added and removed one request each; members that aren't users (a nested group an admin added) are left alone.
 
