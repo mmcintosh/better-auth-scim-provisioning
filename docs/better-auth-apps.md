@@ -34,7 +34,7 @@ scim({
 ```
 - **Only users with a verified email are sent**, by default (`requireVerifiedEmail`), so a new sign-up appears there once they've verified it.
 - **Their email is unverified there.** `@better-auth/scim` creates users with `emailVerified: false`. If the app requires verified emails to sign in with a password, provisioned users sign in another way (SSO, an ID-JAG) or verify there.
-- **On Cloudflare, give that app Postgres through Hyperdrive, not D1.** `@better-auth/scim` needs database transactions, which D1 doesn't have. This package, the identity provider side, runs on D1 as before.
+- **On Cloudflare, give that app Postgres through Hyperdrive, not D1.** `@better-auth/scim` needs database transactions, which D1 doesn't have. On D1, from Better Auth 1.7.21, the app starts but answers 501 to every SCIM request (before, it didn't start). This package retries those like any other error the app's host has to fix, with that reason in the error, and `check` reports it. This package, the identity provider side, runs on D1 as before.
 
 **ID-JAG.** An app that accepts ID-JAGs (Identity Assertion JWT Authorization Grants, the grant behind Cross App Access and MCP's Enterprise-Managed Authorization) can find the user an ID-JAG names through this link: `acquireActiveSCIMUserLink({ connectionId, externalId: sub })` from `@better-auth/scim`. That works because an ID-JAG issued by a Better Auth identity provider carries the Better Auth user id as its `sub` (unless the provider gives clients pairwise subject identifiers), and that id is the `externalId` this package sends by default.
 

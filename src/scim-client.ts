@@ -265,9 +265,13 @@ export function scimClient(endpoint: ScimEndpoint) {
     const auth = res.status === 401 || res.status === 403;
     // /Users itself can't be missing: a 404 there is a wrong URL, the host's to fix, like a token.
     const misplaced = res.status === 404 && /^\/(Users|Groups)(\?|$)/.test(path);
+    // 501: the app doesn't support the request. From @better-auth/scim (1.7.21 on), it's every request
+    // while its database has no transactions, such as D1. Retried like a token: the app's host fixes
+    // it (or the target's settings), and the queued changes then go through.
+    const unimplemented = res.status === 501;
     const retryable = res.status === 408 || res.status === 429 || res.status >= 500 || auth || misplaced;
     throw new ScimError(
-      `${method} ${path}: ${res.status}${auth ? " (check the target's token)" : misplaced ? " (check the target's url)" : ""}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
+      `${method} ${path}: ${res.status}${auth ? " (check the target's token)" : misplaced ? " (check the target's url)" : unimplemented ? " (not implemented: the app doesn't support this request; a Better Auth app answers 501 to every SCIM request while its database has no transactions, as on D1)" : ""}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
       res.status,
       retryable,
       retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,

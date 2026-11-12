@@ -81,6 +81,10 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   }
   const why = (r: { status: number; json: Record<string, unknown> | null; error?: string }) =>
     r.error ?? `${r.status}${typeof r.json?.detail === "string" ? ` ${r.json.detail.slice(0, 200)}` : ""}`;
+  // @better-auth/scim (1.7.21 on) on a database without transactions: 501 to every request, before
+  // any write. Matched on its own words, so another app's 501 isn't taken for it.
+  const noTransactions = (r: { status: number; json: Record<string, unknown> | null }) =>
+    r.status === 501 && typeof r.json?.detail === "string" && r.json.detail.includes("requires a database adapter with native transaction support");
 
   // 1. What the app says about itself.
   const spc = await call("GET", "/ServiceProviderConfig");
@@ -96,6 +100,10 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
       events && typeof events === "object" && typeof events.asyncRequest === "string" && `asynchronous requests: ${events.asyncRequest.slice(0, 50)}${events.asyncRequest.toLowerCase() === "long" ? " (it may answer a slow create with 202; a create is then looked for again)" : ""}`,
     ].filter(Boolean);
     note("service-provider-config", "ServiceProviderConfig", true, `patch ${flag("patch")}, filter ${flag("filter")}, bulk ${flag("bulk")}, etag ${flag("etag")}, sort ${flag("sort")}${schemes ? `; auth: ${schemes}` : ""}${extra.length ? `; ${extra.join("; ")}` : ""}`);
+  } else if (noTransactions(spc)) {
+    // Not "optional": @better-auth/scim answers 501 to all of SCIM while its database has no
+    // transactions. Another app's 501 here is only no ServiceProviderConfig, as RFC 7644 allows.
+    note("service-provider-config", "ServiceProviderConfig", false, `${why(spc)}; a Better Auth app answers 501 to every SCIM request while its database has no transactions (D1, for one): give it one that has them`);
   } else note("service-provider-config", "ServiceProviderConfig", null, `not available (${why(spc)}); fine, it's optional in practice`);
 
   // 1b. Does the app advertise the Enterprise User extension (RFC 7643 §4.3)? /ResourceTypes says
@@ -149,7 +157,7 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
   const id = typeof created.json?.id === "string" ? created.json.id : null;
   if (!(created.status >= 200 && created.status < 300 && id)) {
     // The app may have made the user anyway (a 2xx without an id, a timeout after the write).
-    note("create", "create a user", false, `${created.status === 202 ? "202: accepted, to be done later (asynchronously), which the plugin handles by looking for the account again; the other checks need it at once" : created.status >= 200 && created.status < 300 ? `${created.status} without an id` : why(created)}; if the app made it anyway, remove the test user ${userName} there by hand`);
+    note("create", "create a user", false, `${created.status === 202 ? "202: accepted, to be done later (asynchronously), which the plugin handles by looking for the account again; the other checks need it at once" : created.status >= 200 && created.status < 300 ? `${created.status} without an id` : why(created)}${noTransactions(created) ? "" : `; if the app made it anyway, remove the test user ${userName} there by hand`}`);
     return results;
   }
   note("create", "create a user", true, `${created.status}, id ${id}`);
