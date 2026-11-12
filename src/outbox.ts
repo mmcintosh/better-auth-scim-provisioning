@@ -538,20 +538,35 @@ export function outbox(
 		return false;
 	}
 
-	/** Another target at the same app, still in use, linked to this group (one organization's two targets there share its groups). */
+	/**
+	 * Another target at the same app, still in use, linked to this group (one organization's two
+	 * targets there share its groups). Every link with this remote id is read: an id is the app's own,
+	 * so targets at other apps may have it too ("5"), and the one at this app can be anywhere among them.
+	 */
 	async function groupSharedWith(
 		target: Target,
 		remoteId: string,
+		inUse = (otherId: string) => stillUsed(target, otherId),
 	): Promise<boolean> {
-		const links = (await adapter.findMany({
-			model: GROUP_LINK_MODEL,
-			where: [{ field: "remoteId", value: remoteId }],
-			limit: 20,
-		})) as GroupLink[];
-		for (const l of links)
-			if (l.remoteId === remoteId && (await stillUsed(target, l.targetId)))
-				return true;
-		return false;
+		const seen = new Set<string>();
+		for (let after: string | null = null; ; ) {
+			const where: Where[] = [{ field: "remoteId", value: remoteId }];
+			if (after !== null)
+				where.push({ field: "key", value: after, operator: "gt" });
+			const links = (await adapter.findMany({
+				model: GROUP_LINK_MODEL,
+				where,
+				limit: PAGE,
+				sortBy: { field: "key", direction: "asc" },
+			})) as GroupLink[];
+			for (const l of links) {
+				if (l.remoteId !== remoteId || seen.has(l.targetId)) continue;
+				seen.add(l.targetId);
+				if (await inUse(l.targetId)) return true;
+			}
+			if (links.length < PAGE) return false;
+			after = (links[links.length - 1] as GroupLink).key;
+		}
 	}
 
 	/** A rate limit: the app's 429, Google's 403 rateLimitExceeded, or maxRequestsPerMinute's own. */
@@ -1916,10 +1931,12 @@ export function outbox(
 	 * what's due (a slow app, a large organization just queued), it takes at most half the batch and
 	 * the others' go too. A paced target (maxRequestsPerMinute) takes about a minute's worth (two
 	 * requests a job): more would only wait their turn, holding up the run. A frozen one takes none.
-	 * When those fill what was looked at, it looks again past them, so they can't hold up the rest.
+	 * When what was looked at is full and some targets have their share of it, it looks again past
+	 * them: a backlog larger than what's looked at can't hold up the rest.
 	 */
 	async function dueJobs(limit: number, targetId?: string): Promise<Job[]> {
 		const window = targetId === undefined ? limit * 4 : limit;
+		const cap = Math.max(1, Math.floor(limit * PER_TARGET_SHARE));
 		const paces = new Map<string, number>();
 		const looked = new Set<string>();
 		const found = new Map<string, Job>();
@@ -1964,20 +1981,15 @@ export function outbox(
 					new Date(b.nextAttemptAt).getTime(),
 			);
 			const due = fairShare(all, limit, paces);
-			if (
-				targetId !== undefined ||
-				page.length < window ||
-				due.length >= limit ||
-				pass >= 2
-			)
+			// Everything due was seen, or this is the last look.
+			if (targetId !== undefined || page.length < window || pass >= 2)
 				return due;
 			const queued = new Map<string, number>();
 			for (const j of all)
 				queued.set(j.targetId, (queued.get(j.targetId) ?? 0) + 1);
-			const full = [...paces]
-				.filter(
-					([id, pace]) => !past.includes(id) && (queued.get(id) ?? 0) >= pace,
-				)
+			// Targets with their share (or pace) of what was seen: others' may be due past them.
+			const full = [...queued]
+				.filter(([id, n]) => !past.includes(id) && n >= (paces.get(id) ?? cap))
 				.map(([id]) => id);
 			if (full.length === 0) return due;
 			past.push(...full);
@@ -3582,12 +3594,18 @@ export function outbox(
 			);
 			for (let i = 0; i < mine.length; i += IN_BATCH) {
 				const batch = mine.slice(i, i + IN_BATCH);
+				// By user too: a remote id is the app's own, so other apps' targets may have it as well.
 				const others = (await adapter.findMany({
 					model: LINK_MODEL,
 					where: [
 						{
 							field: "remoteId",
 							value: batch.map((l) => l.remoteId),
+							operator: "in",
+						},
+						{
+							field: "userId",
+							value: batch.map((l) => l.userId),
 							operator: "in",
 						},
 					],
@@ -3622,29 +3640,14 @@ export function outbox(
 			})) as GroupLink[];
 			full = page.length >= PAGE;
 			after = page[page.length - 1]?.key ?? after;
-			const mine = page.filter((g) => g.targetId === targetId && g.remoteId);
-			for (let i = 0; i < mine.length; i += IN_BATCH) {
-				const batch = mine.slice(i, i + IN_BATCH);
-				const others = (await adapter.findMany({
-					model: GROUP_LINK_MODEL,
-					where: [
-						{
-							field: "remoteId",
-							value: batch.map((g) => g.remoteId),
-							operator: "in",
-						},
-					],
-					limit: batch.length * 20,
-				})) as GroupLink[];
-				for (const g of batch)
-					for (const o of others.filter(
-						(o) => o.targetId !== targetId && o.remoteId === g.remoteId,
-					))
-						if (await stillUsedOnce(o.targetId)) {
-							groups++;
-							break;
-						}
-			}
+			// As the decommission itself decides: every link with the group's remote id.
+			for (const g of page)
+				if (
+					g.targetId === targetId &&
+					g.remoteId &&
+					(await groupSharedWith(target, g.remoteId, stillUsedOnce))
+				)
+					groups++;
 		}
 		return { accounts, groups };
 	}

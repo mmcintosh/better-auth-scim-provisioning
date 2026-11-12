@@ -545,6 +545,33 @@ describe("attributes: Google and Entra edges", () => {
 		]);
 	});
 
+	it("Google Workspace: a mapUser's own primary address stays the only primary; the work one isn't made primary too", async () => {
+		const mapUser = (u: { email: string; id: string }) => ({
+			schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
+			userName: u.email,
+			externalId: u.id,
+			active: true,
+			name: { givenName: "F", familyName: "G" },
+			addresses: [
+				{ type: "home", locality: "Leeds", primary: true },
+				{ type: "work", locality: "London" },
+			],
+		});
+		const h = await createHost({
+			targets: [{ id: "gw", type: "google-workspace", mapUser }],
+		});
+		const fay = await h.user("Fay Wray");
+		await h.settle();
+		const addresses = gUser(h, fay.email)().addresses as {
+			type: string;
+			primary?: boolean;
+		}[];
+		expect(addresses.filter((a) => a.primary).map((a) => a.type)).toEqual([
+			"home",
+		]);
+		expect(addresses.map((a) => a.type).sort()).toEqual(["home", "work"]);
+	});
+
 	it("Entra ID: a mapUser's title and phones (by type) are sent; a home address has nowhere to go", async () => {
 		const mapUser = (u: { email: string; id: string }) => ({
 			schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],

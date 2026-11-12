@@ -73,7 +73,7 @@ export function parseAuthFile(text: string): ScimAuth {
 		oauth2: ["tokenUrl", "clientId", "clientSecret"],
 	};
 	const type = raw && typeof raw.type === "string" ? raw.type : "";
-	const fields = needs[type];
+	const fields = Object.hasOwn(needs, type) ? needs[type] : undefined;
 	if (!fields)
 		throw new Error(
 			`--auth: "type" must be one of ${Object.keys(needs).join(", ")}`,

@@ -69,6 +69,7 @@
     "better-auth": "1.7.19",
     "drizzle-orm": "0.45.4",
     "esbuild": "^0.28.2",
+    "fast-check": "^4.10.2",
     "miniflare": "5.20261023.0-beta",
     "mongodb": "^7.7.0",
     "mysql2": "^3.24.5",
