@@ -11,6 +11,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 ### Fixed
 
 - **A `null` in an app's list no longer fails the request.** An app whose list of users or groups, or of a group's members, had a `null` entry in it made finding, listing and group updates throw a TypeError. The change was then retried until it gave up, and the check route said the request couldn't be made. Such entries are now skipped; paging still counts them, as the app does. `check` skips them too.
+- **A large backlog at one target no longer holds up the others.** A run gives no target more than half its batch while others' jobs are due. It looked only at the oldest jobs, four times its batch, though: when one target had more than that queued ahead of the rest (a large organization's first sync, a slow app), every other target's jobs waited, a deactivation among them, until that backlog was nearly gone. A run now looks past a target that already has its share.
+- **A decommission no longer empties a group another target at the same app still uses, when other apps share its id.** An app's ids are its own, so targets at other apps may use the same group id ("5"). The check for another target at the same app read only the first 20 links with that id, and could miss it among them. Every link is now read. The preview's shared counts had the same limit, for accounts too; they now match only the same person's accounts, and read every group link.
+- **Google Workspace: a `mapUser`'s primary address stays the only primary.** The work address was always sent as primary, so a `mapUser` that marked another address primary gave Google two. The work address is now primary only when no other address is (or as the `mapUser` sets it).
+- **`check --auth`: a `type` such as `toString` gets the usual message.** A name every JavaScript object has was taken for a type, and the check failed with a TypeError instead of saying which types there are.
 
 ## [1.8.2] - 2026-11-04
 
