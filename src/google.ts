@@ -391,7 +391,14 @@ export function googleWorkspaceClient(
 			const { type: _t, primary: _p, ...rest } = merged;
 			const workEntry =
 				ours.has("work") && Object.keys(rest).length
-					? [{ ...rest, type: "work", primary: true }]
+					? // Primary unless the mapUser made another address primary (or this one not).
+						[
+							{
+								...rest,
+								type: "work",
+								primary: work?.primary ?? !others.some((a) => a.primary),
+							},
+						]
 					: [];
 			out.addresses = [
 				...unprimary(
