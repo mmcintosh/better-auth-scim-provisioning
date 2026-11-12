@@ -27,7 +27,8 @@ Everything CI runs, locally:
 | Command | What it does |
 |---|---|
 | `pnpm typecheck` | TypeScript (`strict`). |
-| `pnpm lint` | Biome; warnings fail. |
+| `pnpm lint` | Biome: lint and formatting; warnings fail. |
+| `pnpm format` | Formats `src`, `test` and `scripts` with Biome (its defaults: tabs, 80 columns). |
 | `pnpm test` | Unit and integration tests on SQLite, against a mock SCIM app, a mock Google Directory API and webhook receivers, plus the regression tests. |
 | `pnpm pack:check` | Builds, then checks the package under TypeScript 5.9 and 7 with a strict host, publint and Are the Types Wrong. |
 
@@ -57,8 +58,10 @@ Two suites need something extra:
 
 1. Fork the repository and branch from `main`.
 2. Make the change with its tests and docs.
-3. Run `pnpm typecheck && pnpm lint && pnpm test && pnpm pack:check`.
+3. Run `pnpm format`, then `pnpm typecheck && pnpm lint && pnpm test && pnpm pack:check`.
 4. Open the pull request.
+
+The one-time reformat when Biome's formatter was turned on is listed in `.git-blame-ignore-revs`. GitHub's blame skips it; for `git blame`, run `git config blame.ignoreRevsFile .git-blame-ignore-revs` once.
 
 CI runs the full matrix (Better Auth at the peer range's minimum and the latest 1.7, Node 22 and 24, the adapter matrix, Workers runtimes, the example), CodeQL, dependency audits and dependency review; CodeRabbit reviews every pull request, drafts included (`.coderabbit.yaml`). A new **runtime** dependency needs a good reason: every one is attack surface for a plugin that holds credentials to your apps, and it must be MIT-compatible.
 
