@@ -6,17 +6,64 @@ import { expect, it } from "vitest";
 import { scimProvisioning } from "../../src";
 
 const v1 = {
-  scimProvisioningJob: ["key", "targetId", "userId", "version", "attempts", "nextAttemptAt", "lockedUntil", "failed", "lastError", "lastStatus", "kind", "createdAt", "updatedAt"],
-  scimProvisioningLink: ["key", "targetId", "userId", "remoteId", "userName", "externalId", "active", "adopted", "syncedAt"],
-  scimProvisioningGroupLink: ["key", "targetId", "organizationId", "kind", "subjectId", "remoteId", "displayName", "syncedAt"],
+	scimProvisioningJob: [
+		"key",
+		"targetId",
+		"userId",
+		"version",
+		"attempts",
+		"nextAttemptAt",
+		"lockedUntil",
+		"failed",
+		"lastError",
+		"lastStatus",
+		"kind",
+		"createdAt",
+		"updatedAt",
+	],
+	scimProvisioningLink: [
+		"key",
+		"targetId",
+		"userId",
+		"remoteId",
+		"userName",
+		"externalId",
+		"active",
+		"adopted",
+		"syncedAt",
+	],
+	scimProvisioningGroupLink: [
+		"key",
+		"targetId",
+		"organizationId",
+		"kind",
+		"subjectId",
+		"remoteId",
+		"displayName",
+		"syncedAt",
+	],
 };
 
 it("the schema is 1.0's", () => {
-  const schema = scimProvisioning({ targets: [] }).schema as Record<string, { fields: Record<string, { required?: boolean }> }>;
-  expect(Object.fromEntries(Object.entries(schema).map(([model, s]) => [model, Object.keys(s.fields)]))).toEqual(v1);
-  // The new columns are optional: rows from before 1.0 have neither.
-  expect(schema.scimProvisioningGroupLink?.fields.kind?.required).toBe(false);
-  expect(schema.scimProvisioningGroupLink?.fields.subjectId?.required).toBe(false);
-  // 1.4: jobs are indexed by target (an index only: Better Auth doesn't check it, so no migration is forced).
-  expect(schema.scimProvisioningJob?.fields.targetId).toMatchObject({ index: true });
+	const schema = scimProvisioning({ targets: [] }).schema as Record<
+		string,
+		{ fields: Record<string, { required?: boolean }> }
+	>;
+	expect(
+		Object.fromEntries(
+			Object.entries(schema).map(([model, s]) => [
+				model,
+				Object.keys(s.fields),
+			]),
+		),
+	).toEqual(v1);
+	// The new columns are optional: rows from before 1.0 have neither.
+	expect(schema.scimProvisioningGroupLink?.fields.kind?.required).toBe(false);
+	expect(schema.scimProvisioningGroupLink?.fields.subjectId?.required).toBe(
+		false,
+	);
+	// 1.4: jobs are indexed by target (an index only: Better Auth doesn't check it, so no migration is forced).
+	expect(schema.scimProvisioningJob?.fields.targetId).toMatchObject({
+		index: true,
+	});
 });

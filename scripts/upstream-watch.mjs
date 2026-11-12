@@ -20,95 +20,159 @@ const repo = process.env.GITHUB_REPOSITORY;
 const TITLE = "Upstream watch";
 
 async function json(url, init = {}) {
-  const res = await fetch(url, init);
-  if (!res.ok) throw new Error(`${init.method ?? "GET"} ${url}: ${res.status} ${await res.text()}`);
-  return res.json();
+	const res = await fetch(url, init);
+	if (!res.ok)
+		throw new Error(
+			`${init.method ?? "GET"} ${url}: ${res.status} ${await res.text()}`,
+		);
+	return res.json();
 }
 const gh = (path, init = {}) =>
-  json(`https://api.github.com/${path}`, {
-    ...init,
-    headers: { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", ...(token ? { authorization: `Bearer ${token}` } : {}), ...init.headers },
-  });
+	json(`https://api.github.com/${path}`, {
+		...init,
+		headers: {
+			accept: "application/vnd.github+json",
+			"x-github-api-version": "2022-11-28",
+			...(token ? { authorization: `Bearer ${token}` } : {}),
+			...init.headers,
+		},
+	});
 // Names come from the config file: checked before they go into a URL.
 const NPM_NAME = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 const GH_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const GH_REF = /^[A-Za-z0-9_./-]+$/;
 const checked = (value, pattern, what) => {
-  if (typeof value !== "string" || !pattern.test(value) || value.includes("..")) throw new Error(`.github/upstream-watch.json: invalid ${what} ${JSON.stringify(value)}`);
-  return value;
+	if (typeof value !== "string" || !pattern.test(value) || value.includes(".."))
+		throw new Error(
+			`.github/upstream-watch.json: invalid ${what} ${JSON.stringify(value)}`,
+		);
+	return value;
 };
-const npm = (name) => json(`https://registry.npmjs.org/${checked(name, NPM_NAME, "npm package").replaceAll("/", "%2F")}`);
+const npm = (name) =>
+	json(
+		`https://registry.npmjs.org/${checked(name, NPM_NAME, "npm package").replaceAll("/", "%2F")}`,
+	);
 
 const num = (v) => v.split(/[.-]/).slice(0, 3).map(Number);
-const lt = (a, b) => { const [x, y] = [num(a), num(b)]; for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i]; return false; };
+const lt = (a, b) => {
+	const [x, y] = [num(a), num(b)];
+	for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
+	return false;
+};
 
 const sections = [];
 const state = {}; // what each item looked like this run; a change from last run is worth a comment
 const changes = [];
 const note = (key, fingerprint, summary) => {
-  state[key] = fingerprint;
-  return summary;
+	state[key] = fingerprint;
+	return summary;
 };
 
 // Better Auth against the peer range's upper bound (">=1.7.5 <1.8.0").
 {
-  const range = pkg.peerDependencies?.["better-auth"] ?? "";
-  const upper = /<\s*(\d+\.\d+\.\d+)/.exec(range)?.[1];
-  const meta = await npm("better-auth");
-  const latest = meta["dist-tags"].latest;
-  // The pre-release tags (beta, next) can be stale (next was 0.8.7-beta.5 in 2026-09): shown only
-  // when ahead of latest. A new minor's beta is what the canary tests before the range is widened.
-  const ahead = (tag) => (meta["dist-tags"][tag] && lt(latest, meta["dist-tags"][tag]) ? meta["dist-tags"][tag] : null);
-  const pre = ["beta", "next"].map((tag) => [tag, ahead(tag)]).filter(([, v]) => v).map(([tag, v]) => `${tag}: ${v}`).join(", ");
-  const outside = upper && !lt(latest, upper);
-  const line = outside
-    ? `- **Better Auth ${latest} is outside the peer range \`${range}\`.** Widen it in a minor release once the canary passes on ${latest}.`
-    : `- Better Auth ${latest} is inside the peer range \`${range}\`${pre ? `; pre-releases ahead of it: ${pre} (the canary tests them; widen the range in a minor release once the final is out and passes)` : " (no pre-release ahead of it)"}.`;
-  sections.push(`## Better Auth\n\n${note("better-auth", outside ? `outside:${latest}` : `inside${pre ? `:${pre}` : ""}`, line)}`);
+	const range = pkg.peerDependencies?.["better-auth"] ?? "";
+	const upper = /<\s*(\d+\.\d+\.\d+)/.exec(range)?.[1];
+	const meta = await npm("better-auth");
+	const latest = meta["dist-tags"].latest;
+	// The pre-release tags (beta, next) can be stale (next was 0.8.7-beta.5 in 2026-09): shown only
+	// when ahead of latest. A new minor's beta is what the canary tests before the range is widened.
+	const ahead = (tag) =>
+		meta["dist-tags"][tag] && lt(latest, meta["dist-tags"][tag])
+			? meta["dist-tags"][tag]
+			: null;
+	const pre = ["beta", "next"]
+		.map((tag) => [tag, ahead(tag)])
+		.filter(([, v]) => v)
+		.map(([tag, v]) => `${tag}: ${v}`)
+		.join(", ");
+	const outside = upper && !lt(latest, upper);
+	const line = outside
+		? `- **Better Auth ${latest} is outside the peer range \`${range}\`.** Widen it in a minor release once the canary passes on ${latest}.`
+		: `- Better Auth ${latest} is inside the peer range \`${range}\`${pre ? `; pre-releases ahead of it: ${pre} (the canary tests them; widen the range in a minor release once the final is out and passes)` : " (no pre-release ahead of it)"}.`;
+	sections.push(
+		`## Better Auth\n\n${note("better-auth", outside ? `outside:${latest}` : `inside${pre ? `:${pre}` : ""}`, line)}`,
+	);
 }
 
 // Vendored builds: every vendor/*.tgz must be listed, so a new one can't go unwatched.
 {
-  const files = existsSync("vendor") ? readdirSync("vendor").filter((f) => f.endsWith(".tgz")) : [];
-  const lines = [];
-  for (const v of config.vendored ?? []) {
-    const file = files.find((f) => f.startsWith(v.vendorPrefix));
-    if (!file) throw new Error(`no vendor/${v.vendorPrefix}*.tgz for ${v.name}: update .github/upstream-watch.json`);
-    const sha = /-([0-9a-f]{7,40})\.tgz$/.exec(file)?.[1];
-    if (!sha) throw new Error(`vendor/${file} has no commit in its name`);
-    const ghRepo = checked(v.repo, GH_REPO, "repository");
-    const info = await gh(`repos/${ghRepo}`);
-    const cmp = await gh(`repos/${ghRepo}/compare/${sha}...${checked(info.default_branch, GH_REF, "branch")}`);
-    const meta = await npm(v.npm);
-    const latest = meta["dist-tags"].latest;
-    const released = latest !== v.releasedWhenVendored;
-    const titles = cmp.commits.slice(-10).reverse().map((c) => `  - ${c.commit.message.split("\n")[0]} (${c.sha.slice(0, 7)})`);
-    lines.push(
-      note(`vendored:${v.name}`, `${cmp.ahead_by}:${latest}`, [
-        `- **${v.name}**: \`vendor/${file}\`, built from ${v.repo}@${sha}.`,
-        released
-          ? `  - **npm has ${v.npm} ${latest}** (was ${v.releasedWhenVendored} when vendored). ${v.replaceWhen}`
-          : `  - npm: still ${latest}. ${v.replaceWhen}`,
-        cmp.ahead_by ? `  - ${cmp.ahead_by} commit(s) on ${info.default_branch} since the build:` : `  - No new commits on ${info.default_branch}.`,
-        ...titles,
-        ...(cmp.ahead_by > 10 ? [`  - … [all of them](https://github.com/${v.repo}/compare/${sha}...${info.default_branch})`] : []),
-      ].join("\n")),
-    );
-  }
-  const unlisted = files.filter((f) => !(config.vendored ?? []).some((v) => f.startsWith(v.vendorPrefix)));
-  if (unlisted.length) throw new Error(`vendor/ has unwatched builds: ${unlisted.join(", ")} (add them to .github/upstream-watch.json)`);
-  if (lines.length) sections.push(`## Vendored builds of unreleased code\n\n${lines.join("\n")}`);
+	const files = existsSync("vendor")
+		? readdirSync("vendor").filter((f) => f.endsWith(".tgz"))
+		: [];
+	const lines = [];
+	for (const v of config.vendored ?? []) {
+		const file = files.find((f) => f.startsWith(v.vendorPrefix));
+		if (!file)
+			throw new Error(
+				`no vendor/${v.vendorPrefix}*.tgz for ${v.name}: update .github/upstream-watch.json`,
+			);
+		const sha = /-([0-9a-f]{7,40})\.tgz$/.exec(file)?.[1];
+		if (!sha) throw new Error(`vendor/${file} has no commit in its name`);
+		const ghRepo = checked(v.repo, GH_REPO, "repository");
+		const info = await gh(`repos/${ghRepo}`);
+		const cmp = await gh(
+			`repos/${ghRepo}/compare/${sha}...${checked(info.default_branch, GH_REF, "branch")}`,
+		);
+		const meta = await npm(v.npm);
+		const latest = meta["dist-tags"].latest;
+		const released = latest !== v.releasedWhenVendored;
+		const titles = cmp.commits
+			.slice(-10)
+			.reverse()
+			.map(
+				(c) => `  - ${c.commit.message.split("\n")[0]} (${c.sha.slice(0, 7)})`,
+			);
+		lines.push(
+			note(
+				`vendored:${v.name}`,
+				`${cmp.ahead_by}:${latest}`,
+				[
+					`- **${v.name}**: \`vendor/${file}\`, built from ${v.repo}@${sha}.`,
+					released
+						? `  - **npm has ${v.npm} ${latest}** (was ${v.releasedWhenVendored} when vendored). ${v.replaceWhen}`
+						: `  - npm: still ${latest}. ${v.replaceWhen}`,
+					cmp.ahead_by
+						? `  - ${cmp.ahead_by} commit(s) on ${info.default_branch} since the build:`
+						: `  - No new commits on ${info.default_branch}.`,
+					...titles,
+					...(cmp.ahead_by > 10
+						? [
+								`  - … [all of them](https://github.com/${v.repo}/compare/${sha}...${info.default_branch})`,
+							]
+						: []),
+				].join("\n"),
+			),
+		);
+	}
+	const unlisted = files.filter(
+		(f) => !(config.vendored ?? []).some((v) => f.startsWith(v.vendorPrefix)),
+	);
+	if (unlisted.length)
+		throw new Error(
+			`vendor/ has unwatched builds: ${unlisted.join(", ")} (add them to .github/upstream-watch.json)`,
+		);
+	if (lines.length)
+		sections.push(
+			`## Vendored builds of unreleased code\n\n${lines.join("\n")}`,
+		);
 }
 
 // Updates held back on purpose.
 {
-  const lines = [];
-  for (const h of config.held ?? []) {
-    const meta = await npm(h.npm);
-    const latest = meta["dist-tags"].latest;
-    lines.push(note(`held:${h.name}`, latest, `- **${h.name}** (newest ${h.npm}: ${latest}). Held because ${h.because} Take it when ${h.takeWhen}`));
-  }
-  if (lines.length) sections.push(`## Held back on purpose\n\n${lines.join("\n")}`);
+	const lines = [];
+	for (const h of config.held ?? []) {
+		const meta = await npm(h.npm);
+		const latest = meta["dist-tags"].latest;
+		lines.push(
+			note(
+				`held:${h.name}`,
+				latest,
+				`- **${h.name}** (newest ${h.npm}: ${latest}). Held because ${h.because} Take it when ${h.takeWhen}`,
+			),
+		);
+	}
+	if (lines.length)
+		sections.push(`## Held back on purpose\n\n${lines.join("\n")}`);
 }
 
 // pnpm overrides: each must be listed, with the package that brings the dependency in ("via",
@@ -116,62 +180,112 @@ const note = (key, fingerprint, summary) => {
 // has no stable one, as miniflare 5). When that release requires a version at or above "fixedIn",
 // the override can go.
 {
-  const overrides = pkg.pnpm?.overrides ?? {};
-  const listed = config.overrides ?? [];
-  const unlisted = Object.keys(overrides).filter((k) => !listed.some((o) => o.selector === k));
-  if (unlisted.length) throw new Error(`package.json pnpm.overrides has unwatched entries: ${unlisted.join(", ")} (add them to .github/upstream-watch.json)`);
-  const lines = [];
-  for (const o of listed) {
-    if (!(o.selector in overrides)) throw new Error(`.github/upstream-watch.json lists override ${o.selector}, which package.json doesn't have`);
-    const [, viaName, major] = /^(@?[^@]+)(?:@(\d+))?$/.exec(o.via) ?? [];
-    const meta = await npm(viaName);
-    let version = meta["dist-tags"].latest;
-    if (major) {
-      const inMajor = Object.keys(meta.versions).filter((v) => num(v)[0] === Number(major));
-      if (!inMajor.length) throw new Error(`.github/upstream-watch.json: ${viaName} has no ${major}.x release (override ${o.selector})`);
-      const stable = inMajor.filter((v) => /^\d+\.\d+\.\d+$/.test(v));
-      version = stable.length ? stable.reduce((a, b) => (lt(a, b) ? b : a)) : inMajor.reduce((a, b) => (meta.time[a] < meta.time[b] ? b : a));
-    }
-    const range = meta.versions[version]?.dependencies?.[o.dependency] ?? "(not a dependency any more)";
-    const min = /\d+\.\d+\.\d+/.exec(range)?.[0];
-    const fixed = o.fixedIn && min && !lt(min, o.fixedIn);
-    const gone = !min;
-    // The newest release only: our tree may still hold an older one (a test pool pinning an older
-    // miniflare), so "may go" means try removing it and check `pnpm why` and `pnpm audit`.
-    const status = gone || fixed ? `**may go**: ${viaName}@${version} ${gone ? "no longer depends on it" : `requires ${o.dependency} ${range}`}; remove it if \`pnpm why ${o.dependency}\` and \`pnpm audit\` agree.` : `still needed: ${viaName}@${version} requires ${o.dependency} ${range}${o.fixedIn ? ` (fixed in ${o.fixedIn})` : ""}.`;
-    lines.push(note(`override:${o.selector}`, `${version}:${range}`, `- \`${o.selector}\` → \`${overrides[o.selector]}\`: ${status} ${o.why}`));
-  }
-  if (lines.length) sections.push(`## pnpm overrides\n\n${lines.join("\n")}`);
+	const overrides = pkg.pnpm?.overrides ?? {};
+	const listed = config.overrides ?? [];
+	const unlisted = Object.keys(overrides).filter(
+		(k) => !listed.some((o) => o.selector === k),
+	);
+	if (unlisted.length)
+		throw new Error(
+			`package.json pnpm.overrides has unwatched entries: ${unlisted.join(", ")} (add them to .github/upstream-watch.json)`,
+		);
+	const lines = [];
+	for (const o of listed) {
+		if (!(o.selector in overrides))
+			throw new Error(
+				`.github/upstream-watch.json lists override ${o.selector}, which package.json doesn't have`,
+			);
+		const [, viaName, major] = /^(@?[^@]+)(?:@(\d+))?$/.exec(o.via) ?? [];
+		const meta = await npm(viaName);
+		let version = meta["dist-tags"].latest;
+		if (major) {
+			const inMajor = Object.keys(meta.versions).filter(
+				(v) => num(v)[0] === Number(major),
+			);
+			if (!inMajor.length)
+				throw new Error(
+					`.github/upstream-watch.json: ${viaName} has no ${major}.x release (override ${o.selector})`,
+				);
+			const stable = inMajor.filter((v) => /^\d+\.\d+\.\d+$/.test(v));
+			version = stable.length
+				? stable.reduce((a, b) => (lt(a, b) ? b : a))
+				: inMajor.reduce((a, b) => (meta.time[a] < meta.time[b] ? b : a));
+		}
+		const range =
+			meta.versions[version]?.dependencies?.[o.dependency] ??
+			"(not a dependency any more)";
+		const min = /\d+\.\d+\.\d+/.exec(range)?.[0];
+		const fixed = o.fixedIn && min && !lt(min, o.fixedIn);
+		const gone = !min;
+		// The newest release only: our tree may still hold an older one (a test pool pinning an older
+		// miniflare), so "may go" means try removing it and check `pnpm why` and `pnpm audit`.
+		const status =
+			gone || fixed
+				? `**may go**: ${viaName}@${version} ${gone ? "no longer depends on it" : `requires ${o.dependency} ${range}`}; remove it if \`pnpm why ${o.dependency}\` and \`pnpm audit\` agree.`
+				: `still needed: ${viaName}@${version} requires ${o.dependency} ${range}${o.fixedIn ? ` (fixed in ${o.fixedIn})` : ""}.`;
+		lines.push(
+			note(
+				`override:${o.selector}`,
+				`${version}:${range}`,
+				`- \`${o.selector}\` → \`${overrides[o.selector]}\`: ${status} ${o.why}`,
+			),
+		);
+	}
+	if (lines.length) sections.push(`## pnpm overrides\n\n${lines.join("\n")}`);
 }
 
 const month = new Date().toISOString().slice(0, 7);
-if (config.monthly?.length) sections.push(`## Every month\n\n${config.monthly.map((m) => `- ${m}`).join("\n")}`);
+if (config.monthly?.length)
+	sections.push(
+		`## Every month\n\n${config.monthly.map((m) => `- ${m}`).join("\n")}`,
+	);
 
 const body = (_prev) =>
-  `Updated weekly by [upstream-watch.yml](../blob/main/.github/workflows/upstream-watch.yml) from \`.github/upstream-watch.json\`. ` +
-  `A comment means something changed since the last run.\n\n${sections.join("\n\n")}\n\n` +
-  `<!-- upstream-watch-state ${JSON.stringify({ month, items: state })} -->\n`;
+	`Updated weekly by [upstream-watch.yml](../blob/main/.github/workflows/upstream-watch.yml) from \`.github/upstream-watch.json\`. ` +
+	`A comment means something changed since the last run.\n\n${sections.join("\n\n")}\n\n` +
+	`<!-- upstream-watch-state ${JSON.stringify({ month, items: state })} -->\n`;
 
 if (dryRun || !token || !repo) {
-  console.log(body());
-  process.exit(0);
+	console.log(body());
+	process.exit(0);
 }
 
-const open = (await gh(`repos/${repo}/issues?state=open&per_page=100`)).filter((i) => i.title === TITLE && !i.pull_request);
+const open = (await gh(`repos/${repo}/issues?state=open&per_page=100`)).filter(
+	(i) => i.title === TITLE && !i.pull_request,
+);
 let issue = open[0];
 if (!issue) {
-  issue = await gh(`repos/${repo}/issues`, { method: "POST", body: JSON.stringify({ title: TITLE, body: body() }) });
-  console.log("created", issue.html_url);
-  process.exit(0);
+	issue = await gh(`repos/${repo}/issues`, {
+		method: "POST",
+		body: JSON.stringify({ title: TITLE, body: body() }),
+	});
+	console.log("created", issue.html_url);
+	process.exit(0);
 }
-const previous = JSON.parse(/<!-- upstream-watch-state (.*) -->/.exec(issue.body ?? "")?.[1] ?? "{}");
-for (const [key, fp] of Object.entries(state)) if (previous.items?.[key] !== fp) changes.push(key.replace(/^\w+:/, ""));
+const previous = JSON.parse(
+	/<!-- upstream-watch-state (.*) -->/.exec(issue.body ?? "")?.[1] ?? "{}",
+);
+for (const [key, fp] of Object.entries(state))
+	if (previous.items?.[key] !== fp) changes.push(key.replace(/^\w+:/, ""));
 const newMonth = previous.month !== month && config.monthly?.length;
-await gh(`repos/${repo}/issues/${issue.number}`, { method: "PATCH", body: JSON.stringify({ body: body() }) });
+await gh(`repos/${repo}/issues/${issue.number}`, {
+	method: "PATCH",
+	body: JSON.stringify({ body: body() }),
+});
 if (changes.length || newMonth) {
-  const parts = [];
-  if (changes.length) parts.push(`Changed since the last run: ${changes.join(", ")}. See the issue body.`);
-  if (newMonth) parts.push(`New month: ${config.monthly.join(" ")}`);
-  await gh(`repos/${repo}/issues/${issue.number}/comments`, { method: "POST", body: JSON.stringify({ body: parts.join("\n\n") }) });
+	const parts = [];
+	if (changes.length)
+		parts.push(
+			`Changed since the last run: ${changes.join(", ")}. See the issue body.`,
+		);
+	if (newMonth) parts.push(`New month: ${config.monthly.join(" ")}`);
+	await gh(`repos/${repo}/issues/${issue.number}/comments`, {
+		method: "POST",
+		body: JSON.stringify({ body: parts.join("\n\n") }),
+	});
 }
-console.log("updated", issue.html_url, changes.length ? `changed: ${changes.join(", ")}` : "no change");
+console.log(
+	"updated",
+	issue.html_url,
+	changes.length ? `changed: ${changes.join(", ")}` : "no change",
+);

@@ -6,7 +6,10 @@ import { defaultScimUser } from "./mapping";
 import type { ScimTarget } from "./types";
 
 /** Only the keys set to something: a host's `undefined` (an unset option of its own) never removes a profile's value. */
-const defined = <T extends object>(o: T | undefined): Partial<T> => Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>;
+const defined = <T extends object>(o: T | undefined): Partial<T> =>
+	Object.fromEntries(
+		Object.entries(o ?? {}).filter(([, v]) => v !== undefined),
+	) as Partial<T>;
 
 /**
  * AWS IAM Identity Center (verified live). Groups have no PUT and their GET lists no members, so
@@ -15,7 +18,15 @@ const defined = <T extends object>(o: T | undefined): Partial<T> => Object.fromE
  * email, which the default mapping sends; the SAML NameID must equal the SCIM userName.
  */
 export function awsIamIdentityCenter(target: ScimTarget): ScimTarget {
-  return { ...target, compat: { groupUpdate: "patch", groupMembers: "users-filter", maxGroupMembersPerRequest: 100, ...defined(target.compat) } };
+	return {
+		...target,
+		compat: {
+			groupUpdate: "patch",
+			groupMembers: "users-filter",
+			maxGroupMembersPerRequest: 100,
+			...defined(target.compat),
+		},
+	};
 }
 
 /**
@@ -23,10 +34,10 @@ export function awsIamIdentityCenter(target: ScimTarget): ScimTarget {
  * rules; other characters become "_"). Taken from the email's local part.
  */
 export function slackUserName(email: string): string {
-  return (email.split("@")[0] ?? email)
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, "_")
-    .slice(0, 21);
+	return (email.split("@")[0] ?? email)
+		.toLowerCase()
+		.replace(/[^a-z0-9._-]/g, "_")
+		.slice(0, 21);
 }
 
 /**
@@ -35,7 +46,15 @@ export function slackUserName(email: string): string {
  * userName for them. Deleting a Slack user only deactivates them.
  */
 export function slack(target: ScimTarget): ScimTarget {
-  return { ...target, mapUser: target.mapUser ?? ((user) => ({ ...defaultScimUser(user), userName: slackUserName(user.email) })) };
+	return {
+		...target,
+		mapUser:
+			target.mapUser ??
+			((user) => ({
+				...defaultScimUser(user),
+				userName: slackUserName(user.email),
+			})),
+	};
 }
 
 /**
@@ -44,7 +63,14 @@ export function slack(target: ScimTarget): ScimTarget {
  * user only deactivates them.
  */
 export function atlassian(target: ScimTarget): ScimTarget {
-  return { ...target, compat: { groupUpdate: "patch", groupRename: "recreate", ...defined(target.compat) } };
+	return {
+		...target,
+		compat: {
+			groupUpdate: "patch",
+			groupRename: "recreate",
+			...defined(target.compat),
+		},
+	};
 }
 
 /**
@@ -56,9 +82,15 @@ export function atlassian(target: ScimTarget): ScimTarget {
  * user with `scim:enterprise`, and only one system may provision the enterprise.
  */
 export function githubEnterprise(target: ScimTarget): ScimTarget {
-  if (target.deprovision === "delete")
-    throw new Error(`[scim] target ${target.id}: GitHub's DELETE permanently suspends the account; githubEnterprise only deactivates`);
-  return { ...target, maxRequestsPerMinute: target.maxRequestsPerMinute ?? 30, deprovision: "deactivate" };
+	if (target.deprovision === "delete")
+		throw new Error(
+			`[scim] target ${target.id}: GitHub's DELETE permanently suspends the account; githubEnterprise only deactivates`,
+		);
+	return {
+		...target,
+		maxRequestsPerMinute: target.maxRequestsPerMinute ?? 30,
+		deprovision: "deactivate",
+	};
 }
 
 /**
@@ -66,7 +98,13 @@ export function githubEnterprise(target: ScimTarget): ScimTarget {
  * deprovisioning in the identity provider's SCIM settings, or deactivated users keep their seats.
  */
 export function cloudflareAccess(target: ScimTarget): ScimTarget {
-  return { ...target };
+	return { ...target };
 }
 
-export const profiles = { awsIamIdentityCenter, slack, atlassian, githubEnterprise, cloudflareAccess };
+export const profiles = {
+	awsIamIdentityCenter,
+	slack,
+	atlassian,
+	githubEnterprise,
+	cloudflareAccess,
+};

@@ -8,7 +8,7 @@
   "contribution_status": "Met",
   "contribution_justification": "https://github.com/mmcintosh/better-auth-scim-provisioning/blob/main/CONTRIBUTING.md",
   "contribution_requirements_status": "Met",
-  "contribution_requirements_justification": "https://github.com/mmcintosh/better-auth-scim-provisioning/blob/main/CONTRIBUTING.md — tests with every change (a bug fix includes the test that would have caught it), security checks mutation-checked, docs and a CHANGELOG entry with the code, Biome lint with --error-on-warnings and TypeScript strict as the coding standard, and pnpm typecheck, lint, test and pack:check must pass; CI enforces these on every pull request.",
+  "contribution_requirements_justification": "https://github.com/mmcintosh/better-auth-scim-provisioning/blob/main/CONTRIBUTING.md — tests with every change (a bug fix includes the test that would have caught it), security checks mutation-checked, docs and a CHANGELOG entry with the code, Biome lint and formatting with --error-on-warnings and TypeScript strict as the coding standard, and pnpm typecheck, lint, test and pack:check must pass; CI enforces these on every pull request.",
   "license_location_status": "Met",
   "license_location_justification": "https://github.com/mmcintosh/better-auth-scim-provisioning/blob/main/LICENSE",
   "floss_license_status": "Met",

@@ -1,172 +1,303 @@
 import * as z from "zod";
-import { ADDRESS_PARTS, SCIM_USER_SCHEMA, type ScimEnterpriseUser, type ScimUser } from "./scim-client";
-import type { AttributeFields, EnterpriseFields, ProvisionedUser } from "./types";
+import {
+	ADDRESS_PARTS,
+	SCIM_USER_SCHEMA,
+	type ScimEnterpriseUser,
+	type ScimUser,
+} from "./scim-client";
+import type {
+	AttributeFields,
+	EnterpriseFields,
+	ProvisionedUser,
+} from "./types";
 
 /**
  * Given and family names from Better Auth's single `name`: the last word is the family name.
  * Some apps (AWS IAM Identity Center) refuse users without both, so a one-word name, or an empty
  * one, is used for both rather than left out.
  */
-export function splitName(name: string, fallback: string): { givenName: string; familyName: string } {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return { givenName: fallback, familyName: fallback };
-  if (words.length === 1) return { givenName: words[0] as string, familyName: words[0] as string };
-  return { givenName: words.slice(0, -1).join(" "), familyName: words.at(-1) as string };
+export function splitName(
+	name: string,
+	fallback: string,
+): { givenName: string; familyName: string } {
+	const words = name.trim().split(/\s+/).filter(Boolean);
+	if (words.length === 0) return { givenName: fallback, familyName: fallback };
+	if (words.length === 1)
+		return { givenName: words[0] as string, familyName: words[0] as string };
+	return {
+		givenName: words.slice(0, -1).join(" "),
+		familyName: words.at(-1) as string,
+	};
 }
 
 /** The default SCIM user: userName and the one email are the user's email; externalId is its id. */
 export function defaultScimUser(user: ProvisionedUser): ScimUser {
-  const local = user.email.split("@")[0] || user.email;
-  const { givenName, familyName } = splitName(user.name, local);
-  const displayName = user.name.trim() || user.email;
-  return {
-    schemas: [SCIM_USER_SCHEMA],
-    externalId: user.id,
-    userName: user.email,
-    name: { givenName, familyName, formatted: displayName },
-    displayName,
-    emails: [{ value: user.email, type: "work", primary: true }],
-    active: true,
-  };
+	const local = user.email.split("@")[0] || user.email;
+	const { givenName, familyName } = splitName(user.name, local);
+	const displayName = user.name.trim() || user.email;
+	return {
+		schemas: [SCIM_USER_SCHEMA],
+		externalId: user.id,
+		userName: user.email,
+		name: { givenName, familyName, formatted: displayName },
+		displayName,
+		emails: [{ value: user.email, type: "work", primary: true }],
+		active: true,
+	};
 }
 
 /** Banned now: the admin plugin's ban, unless it has expired. */
 export function isBanned(user: ProvisionedUser, now = Date.now()): boolean {
-  if (!user.banned) return false;
-  if (user.banExpires == null) return true;
-  return new Date(user.banExpires).getTime() > now;
+	if (!user.banned) return false;
+	if (user.banExpires == null) return true;
+	return new Date(user.banExpires).getTime() > now;
 }
 
 /** The Enterprise User attributes besides `manager`, which is a reference rather than a value. */
-export const ENTERPRISE_VALUES = ["employeeNumber", "costCenter", "organization", "division", "department"] as const;
+export const ENTERPRISE_VALUES = [
+	"employeeNumber",
+	"costCenter",
+	"organization",
+	"division",
+	"department",
+] as const;
 export type EnterpriseValue = (typeof ENTERPRISE_VALUES)[number];
 
-const fieldName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field");
+const fieldName = z
+	.string()
+	.regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "must be the name of a user field");
 /** `enterprise`: true, or which user field holds each attribute. Data only, so stored targets can have it too. */
 export const enterpriseOption = z.union([
-  z.boolean(),
-  z
-    .strictObject({ ...Object.fromEntries(ENTERPRISE_VALUES.map((a) => [a, fieldName.optional()])), manager: fieldName.optional() } as Record<EnterpriseValue | "manager", z.ZodOptional<typeof fieldName>>)
-    .refine((o) => Object.values(o).some((v) => v !== undefined), "name at least one field, or use true"),
+	z.boolean(),
+	z
+		.strictObject({
+			...Object.fromEntries(
+				ENTERPRISE_VALUES.map((a) => [a, fieldName.optional()]),
+			),
+			manager: fieldName.optional(),
+		} as Record<EnterpriseValue | "manager", z.ZodOptional<typeof fieldName>>)
+		.refine(
+			(o) => Object.values(o).some((v) => v !== undefined),
+			"name at least one field, or use true",
+		),
 ]);
 
 /** The user fields organizations' stored targets may read for `enterprise`, unless the host lists others (`registry.enterpriseFields`). */
-export const DEFAULT_STORED_ENTERPRISE_FIELDS: readonly string[] = [...ENTERPRISE_VALUES, "managerId"];
+export const DEFAULT_STORED_ENTERPRISE_FIELDS: readonly string[] = [
+	...ENTERPRISE_VALUES,
+	"managerId",
+];
 
 /**
  * Fields an option reads that aren't allowed: a stored target may read only the host's allowlist,
  * never a hidden or sensitive column. `true` is resolved against the user model's fields first
  * (`known`), so it reads only what the users have, and a narrowed allowlist covering those passes.
  */
-function fieldProblems(option: "enterprise" | "attributes", fields: EnterpriseFields | AttributeFields | null, allowed: readonly string[]): string[] {
-  if (!fields) return [];
-  const bad = [...new Set(Object.values(fields).filter((f): f is string => !!f && !allowed.includes(f)))];
-  const list = option === "enterprise" ? "enterpriseFields" : "attributeFields";
-  return bad.length ? [`settings.${option}: reads ${bad.join(", ")}, which the host doesn't allow organizations' targets to read (registry.${list}: ${allowed.join(", ") || "none"})`] : [];
+function fieldProblems(
+	option: "enterprise" | "attributes",
+	fields: EnterpriseFields | AttributeFields | null,
+	allowed: readonly string[],
+): string[] {
+	if (!fields) return [];
+	const bad = [
+		...new Set(
+			Object.values(fields).filter(
+				(f): f is string => !!f && !allowed.includes(f),
+			),
+		),
+	];
+	const list = option === "enterprise" ? "enterpriseFields" : "attributeFields";
+	return bad.length
+		? [
+				`settings.${option}: reads ${bad.join(", ")}, which the host doesn't allow organizations' targets to read (registry.${list}: ${allowed.join(", ") || "none"})`,
+			]
+		: [];
 }
-export const enterpriseFieldProblems = (option: boolean | EnterpriseFields | undefined, allowed: readonly string[], known?: ReadonlySet<string>) => fieldProblems("enterprise", enterpriseFields(option, known), allowed);
+export const enterpriseFieldProblems = (
+	option: boolean | EnterpriseFields | undefined,
+	allowed: readonly string[],
+	known?: ReadonlySet<string>,
+) => fieldProblems("enterprise", enterpriseFields(option, known), allowed);
 
 /** Fields an explicit map names that the user model doesn't have. */
-const missingFields = (option: boolean | EnterpriseFields | AttributeFields | undefined, known: ReadonlySet<string>): string[] => (!option || option === true ? [] : Object.values(option).filter((f): f is string => !!f && !known.has(f)));
+const missingFields = (
+	option: boolean | EnterpriseFields | AttributeFields | undefined,
+	known: ReadonlySet<string>,
+): string[] =>
+	!option || option === true
+		? []
+		: Object.values(option).filter((f): f is string => !!f && !known.has(f));
 
 /**
  * The fields a target's `enterprise` option reads, or null without it. `true` is each attribute
  * under its own name (the manager: `managerId`), for the fields the user model has (`known`): an
  * attribute without a field isn't the target's to manage, so it's neither sent nor cleared.
  */
-export function enterpriseFields(option: boolean | EnterpriseFields | undefined, known?: ReadonlySet<string>): EnterpriseFields | null {
-  if (!option) return null;
-  if (option !== true) return option;
-  const all: Record<string, string> = { ...Object.fromEntries(ENTERPRISE_VALUES.map((a) => [a, a])), manager: "managerId" };
-  const fields = Object.fromEntries(Object.entries(all).filter(([, f]) => !known || known.has(f))) as EnterpriseFields;
-  return Object.keys(fields).length ? fields : null;
+export function enterpriseFields(
+	option: boolean | EnterpriseFields | undefined,
+	known?: ReadonlySet<string>,
+): EnterpriseFields | null {
+	if (!option) return null;
+	if (option !== true) return option;
+	const all: Record<string, string> = {
+		...Object.fromEntries(ENTERPRISE_VALUES.map((a) => [a, a])),
+		manager: "managerId",
+	};
+	const fields = Object.fromEntries(
+		Object.entries(all).filter(([, f]) => !known || known.has(f)),
+	) as EnterpriseFields;
+	return Object.keys(fields).length ? fields : null;
 }
 
-export const missingEnterpriseFields = (option: boolean | EnterpriseFields | undefined, known: ReadonlySet<string>) => missingFields(option, known);
+export const missingEnterpriseFields = (
+	option: boolean | EnterpriseFields | undefined,
+	known: ReadonlySet<string>,
+) => missingFields(option, known);
 
 /** A field's value as an attribute: text, or a number written out; anything else (empty, null, an object) is no value. */
 const textOf = (v: unknown): string | undefined => {
-  if (typeof v === "number" && Number.isFinite(v)) return String(v);
-  if (typeof v !== "string") return undefined;
-  const t = v.trim();
-  return t ? t : undefined;
+	if (typeof v === "number" && Number.isFinite(v)) return String(v);
+	if (typeof v !== "string") return undefined;
+	const t = v.trim();
+	return t ? t : undefined;
 };
 
 /** The attributes `attributes` can send, each read from a user field of that name by default. */
 export const ATTRIBUTE_NAMES = [
-  "title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country", "preferredLanguage", "locale", "timezone", "userType",
-  "photo", "nickName", "profileUrl", "middleName", "honorificPrefix", "honorificSuffix",
+	"title",
+	"phone",
+	"mobile",
+	"streetAddress",
+	"locality",
+	"region",
+	"postalCode",
+	"country",
+	"preferredLanguage",
+	"locale",
+	"timezone",
+	"userType",
+	"photo",
+	"nickName",
+	"profileUrl",
+	"middleName",
+	"honorificPrefix",
+	"honorificSuffix",
 ] as const;
 /**
  * What `true` reads: the attributes it read when it came (1.4). The four added since are named
  * (`{ timezone: "timezone" }`), so upgrading never starts sending, or clearing, what a host didn't ask for.
  */
-const TRUE_ATTRIBUTES = ["title", "phone", "mobile", "streetAddress", "locality", "region", "postalCode", "country"] as const;
+const TRUE_ATTRIBUTES = [
+	"title",
+	"phone",
+	"mobile",
+	"streetAddress",
+	"locality",
+	"region",
+	"postalCode",
+	"country",
+] as const;
 /** The single-valued attributes sent as they are (RFC 7643 §4.1.1). */
-const PLAIN = ["preferredLanguage", "locale", "timezone", "userType", "nickName", "profileUrl"] as const;
+const PLAIN = [
+	"preferredLanguage",
+	"locale",
+	"timezone",
+	"userType",
+	"nickName",
+	"profileUrl",
+] as const;
 /** The parts of `name` sent as they are (RFC 7643 §4.1.1), beside the given and family names mapUser sends. */
-const NAME_PARTS = ["middleName", "honorificPrefix", "honorificSuffix"] as const;
+const NAME_PARTS = [
+	"middleName",
+	"honorificPrefix",
+	"honorificSuffix",
+] as const;
 /**
  * An https URL (a photo, a profile): anything else is left out, not sent to be refused or shown.
  * Written out in full (`https://`, no spaces or backslashes), since it's sent as written, not as
  * the URL parser would mend it.
  */
 const httpsUrl = (v: string) => {
-  try {
-    return /^https:\/\/[^\s\\]+$/i.test(v) && new URL(v).protocol === "https:" && v.length <= 2048;
-  } catch {
-    return false;
-  }
+	try {
+		return (
+			/^https:\/\/[^\s\\]+$/i.test(v) &&
+			new URL(v).protocol === "https:" &&
+			v.length <= 2048
+		);
+	} catch {
+		return false;
+	}
 };
 /** A language tag (RFC 5646's shape, loosely): `en`, `en-CA`, `zh-Hant-TW`. */
 const LANGUAGE_TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
 /** A time zone the runtime knows by that name (its IANA data: `America/Toronto`, `UTC`, `CET`). */
 const validTimeZone = (zone: string) => {
-  try {
-    new Intl.DateTimeFormat("en", { timeZone: zone });
-    return true;
-  } catch {
-    return false;
-  }
+	try {
+		new Intl.DateTimeFormat("en", { timeZone: zone });
+		return true;
+	} catch {
+		return false;
+	}
 };
 /** Is this a value the attribute can take? (A wrong one is left out, not sent to be refused.) */
 const validFor: Record<(typeof PLAIN)[number], (v: string) => boolean> = {
-  preferredLanguage: (v) => LANGUAGE_TAG.test(v),
-  locale: (v) => LANGUAGE_TAG.test(v),
-  timezone: validTimeZone,
-  userType: (v) => v.length <= 256,
-  nickName: (v) => v.length <= 256,
-  profileUrl: httpsUrl,
+	preferredLanguage: (v) => LANGUAGE_TAG.test(v),
+	locale: (v) => LANGUAGE_TAG.test(v),
+	timezone: validTimeZone,
+	userType: (v) => v.length <= 256,
+	nickName: (v) => v.length <= 256,
+	profileUrl: httpsUrl,
 };
 export type AttributeName = (typeof ATTRIBUTE_NAMES)[number];
 
 /** `attributes`: true, or which user field holds each attribute. Data only, so stored targets can have it too. */
 export const attributesOption = z.union([
-  z.boolean(),
-  z
-    .strictObject(Object.fromEntries(ATTRIBUTE_NAMES.map((a) => [a, fieldName.optional()])) as Record<AttributeName, z.ZodOptional<typeof fieldName>>)
-    .refine((o) => Object.values(o).some((v) => v !== undefined), "name at least one field, or use true"),
+	z.boolean(),
+	z
+		.strictObject(
+			Object.fromEntries(
+				ATTRIBUTE_NAMES.map((a) => [a, fieldName.optional()]),
+			) as Record<AttributeName, z.ZodOptional<typeof fieldName>>,
+		)
+		.refine(
+			(o) => Object.values(o).some((v) => v !== undefined),
+			"name at least one field, or use true",
+		),
 ]);
 
 /** The user fields organizations' stored targets may read for `attributes`, unless the host lists others (`registry.attributeFields`). */
-export const DEFAULT_STORED_ATTRIBUTE_FIELDS: readonly string[] = [...TRUE_ATTRIBUTES];
+export const DEFAULT_STORED_ATTRIBUTE_FIELDS: readonly string[] = [
+	...TRUE_ATTRIBUTES,
+];
 
 /** As enterpriseFieldProblems, for `attributes`. */
-export const attributeFieldProblems = (option: boolean | AttributeFields | undefined, allowed: readonly string[], known?: ReadonlySet<string>) => fieldProblems("attributes", attributeFields(option, known), allowed);
+export const attributeFieldProblems = (
+	option: boolean | AttributeFields | undefined,
+	allowed: readonly string[],
+	known?: ReadonlySet<string>,
+) => fieldProblems("attributes", attributeFields(option, known), allowed);
 
 /**
  * The fields a target's `attributes` option reads, or null without it. `true` is each attribute
  * under its own name, for the fields the user model has (`known`): an attribute without a field
  * isn't the target's to manage, so it's neither sent nor cleared.
  */
-export function attributeFields(option: boolean | AttributeFields | undefined, known?: ReadonlySet<string>): AttributeFields | null {
-  if (!option) return null;
-  if (option !== true) return option;
-  const fields = Object.fromEntries(TRUE_ATTRIBUTES.filter((a) => !known || known.has(a)).map((a) => [a, a])) as AttributeFields;
-  return Object.keys(fields).length ? fields : null;
+export function attributeFields(
+	option: boolean | AttributeFields | undefined,
+	known?: ReadonlySet<string>,
+): AttributeFields | null {
+	if (!option) return null;
+	if (option !== true) return option;
+	const fields = Object.fromEntries(
+		TRUE_ATTRIBUTES.filter((a) => !known || known.has(a)).map((a) => [a, a]),
+	) as AttributeFields;
+	return Object.keys(fields).length ? fields : null;
 }
 
-export const missingAttributeFields = (option: boolean | AttributeFields | undefined, known: ReadonlySet<string>) => missingFields(option, known);
+export const missingAttributeFields = (
+	option: boolean | AttributeFields | undefined,
+	known: ReadonlySet<string>,
+) => missingFields(option, known);
 
 /**
  * The attributes a target reads, put on the user about to be sent: `title`, `phoneNumbers` (the
@@ -176,82 +307,105 @@ export const missingAttributeFields = (option: boolean | AttributeFields | undef
  * and Google Workspace and Entra ID read as "ours, and empty"; `clears` lists them, for a PATCH
  * to remove by path.
  */
-export function withAttributes(user: ProvisionedUser, fields: AttributeFields | null, scim: ScimUser): { scim: ScimUser; clears: string[]; invalid: string[] } {
-  if (!fields) return { scim, clears: [], invalid: [] };
-  const invalid: string[] = [];
-  const out: ScimUser = { ...scim };
-  const clears: string[] = [];
-  const value = (name: AttributeName) => (fields[name] ? textOf(user[fields[name] as string]) : undefined);
-  if (fields.title && scim.title === undefined) {
-    out.title = value("title");
-    if (out.title === undefined) clears.push("title");
-  }
-  if ((fields.phone || fields.mobile) && scim.phoneNumbers === undefined) {
-    const phones: NonNullable<ScimUser["phoneNumbers"]> = [];
-    const work = value("phone");
-    const mobile = value("mobile");
-    if (work) phones.push({ value: work, type: "work" });
-    if (mobile) phones.push({ value: mobile, type: "mobile" });
-    if (phones[0]) phones[0].primary = true;
-    out.phoneNumbers = phones.length ? phones : undefined;
-    if (!phones.length) clears.push("phoneNumbers");
-  }
-  if (ADDRESS_PARTS.some((a) => fields[a]) && scim.addresses === undefined) {
-    const parts = Object.fromEntries(ADDRESS_PARTS.map((a) => [a, value(a)]).filter(([, v]) => v !== undefined));
-    out.addresses = Object.keys(parts).length ? [{ type: "work", primary: true, ...parts }] : undefined;
-    if (!out.addresses) clears.push("addresses");
-  }
-  for (const name of PLAIN) {
-    if (!fields[name] || scim[name] !== undefined) continue;
-    const v = value(name);
-    if (v !== undefined && !validFor[name](v)) {
-      // Not this attribute's kind of value: left out (a PATCH leaves the app's as it is), and said why.
-      invalid.push(name);
-      delete out[name];
-      continue;
-    }
-    out[name] = v;
-    if (v === undefined) clears.push(name);
-  }
-  // The middle name and honorifics go in `name`, beside what mapUser put there.
-  if (NAME_PARTS.some((n) => fields[n])) {
-    const name = { ...scim.name };
-    for (const part of NAME_PARTS) {
-      if (!fields[part] || scim.name?.[part] !== undefined) continue;
-      const v = value(part);
-      if (v !== undefined && v.length > 256) {
-        invalid.push(part);
-        continue;
-      }
-      name[part] = v;
-      if (v === undefined) clears.push(`name.${part}`);
-    }
-    // No `name: {}` where there was none: an empty complex attribute is refused by some apps.
-    if (scim.name !== undefined || Object.values(name).some((v) => v !== undefined)) out.name = name;
-  }
-  // The photo (Better Auth's `image`, say), as SCIM's `photos`: an https URL only.
-  if (fields.photo && scim.photos === undefined) {
-    const v = value("photo");
-    if (v !== undefined && !httpsUrl(v)) {
-      invalid.push("photo");
-      delete out.photos;
-    } else {
-      out.photos = v === undefined ? undefined : [{ value: v, type: "photo", primary: true }];
-      if (v === undefined) clears.push("photos");
-    }
-  }
-  return { scim: out, clears, invalid };
+export function withAttributes(
+	user: ProvisionedUser,
+	fields: AttributeFields | null,
+	scim: ScimUser,
+): { scim: ScimUser; clears: string[]; invalid: string[] } {
+	if (!fields) return { scim, clears: [], invalid: [] };
+	const invalid: string[] = [];
+	const out: ScimUser = { ...scim };
+	const clears: string[] = [];
+	const value = (name: AttributeName) =>
+		fields[name] ? textOf(user[fields[name] as string]) : undefined;
+	if (fields.title && scim.title === undefined) {
+		out.title = value("title");
+		if (out.title === undefined) clears.push("title");
+	}
+	if ((fields.phone || fields.mobile) && scim.phoneNumbers === undefined) {
+		const phones: NonNullable<ScimUser["phoneNumbers"]> = [];
+		const work = value("phone");
+		const mobile = value("mobile");
+		if (work) phones.push({ value: work, type: "work" });
+		if (mobile) phones.push({ value: mobile, type: "mobile" });
+		if (phones[0]) phones[0].primary = true;
+		out.phoneNumbers = phones.length ? phones : undefined;
+		if (!phones.length) clears.push("phoneNumbers");
+	}
+	if (ADDRESS_PARTS.some((a) => fields[a]) && scim.addresses === undefined) {
+		const parts = Object.fromEntries(
+			ADDRESS_PARTS.map((a) => [a, value(a)]).filter(
+				([, v]) => v !== undefined,
+			),
+		);
+		out.addresses = Object.keys(parts).length
+			? [{ type: "work", primary: true, ...parts }]
+			: undefined;
+		if (!out.addresses) clears.push("addresses");
+	}
+	for (const name of PLAIN) {
+		if (!fields[name] || scim[name] !== undefined) continue;
+		const v = value(name);
+		if (v !== undefined && !validFor[name](v)) {
+			// Not this attribute's kind of value: left out (a PATCH leaves the app's as it is), and said why.
+			invalid.push(name);
+			delete out[name];
+			continue;
+		}
+		out[name] = v;
+		if (v === undefined) clears.push(name);
+	}
+	// The middle name and honorifics go in `name`, beside what mapUser put there.
+	if (NAME_PARTS.some((n) => fields[n])) {
+		const name = { ...scim.name };
+		for (const part of NAME_PARTS) {
+			if (!fields[part] || scim.name?.[part] !== undefined) continue;
+			const v = value(part);
+			if (v !== undefined && v.length > 256) {
+				invalid.push(part);
+				continue;
+			}
+			name[part] = v;
+			if (v === undefined) clears.push(`name.${part}`);
+		}
+		// No `name: {}` where there was none: an empty complex attribute is refused by some apps.
+		if (
+			scim.name !== undefined ||
+			Object.values(name).some((v) => v !== undefined)
+		)
+			out.name = name;
+	}
+	// The photo (Better Auth's `image`, say), as SCIM's `photos`: an https URL only.
+	if (fields.photo && scim.photos === undefined) {
+		const v = value("photo");
+		if (v !== undefined && !httpsUrl(v)) {
+			invalid.push("photo");
+			delete out.photos;
+		} else {
+			out.photos =
+				v === undefined
+					? undefined
+					: [{ value: v, type: "photo", primary: true }];
+			if (v === undefined) clears.push("photos");
+		}
+	}
+	return { scim: out, clears, invalid };
 }
 
 /** The user's Enterprise User values (manager aside), and their manager's Better Auth user id. */
-export function enterpriseValues(user: ProvisionedUser, fields: EnterpriseFields): { values: ScimEnterpriseUser; managerId: string | null } {
-  const values: ScimEnterpriseUser = {};
-  for (const a of ENTERPRISE_VALUES) {
-    const field = fields[a];
-    const value = field ? textOf(user[field]) : undefined;
-    if (value !== undefined) values[a] = value;
-  }
-  const managerId = fields.manager ? (textOf(user[fields.manager]) ?? null) : null;
-  // Nobody is their own manager.
-  return { values, managerId: managerId === user.id ? null : managerId };
+export function enterpriseValues(
+	user: ProvisionedUser,
+	fields: EnterpriseFields,
+): { values: ScimEnterpriseUser; managerId: string | null } {
+	const values: ScimEnterpriseUser = {};
+	for (const a of ENTERPRISE_VALUES) {
+		const field = fields[a];
+		const value = field ? textOf(user[field]) : undefined;
+		if (value !== undefined) values[a] = value;
+	}
+	const managerId = fields.manager
+		? (textOf(user[fields.manager]) ?? null)
+		: null;
+	// Nobody is their own manager.
+	return { values, managerId: managerId === user.id ? null : managerId };
 }

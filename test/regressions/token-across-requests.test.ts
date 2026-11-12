@@ -9,7 +9,7 @@ import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { expect, it } from "vitest";
 
 it("a token fetch cut short with its request doesn't stall the next request (workerd)", async () => {
-  const entry = `
+	const entry = `
     import { scimClient } from ${JSON.stringify(fileURLToPath(new URL("../../src/scim-client.ts", import.meta.url)))};
     const auth = { type: "oauth2", tokenUrl: "https://login.test/token", clientId: "c", clientSecret: "s" };
     const client = () => scimClient({ url: "https://scim.test/v2", auth });
@@ -24,31 +24,51 @@ it("a token fetch cut short with its request doesn't stall the next request (wor
         return new Response("?", { status: 404 });
       },
     };`;
-  const bundle = await build({ stdin: { contents: entry, resolveDir: process.cwd(), loader: "ts" }, bundle: true, write: false, format: "esm", platform: "neutral", conditions: ["workerd", "worker", "browser"], mainFields: ["module", "main"], logLevel: "silent" });
-  let release!: () => void;
-  const tokenGate = new Promise<void>((r) => (release = r));
-  let tokenRequests = 0;
-  const mf = new Miniflare(
-    convertV4MiniflareOptions({
-      modules: true,
-      script: bundle.outputFiles[0]!.text,
-      compatibilityDate: "2026-10-01",
-      outboundService: async (request: Request) => {
-        if (request.url === "https://login.test/token") {
-          tokenRequests++;
-          await tokenGate;
-          return Response.json({ access_token: `t${tokenRequests}`, token_type: "Bearer", expires_in: 3600 });
-        }
-        return Response.json({ id: "u1" }, { status: 201 });
-      },
-    } as never),
-  );
-  try {
-    expect(await (await mf.dispatchFetch("http://worker/a")).text()).toBe("started");
-    setTimeout(release, 200);
-    const b = await Promise.race([mf.dispatchFetch("http://worker/b").then((r: { text(): Promise<string> }) => r.text()), new Promise((r) => setTimeout(() => r("TIMED OUT"), 8000))]);
-    expect(b).toBe("u1");
-  } finally {
-    await mf.dispose();
-  }
+	const bundle = await build({
+		stdin: { contents: entry, resolveDir: process.cwd(), loader: "ts" },
+		bundle: true,
+		write: false,
+		format: "esm",
+		platform: "neutral",
+		conditions: ["workerd", "worker", "browser"],
+		mainFields: ["module", "main"],
+		logLevel: "silent",
+	});
+	let release!: () => void;
+	const tokenGate = new Promise<void>((r) => (release = r));
+	let tokenRequests = 0;
+	const mf = new Miniflare(
+		convertV4MiniflareOptions({
+			modules: true,
+			script: bundle.outputFiles[0]!.text,
+			compatibilityDate: "2026-10-01",
+			outboundService: async (request: Request) => {
+				if (request.url === "https://login.test/token") {
+					tokenRequests++;
+					await tokenGate;
+					return Response.json({
+						access_token: `t${tokenRequests}`,
+						token_type: "Bearer",
+						expires_in: 3600,
+					});
+				}
+				return Response.json({ id: "u1" }, { status: 201 });
+			},
+		} as never),
+	);
+	try {
+		expect(await (await mf.dispatchFetch("http://worker/a")).text()).toBe(
+			"started",
+		);
+		setTimeout(release, 200);
+		const b = await Promise.race([
+			mf
+				.dispatchFetch("http://worker/b")
+				.then((r: { text(): Promise<string> }) => r.text()),
+			new Promise((r) => setTimeout(() => r("TIMED OUT"), 8000)),
+		]);
+		expect(b).toBe("u1");
+	} finally {
+		await mf.dispose();
+	}
 }, 30_000);

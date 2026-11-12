@@ -9,98 +9,164 @@ import { credentials, type ScimAuth } from "./credentials";
  * would send the token elsewhere or break every path built on it.
  */
 export function targetUrl(value: string, o: { query?: boolean } = {}): boolean {
-  let u: URL;
-  try {
-    u = new URL(value);
-  } catch {
-    return false;
-  }
-  // A query only where nothing is appended to the URL (a webhook's, e.g. Azure Functions' ?code=).
-  if (u.username || u.password || u.hash || value.includes("#") || (!o.query && (u.search || value.includes("?")))) return false;
-  if (u.protocol === "https:") return true;
-  return u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+	let u: URL;
+	try {
+		u = new URL(value);
+	} catch {
+		return false;
+	}
+	// A query only where nothing is appended to the URL (a webhook's, e.g. Azure Functions' ?code=).
+	if (
+		u.username ||
+		u.password ||
+		u.hash ||
+		value.includes("#") ||
+		(!o.query && (u.search || value.includes("?")))
+	)
+		return false;
+	if (u.protocol === "https:") return true;
+	return (
+		u.protocol === "http:" &&
+		["localhost", "127.0.0.1", "[::1]"].includes(u.hostname)
+	);
 }
 
 export const SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User";
 /** The Enterprise User extension (RFC 7643 §4.3): its schema URN, also the key of its attributes in a user. */
-export const SCIM_ENTERPRISE_USER_SCHEMA = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
+export const SCIM_ENTERPRISE_USER_SCHEMA =
+	"urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
 /**
  * What a failed fetch says, safe to log and store: a timeout, or the error's own text, except
  * when building the request failed on a header (a token with a line break, say), whose text
  * would repeat the header, secret and all.
  */
 export function fetchFailure(e: unknown, timeoutMs: number): string {
-  const err = e as Error;
-  if (err.name === "TimeoutError" || err.name === "AbortError") return `no response within ${timeoutMs} ms`;
-  if (/header/i.test(err.message ?? "")) return "the request couldn't be sent: an invalid header value (check the target's token or auth)";
-  return err.message;
+	const err = e as Error;
+	if (err.name === "TimeoutError" || err.name === "AbortError")
+		return `no response within ${timeoutMs} ms`;
+	if (/header/i.test(err.message ?? ""))
+		return "the request couldn't be sent: an invalid header value (check the target's token or auth)";
+	return err.message;
 }
 
 export const SCIM_GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group";
 const PATCH_OP_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
 export interface ScimUser {
-  schemas: string[];
-  externalId?: string | undefined;
-  userName: string;
-  name?:
-    | { givenName?: string | undefined; familyName?: string | undefined; formatted?: string | undefined; middleName?: string | undefined; honorificPrefix?: string | undefined; honorificSuffix?: string | undefined }
-    | undefined;
-  /** A casual name, and a profile page (RFC 7643 §4.1.1): sent by `attributes`, or by a `mapUser`. */
-  nickName?: string | undefined;
-  profileUrl?: string | undefined;
-  displayName?: string | undefined;
-  emails?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
-  active: boolean;
-  /** The job title, phone numbers and addresses (RFC 7643 §4.1): sent by `attributes`, or by a `mapUser`. */
-  title?: string | undefined;
-  phoneNumbers?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
-  addresses?: ScimAddress[] | undefined;
-  /** Pictures of the user, by URL (RFC 7643 §4.1.2): `attributes` sends one, `type: "photo"`. */
-  photos?: { value: string; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
-  /** The preferred language, locale, time zone and user type (RFC 7643 §4.1.1): sent by `attributes`, or by a `mapUser`. */
-  preferredLanguage?: string | undefined;
-  locale?: string | undefined;
-  timezone?: string | undefined;
-  userType?: string | undefined;
-  /** Roles and entitlements (RFC 7643 §4.1.2): sent by `roles` and `entitlements`, or by a `mapUser`. */
-  roles?: { value: string; display?: string | undefined; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
-  entitlements?: { value: string; display?: string | undefined; type?: string | undefined; primary?: boolean | undefined }[] | undefined;
-  /** The Enterprise User extension's attributes (with its URN in `schemas`). */
-  "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"?: ScimEnterpriseUser | undefined;
+	schemas: string[];
+	externalId?: string | undefined;
+	userName: string;
+	name?:
+		| {
+				givenName?: string | undefined;
+				familyName?: string | undefined;
+				formatted?: string | undefined;
+				middleName?: string | undefined;
+				honorificPrefix?: string | undefined;
+				honorificSuffix?: string | undefined;
+		  }
+		| undefined;
+	/** A casual name, and a profile page (RFC 7643 §4.1.1): sent by `attributes`, or by a `mapUser`. */
+	nickName?: string | undefined;
+	profileUrl?: string | undefined;
+	displayName?: string | undefined;
+	emails?:
+		| {
+				value: string;
+				type?: string | undefined;
+				primary?: boolean | undefined;
+		  }[]
+		| undefined;
+	active: boolean;
+	/** The job title, phone numbers and addresses (RFC 7643 §4.1): sent by `attributes`, or by a `mapUser`. */
+	title?: string | undefined;
+	phoneNumbers?:
+		| {
+				value: string;
+				type?: string | undefined;
+				primary?: boolean | undefined;
+		  }[]
+		| undefined;
+	addresses?: ScimAddress[] | undefined;
+	/** Pictures of the user, by URL (RFC 7643 §4.1.2): `attributes` sends one, `type: "photo"`. */
+	photos?:
+		| {
+				value: string;
+				type?: string | undefined;
+				primary?: boolean | undefined;
+		  }[]
+		| undefined;
+	/** The preferred language, locale, time zone and user type (RFC 7643 §4.1.1): sent by `attributes`, or by a `mapUser`. */
+	preferredLanguage?: string | undefined;
+	locale?: string | undefined;
+	timezone?: string | undefined;
+	userType?: string | undefined;
+	/** Roles and entitlements (RFC 7643 §4.1.2): sent by `roles` and `entitlements`, or by a `mapUser`. */
+	roles?:
+		| {
+				value: string;
+				display?: string | undefined;
+				type?: string | undefined;
+				primary?: boolean | undefined;
+		  }[]
+		| undefined;
+	entitlements?:
+		| {
+				value: string;
+				display?: string | undefined;
+				type?: string | undefined;
+				primary?: boolean | undefined;
+		  }[]
+		| undefined;
+	/** The Enterprise User extension's attributes (with its URN in `schemas`). */
+	"urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"?:
+		| ScimEnterpriseUser
+		| undefined;
 }
 
 /** A user as the app lists them (drift detection): `active` only when the app says. */
 export interface ListedUser {
-  id: string;
-  userName: string;
-  externalId: string | null;
-  active?: boolean | undefined;
+	id: string;
+	userName: string;
+	externalId: string | null;
+	active?: boolean | undefined;
 }
 
 /** The parts of an address (RFC 7643 §4.1.2) that `attributes` reads and the connectors map. */
-export const ADDRESS_PARTS = ["streetAddress", "locality", "region", "postalCode", "country"] as const;
+export const ADDRESS_PARTS = [
+	"streetAddress",
+	"locality",
+	"region",
+	"postalCode",
+	"country",
+] as const;
 
 /** One of a user's addresses (RFC 7643 §4.1.2). */
 export interface ScimAddress {
-  type?: string | undefined;
-  primary?: boolean | undefined;
-  formatted?: string | undefined;
-  streetAddress?: string | undefined;
-  locality?: string | undefined;
-  region?: string | undefined;
-  postalCode?: string | undefined;
-  country?: string | undefined;
+	type?: string | undefined;
+	primary?: boolean | undefined;
+	formatted?: string | undefined;
+	streetAddress?: string | undefined;
+	locality?: string | undefined;
+	region?: string | undefined;
+	postalCode?: string | undefined;
+	country?: string | undefined;
 }
 
 /** The Enterprise User extension's attributes (RFC 7643 §4.3). `manager.value` is the manager's id at the app. */
 export interface ScimEnterpriseUser {
-  employeeNumber?: string | undefined;
-  costCenter?: string | undefined;
-  organization?: string | undefined;
-  division?: string | undefined;
-  department?: string | undefined;
-  manager?: { value: string; $ref?: string | undefined; displayName?: string | undefined } | undefined;
+	employeeNumber?: string | undefined;
+	costCenter?: string | undefined;
+	organization?: string | undefined;
+	division?: string | undefined;
+	department?: string | undefined;
+	manager?:
+		| {
+				value: string;
+				$ref?: string | undefined;
+				displayName?: string | undefined;
+		  }
+		| undefined;
 }
 
 /**
@@ -108,46 +174,49 @@ export interface ScimEnterpriseUser {
  * so an app that doesn't know the extension isn't sent it for users with nothing in it.
  */
 function onTheWire(user: ScimUser): ScimUser {
-  const ext = user[SCIM_ENTERPRISE_USER_SCHEMA];
-  if (!ext || Object.values(ext).some((v) => v !== undefined)) return user;
-  const { [SCIM_ENTERPRISE_USER_SCHEMA]: _, ...rest } = user;
-  return { ...rest, schemas: user.schemas.filter((x) => x !== SCIM_ENTERPRISE_USER_SCHEMA) };
+	const ext = user[SCIM_ENTERPRISE_USER_SCHEMA];
+	if (!ext || Object.values(ext).some((v) => v !== undefined)) return user;
+	const { [SCIM_ENTERPRISE_USER_SCHEMA]: _, ...rest } = user;
+	return {
+		...rest,
+		schemas: user.schemas.filter((x) => x !== SCIM_ENTERPRISE_USER_SCHEMA),
+	};
 }
 
 export interface ScimGroup {
-  schemas: string[];
-  externalId?: string | undefined;
-  displayName: string;
-  /** The members' ids at the app. */
-  members: { value: string }[];
+	schemas: string[];
+	externalId?: string | undefined;
+	displayName: string;
+	/** The members' ids at the app. */
+	members: { value: string }[];
 }
 
 export interface ScimEndpoint {
-  /** The SCIM base URL, without /Users (for example https://scim.us-east-2.amazonaws.com/<id>/scim/v2). */
-  url: string;
-  /** How requests are authorised; `token` is short for `{ type: "bearer", token }`. */
-  auth?: ScimAuth | undefined;
-  /** Bearer token. */
-  token?: string | undefined;
-  /** Per request; default 10 seconds. */
-  timeoutMs?: number | undefined;
-  /** For tests. */
-  fetch?: typeof fetch | undefined;
+	/** The SCIM base URL, without /Users (for example https://scim.us-east-2.amazonaws.com/<id>/scim/v2). */
+	url: string;
+	/** How requests are authorised; `token` is short for `{ type: "bearer", token }`. */
+	auth?: ScimAuth | undefined;
+	/** Bearer token. */
+	token?: string | undefined;
+	/** Per request; default 10 seconds. */
+	timeoutMs?: number | undefined;
+	/** For tests. */
+	fetch?: typeof fetch | undefined;
 }
 
 export class ScimError extends Error {
-  constructor(
-    message: string,
-    readonly status: number | null,
-    readonly retryable: boolean,
-    readonly retryAfterMs?: number | undefined,
-    readonly scimType?: string | undefined,
-    /** The app is rate limiting us, though its status isn't 429 (Google's 403 rateLimitExceeded). */
-    readonly rateLimited?: boolean | undefined,
-  ) {
-    super(message);
-    this.name = "ScimError";
-  }
+	constructor(
+		message: string,
+		readonly status: number | null,
+		readonly retryable: boolean,
+		readonly retryAfterMs?: number | undefined,
+		readonly scimType?: string | undefined,
+		/** The app is rate limiting us, though its status isn't 429 (Google's 403 rateLimitExceeded). */
+		readonly rateLimited?: boolean | undefined,
+	) {
+		super(message);
+		this.name = "ScimError";
+	}
 }
 
 const DAY_MS = 86_400_000;
@@ -156,39 +225,81 @@ const DAY_MS = 86_400_000;
  * `Retry-After` as milliseconds: delay-seconds or an HTTP date, at most a day (a huge value would
  * park the job for years, or make an invalid date); undefined if absent or unreadable.
  */
-export function retryAfterMs(header: string | null, now = Date.now()): number | undefined {
-  if (!header) return undefined;
-  if (/^\d+$/.test(header.trim())) return Math.min(DAY_MS, Number(header.trim()) * 1000);
-  const at = Date.parse(header);
-  return Number.isNaN(at) ? undefined : Math.min(DAY_MS, Math.max(0, at - now));
+export function retryAfterMs(
+	header: string | null,
+	now = Date.now(),
+): number | undefined {
+	if (!header) return undefined;
+	if (/^\d+$/.test(header.trim()))
+		return Math.min(DAY_MS, Number(header.trim()) * 1000);
+	const at = Date.parse(header);
+	return Number.isNaN(at) ? undefined : Math.min(DAY_MS, Math.max(0, at - now));
 }
 
 /** `s` without trailing slashes (a loop, not /\/+$/, which is slow on long runs of slashes). */
 export function trimSlashes(s: string): string {
-  let end = s.length;
-  while (end > 0 && s[end - 1] === "/") end--;
-  return s.slice(0, end);
+	let end = s.length;
+	while (end > 0 && s[end - 1] === "/") end--;
+	return s.slice(0, end);
 }
 
 /** A SCIM filter string literal: quotes and backslashes escaped (RFC 7644 §3.4.2.2, JSON rules). */
 export const scimString = (value: string) => JSON.stringify(value);
 
 /** A list's entries that are objects: a null (or a bare value) in an app's list is skipped, not read. */
-export const objects = <T>(list: unknown[]): T[] => list.filter((x): x is T => x !== null && typeof x === "object");
+export const objects = <T>(list: unknown[]): T[] =>
+	list.filter((x): x is T => x !== null && typeof x === "object");
 
 /** `items` in batches of at most `size` (one batch when no size). */
 const batches = <T>(items: T[], size?: number): T[][] => {
-  if (!size || items.length <= size) return items.length ? [items] : [];
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
-  return out;
+	if (!size || items.length <= size) return items.length ? [items] : [];
+	const out: T[][] = [];
+	for (let i = 0; i < items.length; i += size)
+		out.push(items.slice(i, i + size));
+	return out;
 };
 
 /** The response attributes we read, as RFC 7643 spells them. */
 const SCIM_NAMES = [
-  "Resources", "totalResults", "itemsPerPage", "startIndex", "nextCursor", "id", "userName", "externalId", "active", "members", "value", "displayName", "detail", "scimType", "status", "schemas",
-  // ServiceProviderConfig (RFC 7643 §5, RFC 9865, RFC 9967) and the discovery endpoints, for check.
-  "patch", "filter", "bulk", "etag", "sort", "supported", "authenticationSchemes", "type", "maxResults", "securityEvents", "asyncRequest", "eventUris", "pagination", "cursor", "index", "defaultPaginationMethod", "defaultPageSize", "maxPageSize", "cursorTimeout", "schema", "name", "schemaExtensions",
+	"Resources",
+	"totalResults",
+	"itemsPerPage",
+	"startIndex",
+	"nextCursor",
+	"id",
+	"userName",
+	"externalId",
+	"active",
+	"members",
+	"value",
+	"displayName",
+	"detail",
+	"scimType",
+	"status",
+	"schemas",
+	// ServiceProviderConfig (RFC 7643 §5, RFC 9865, RFC 9967) and the discovery endpoints, for check.
+	"patch",
+	"filter",
+	"bulk",
+	"etag",
+	"sort",
+	"supported",
+	"authenticationSchemes",
+	"type",
+	"maxResults",
+	"securityEvents",
+	"asyncRequest",
+	"eventUris",
+	"pagination",
+	"cursor",
+	"index",
+	"defaultPaginationMethod",
+	"defaultPageSize",
+	"maxPageSize",
+	"cursorTimeout",
+	"schema",
+	"name",
+	"schemaExtensions",
 ];
 const CANONICAL = new Map(SCIM_NAMES.map((n) => [n.toLowerCase(), n]));
 
@@ -198,16 +309,17 @@ const CANONICAL = new Map(SCIM_NAMES.map((n) => [n.toLowerCase(), n]));
  * keeps the exact spelling's value. Others are left as they are.
  */
 export function scimKeys(json: unknown, depth = 0): unknown {
-  if (depth > 8 || json === null || typeof json !== "object") return json;
-  if (Array.isArray(json)) return json.map((v) => scimKeys(v, depth + 1));
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(json)) {
-    const name = CANONICAL.get(k.toLowerCase()) ?? k;
-    // A key that would set the copy's prototype (JSON.parse keeps it as a plain key): dropped.
-    if (name === "__proto__" || (name !== k && Object.hasOwn(json, name))) continue;
-    out[name] = scimKeys(v, depth + 1);
-  }
-  return out;
+	if (depth > 8 || json === null || typeof json !== "object") return json;
+	if (Array.isArray(json)) return json.map((v) => scimKeys(v, depth + 1));
+	const out: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(json)) {
+		const name = CANONICAL.get(k.toLowerCase()) ?? k;
+		// A key that would set the copy's prototype (JSON.parse keeps it as a plain key): dropped.
+		if (name === "__proto__" || (name !== k && Object.hasOwn(json, name)))
+			continue;
+		out[name] = scimKeys(v, depth + 1);
+	}
+	return out;
 }
 
 /**
@@ -215,269 +327,549 @@ export function scimKeys(json: unknown, depth = 0): unknown {
  * and the retry finds the account (or group) by name once it's there, rather than making another.
  * A 202 that gives the new resource's id anyway is taken as made (see `madeOrAccepted`).
  */
-const accepted = (what: string, res: { status: number; txn: string | null; retryAfter: number | undefined }) =>
-  new ScimError(`${what}: accepted (202) but not done yet${res.txn ? ` (transaction ${res.txn.slice(0, 100)})` : ""}; looked for again`, 202, true, res.retryAfter);
+const accepted = (
+	what: string,
+	res: { status: number; txn: string | null; retryAfter: number | undefined },
+) =>
+	new ScimError(
+		`${what}: accepted (202) but not done yet${res.txn ? ` (transaction ${res.txn.slice(0, 100)})` : ""}; looked for again`,
+		202,
+		true,
+		res.retryAfter,
+	);
 
 export function scimClient(endpoint: ScimEndpoint) {
-  const base = trimSlashes(endpoint.url);
-  const doFetch = endpoint.fetch ?? fetch;
-  const timeoutMs = endpoint.timeoutMs ?? 10_000;
-  const auth: ScimAuth = endpoint.auth ?? { type: "bearer", token: endpoint.token ?? "" };
-  const creds = credentials(auth, { fetch: doFetch, timeoutMs });
+	const base = trimSlashes(endpoint.url);
+	const doFetch = endpoint.fetch ?? fetch;
+	const timeoutMs = endpoint.timeoutMs ?? 10_000;
+	const auth: ScimAuth = endpoint.auth ?? {
+		type: "bearer",
+		token: endpoint.token ?? "",
+	};
+	const creds = credentials(auth, { fetch: doFetch, timeoutMs });
 
-  async function request(method: string, path: string, body?: unknown, retried = false): Promise<{ status: number; json: unknown; txn: string | null; retryAfter: number | undefined }> {
-    let res: Response;
-    const authorization = await creds.headers();
-    try {
-      res = await doFetch(`${base}${path}`, {
-        method,
-        headers: {
-          ...authorization,
-          accept: "application/scim+json, application/json",
-          ...(body === undefined ? {} : { "content-type": "application/scim+json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        // Never follow: a redirect would replay the token and body to wherever it points.
-        redirect: "manual",
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch (e) {
-      throw new ScimError(`${method} ${path}: ${fetchFailure(e, timeoutMs)}`, null, true);
-    }
-    const text = await res.text();
-    let json: unknown = null;
-    if (text) {
-      try {
-        json = scimKeys(JSON.parse(text));
-      } catch {
-        json = null;
-      }
-    }
-    if (res.ok) return { status: res.status, json, txn: res.headers.get("set-txn"), retryAfter: retryAfterMs(res.headers.get("retry-after")) };
-    // A cached OAuth token the app no longer accepts: once, with a new one.
-    if (res.status === 401 && !retried && creds.rejected()) return request(method, path, body, true);
-    if (res.status >= 300 && res.status < 400) {
-      const to = res.headers.get("location");
-      // Retried, like a wrong URL: a maintenance page or a login bounce passes, and a wrong URL is
-      // the host's to fix. Failing the job would leave a banned user active until a reconcile.
-      throw new ScimError(`${method} ${path}: redirected (${res.status})${to ? ` to ${to.slice(0, 200)}` : ""}; check the target's url (use the final URL)`, res.status, true, retryAfterMs(res.headers.get("retry-after")));
-    }
-    const detail = (json as { detail?: unknown } | null)?.detail;
-    const scimType = (json as { scimType?: unknown } | null)?.scimType;
-    // 401/403 are the host's token, not the user: retried, so jobs recover once it's fixed.
-    const auth = res.status === 401 || res.status === 403;
-    // /Users itself can't be missing: a 404 there is a wrong URL, the host's to fix, like a token.
-    const misplaced = res.status === 404 && /^\/(Users|Groups)(\?|$)/.test(path);
-    // 501: the app doesn't support the request. From @better-auth/scim (1.7.21 on), it's every request
-    // while its database has no transactions, such as D1. Retried like a token: the app's host fixes
-    // it (or the target's settings), and the queued changes then go through.
-    const unimplemented = res.status === 501;
-    const retryable = res.status === 408 || res.status === 429 || res.status >= 500 || auth || misplaced;
-    throw new ScimError(
-      `${method} ${path}: ${res.status}${auth ? " (check the target's token)" : misplaced ? " (check the target's url)" : unimplemented ? " (not implemented: the app doesn't support this request; a Better Auth app answers 501 to every SCIM request while its database has no transactions, as on D1)" : ""}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
-      res.status,
-      retryable,
-      retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
-      typeof scimType === "string" ? scimType : undefined,
-    );
-  }
+	async function request(
+		method: string,
+		path: string,
+		body?: unknown,
+		retried = false,
+	): Promise<{
+		status: number;
+		json: unknown;
+		txn: string | null;
+		retryAfter: number | undefined;
+	}> {
+		let res: Response;
+		const authorization = await creds.headers();
+		try {
+			res = await doFetch(`${base}${path}`, {
+				method,
+				headers: {
+					...authorization,
+					accept: "application/scim+json, application/json",
+					...(body === undefined
+						? {}
+						: { "content-type": "application/scim+json" }),
+				},
+				...(body === undefined ? {} : { body: JSON.stringify(body) }),
+				// Never follow: a redirect would replay the token and body to wherever it points.
+				redirect: "manual",
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+		} catch (e) {
+			throw new ScimError(
+				`${method} ${path}: ${fetchFailure(e, timeoutMs)}`,
+				null,
+				true,
+			);
+		}
+		const text = await res.text();
+		let json: unknown = null;
+		if (text) {
+			try {
+				json = scimKeys(JSON.parse(text));
+			} catch {
+				json = null;
+			}
+		}
+		if (res.ok)
+			return {
+				status: res.status,
+				json,
+				txn: res.headers.get("set-txn"),
+				retryAfter: retryAfterMs(res.headers.get("retry-after")),
+			};
+		// A cached OAuth token the app no longer accepts: once, with a new one.
+		if (res.status === 401 && !retried && creds.rejected())
+			return request(method, path, body, true);
+		if (res.status >= 300 && res.status < 400) {
+			const to = res.headers.get("location");
+			// Retried, like a wrong URL: a maintenance page or a login bounce passes, and a wrong URL is
+			// the host's to fix. Failing the job would leave a banned user active until a reconcile.
+			throw new ScimError(
+				`${method} ${path}: redirected (${res.status})${to ? ` to ${to.slice(0, 200)}` : ""}; check the target's url (use the final URL)`,
+				res.status,
+				true,
+				retryAfterMs(res.headers.get("retry-after")),
+			);
+		}
+		const detail = (json as { detail?: unknown } | null)?.detail;
+		const scimType = (json as { scimType?: unknown } | null)?.scimType;
+		// 401/403 are the host's token, not the user: retried, so jobs recover once it's fixed.
+		const auth = res.status === 401 || res.status === 403;
+		// /Users itself can't be missing: a 404 there is a wrong URL, the host's to fix, like a token.
+		const misplaced =
+			res.status === 404 && /^\/(Users|Groups)(\?|$)/.test(path);
+		// 501: the app doesn't support the request. From @better-auth/scim (1.7.21 on), it's every request
+		// while its database has no transactions, such as D1. Retried like a token: the app's host fixes
+		// it (or the target's settings), and the queued changes then go through.
+		const unimplemented = res.status === 501;
+		const retryable =
+			res.status === 408 ||
+			res.status === 429 ||
+			res.status >= 500 ||
+			auth ||
+			misplaced;
+		throw new ScimError(
+			`${method} ${path}: ${res.status}${auth ? " (check the target's token)" : misplaced ? " (check the target's url)" : unimplemented ? " (not implemented: the app doesn't support this request; a Better Auth app answers 501 to every SCIM request while its database has no transactions, as on D1)" : ""}${typeof detail === "string" ? ` ${detail.slice(0, 300)}` : ""}`,
+			res.status,
+			retryable,
+			retryable ? retryAfterMs(res.headers.get("retry-after")) : undefined,
+			typeof scimType === "string" ? scimType : undefined,
+		);
+	}
 
-  /**
-   * A group's current member ids: from the group itself, or by listing users in it. Members are
-   * asked for by name (`attributes=members`): apps may leave them out of a plain GET, and SCIM
-   * leaves out empty attributes, so only once asked for does "no members" mean an empty group.
-   * Listing users follows cursors and startIndex pages alike.
-   */
-  async function groupMemberIds(id: string, from: "group" | "users-filter"): Promise<string[]> {
-    if (from === "group") {
-      const { json } = await request("GET", `/Groups/${encodeURIComponent(id)}?attributes=members`);
-      const members = (json as { members?: unknown } | null)?.members;
-      return Array.isArray(members) ? objects<{ value?: unknown }>(members).map((m) => m.value).filter((v): v is string => typeof v === "string") : [];
-    }
-    const ids = new Set<string>();
-    const filter = encodeURIComponent(`groups.value eq ${scimString(id)}`);
-    let cursor = "";
-    let startIndex = 1;
-    for (let pages = 0; pages < 10_000; pages++) {
-      const { json } = await request("GET", `/Users?filter=${filter}&cursor=${encodeURIComponent(cursor)}&startIndex=${startIndex}`);
-      const list = json as { Resources?: unknown[]; nextCursor?: unknown; totalResults?: unknown; itemsPerPage?: unknown } | null;
-      if (!list || !Array.isArray(list.Resources)) throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, true);
-      for (const r of objects<{ id?: unknown }>(list.Resources)) if (typeof r.id === "string") ids.add(r.id);
-      if (typeof list.nextCursor === "string" && list.nextCursor) {
-        cursor = list.nextCursor;
-        continue;
-      }
-      // Index paging: more to read while totalResults says so and this page wasn't empty.
-      const total = typeof list.totalResults === "number" ? list.totalResults : 0;
-      if (!list.Resources.length || startIndex - 1 + list.Resources.length >= total) break;
-      startIndex += list.Resources.length;
-    }
-    return [...ids];
-  }
+	/**
+	 * A group's current member ids: from the group itself, or by listing users in it. Members are
+	 * asked for by name (`attributes=members`): apps may leave them out of a plain GET, and SCIM
+	 * leaves out empty attributes, so only once asked for does "no members" mean an empty group.
+	 * Listing users follows cursors and startIndex pages alike.
+	 */
+	async function groupMemberIds(
+		id: string,
+		from: "group" | "users-filter",
+	): Promise<string[]> {
+		if (from === "group") {
+			const { json } = await request(
+				"GET",
+				`/Groups/${encodeURIComponent(id)}?attributes=members`,
+			);
+			const members = (json as { members?: unknown } | null)?.members;
+			return Array.isArray(members)
+				? objects<{ value?: unknown }>(members)
+						.map((m) => m.value)
+						.filter((v): v is string => typeof v === "string")
+				: [];
+		}
+		const ids = new Set<string>();
+		const filter = encodeURIComponent(`groups.value eq ${scimString(id)}`);
+		let cursor = "";
+		let startIndex = 1;
+		for (let pages = 0; pages < 10_000; pages++) {
+			const { json } = await request(
+				"GET",
+				`/Users?filter=${filter}&cursor=${encodeURIComponent(cursor)}&startIndex=${startIndex}`,
+			);
+			const list = json as {
+				Resources?: unknown[];
+				nextCursor?: unknown;
+				totalResults?: unknown;
+				itemsPerPage?: unknown;
+			} | null;
+			if (!list || !Array.isArray(list.Resources))
+				throw new ScimError(
+					"GET /Users: not a SCIM ListResponse (check the target's url)",
+					null,
+					true,
+				);
+			for (const r of objects<{ id?: unknown }>(list.Resources))
+				if (typeof r.id === "string") ids.add(r.id);
+			if (typeof list.nextCursor === "string" && list.nextCursor) {
+				cursor = list.nextCursor;
+				continue;
+			}
+			// Index paging: more to read while totalResults says so and this page wasn't empty.
+			const total =
+				typeof list.totalResults === "number" ? list.totalResults : 0;
+			if (
+				!list.Resources.length ||
+				startIndex - 1 + list.Resources.length >= total
+			)
+				break;
+			startIndex += list.Resources.length;
+		}
+		return [...ids];
+	}
 
-  const idOf = (json: unknown, what: string) => {
-    const id = (json as { id?: unknown } | null)?.id;
-    if (typeof id !== "string" || !id) throw new ScimError(`${what}: the response has no id`, null, false);
-    return id;
-  };
-  /** The id a create's reply gives; a 202 without one is accepted, not done, and retried. */
-  const madeOrAccepted = (what: string, res: { status: number; json: unknown; txn: string | null; retryAfter: number | undefined }) => {
-    const id = (res.json as { id?: unknown } | null)?.id;
-    if (res.status === 202 && !(typeof id === "string" && id)) throw accepted(what, res);
-    return idOf(res.json, what);
-  };
+	const idOf = (json: unknown, what: string) => {
+		const id = (json as { id?: unknown } | null)?.id;
+		if (typeof id !== "string" || !id)
+			throw new ScimError(`${what}: the response has no id`, null, false);
+		return id;
+	};
+	/** The id a create's reply gives; a 202 without one is accepted, not done, and retried. */
+	const madeOrAccepted = (
+		what: string,
+		res: {
+			status: number;
+			json: unknown;
+			txn: string | null;
+			retryAfter: number | undefined;
+		},
+	) => {
+		const id = (res.json as { id?: unknown } | null)?.id;
+		if (res.status === 202 && !(typeof id === "string" && id))
+			throw accepted(what, res);
+		return idOf(res.json, what);
+	};
 
-  return {
-    /** The user with this userName (its id and externalId), or null. */
-    async findByUserName(userName: string): Promise<{ id: string; externalId: string | null; active?: boolean } | null> {
-      const { json } = await request("GET", `/Users?filter=${encodeURIComponent(`userName eq ${scimString(userName)}`)}&count=2`);
-      const list = json as { schemas?: unknown; Resources?: unknown; totalResults?: unknown } | null;
-      // A page that isn't a SCIM list (a wrong URL that answers 200): never read as "no such user".
-      if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number"))
-        throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, true);
-      const resources = Array.isArray(list.Resources) ? objects<{ id?: unknown; userName?: unknown; externalId?: unknown; active?: unknown }>(list.Resources) : [];
-      // SCIM compares userName case-insensitively; so do we, but only an exact hit is ours.
-      const hit = resources.find((r) => typeof r.userName === "string" && r.userName.toLowerCase() === userName.toLowerCase());
-      // `active` only when the app says: absent is not "deactivated".
-      return hit ? { id: idOf(hit, "GET /Users"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null, ...(typeof hit.active === "boolean" ? { active: hit.active } : {}) } : null;
-    },
-    /**
-     * A page of the app's users, for drift detection: at most `count` (apps cap it at their own
-     * page size), from `cursor` (null for the first page): the app's own cursor, or the next
-     * startIndex, whichever it pages by. Asked for by cursor and index alike, as group members are.
-     */
-    async listUsers(cursor: string | null, count: number): Promise<{ users: ListedUser[]; next: string | null }> {
-      // Cursors are ours: "c:<the app's cursor>", or "i:<startIndex>:<the previous page's last id>".
-      let startIndex = 1;
-      let c = "";
-      let lastId = "";
-      const byIndex = cursor === null ? null : /^i:([1-9]\d*):([\s\S]*)$/.exec(cursor);
-      if (byIndex) {
-        startIndex = Number(byIndex[1]);
-        lastId = byIndex[2] as string;
-      } else if (cursor !== null) {
-        if (!/^c:.+/.test(cursor)) throw new ScimError("unknown cursor: pass the `next` of a previous page", null, false);
-        c = cursor.slice(2);
-      }
-      const { json } = await request("GET", `/Users?count=${count}&cursor=${encodeURIComponent(c)}&startIndex=${startIndex}`);
-      const list = json as { Resources?: unknown; nextCursor?: unknown; totalResults?: unknown } | null;
-      // No job retries a listing: a page that isn't a list is said so, not waited for.
-      if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number")) throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, false);
-      // The page as the app counts it (for paging), and the entries that can be read.
-      const page: unknown[] = Array.isArray(list.Resources) ? list.Resources : [];
-      const resources = objects<{ id?: unknown; userName?: unknown; externalId?: unknown; active?: unknown }>(page);
-      const users: ListedUser[] = [];
-      for (const r of resources) {
-        if (typeof r.id !== "string" || !r.id) continue;
-        users.push({ id: r.id, userName: typeof r.userName === "string" ? r.userName : "", externalId: typeof r.externalId === "string" && r.externalId ? r.externalId : null, ...(typeof r.active === "boolean" ? { active: r.active } : {}) });
-      }
-      if (typeof list.nextCursor === "string" && list.nextCursor) return { users, next: `c:${list.nextCursor}` };
-      // Paging by the app's cursor: no next cursor is the end.
-      if (c) return { users, next: null };
-      // By index. An app that ignores startIndex gives the page before again: dropped, and the end.
-      if (lastId && resources.some((r) => r.id === lastId)) return { users: [], next: null };
-      // More while totalResults says so; without it (apps leave it out), while the page is full.
-      const total = typeof list.totalResults === "number" ? list.totalResults : null;
-      const more = page.length > 0 && (total === null ? page.length >= count : startIndex - 1 + page.length < total);
-      return { users, next: more ? `i:${startIndex + page.length}:${users.at(-1)?.id ?? lastId}` : null };
-    },
-    async create(user: ScimUser): Promise<string> {
-      return madeOrAccepted("POST /Users", await request("POST", "/Users", onTheWire(user)));
-    },
-    async replace(id: string, user: ScimUser): Promise<void> {
-      await request("PUT", `/Users/${encodeURIComponent(id)}`, { ...onTheWire(user), id });
-    },
-    /**
-     * Like replace, but only the attributes we send change: anything set at the app is kept.
-     * `remove` names attributes (paths) of ours that now have no value, so they're cleared too.
-     */
-    async patch(id: string, user: ScimUser, remove: readonly string[] = []): Promise<void> {
-      const { schemas: _, ...value } = onTheWire(user);
-      const at = `/Users/${encodeURIComponent(id)}`;
-      try {
-        await request("PATCH", at, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "replace", value }, ...remove.map((path) => ({ op: "remove", path }))] });
-      } catch (e) {
-        // Some apps refuse to remove an attribute that has no value (400 noTarget), and the
-        // removes go with every change. So: the change without them, then each remove on its own,
-        // a refusal of one being taken as "nothing to remove".
-        if (!(e instanceof ScimError && e.status === 400 && remove.length)) throw e;
-        await request("PATCH", at, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "replace", value }] });
-        for (const path of remove) {
-          try {
-            await request("PATCH", at, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "remove", path }] });
-          } catch (r) {
-            if (!(r instanceof ScimError && r.status === 400)) throw r;
-          }
-        }
-      }
-    },
-    async setActive(id: string, active: boolean): Promise<void> {
-      await request("PATCH", `/Users/${encodeURIComponent(id)}`, {
-        schemas: [PATCH_OP_SCHEMA],
-        Operations: [{ op: "replace", value: { active } }],
-      });
-    },
-    /** A 404 is left to the caller: it can mean gone, or a wrong URL. */
-    async remove(id: string): Promise<void> {
-      await request("DELETE", `/Users/${encodeURIComponent(id)}`);
-    },
-    /** The group with this displayName (its id and externalId), or null. */
-    /** By displayName; `externalId` is for clients that find groups by it instead (Google Workspace). */
-    async findGroupByName(displayName: string, _externalId?: string | null): Promise<{ id: string; externalId: string | null } | null> {
-      const { json } = await request("GET", `/Groups?filter=${encodeURIComponent(`displayName eq ${scimString(displayName)}`)}&count=2`);
-      const list = json as { Resources?: unknown; totalResults?: unknown } | null;
-      if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number"))
-        throw new ScimError("GET /Groups: not a SCIM ListResponse (check the target's url)", null, true);
-      const resources = Array.isArray(list.Resources) ? objects<{ id?: unknown; displayName?: unknown; externalId?: unknown }>(list.Resources) : [];
-      const hit = resources.find((r) => typeof r.displayName === "string" && r.displayName.toLowerCase() === displayName.toLowerCase());
-      return hit ? { id: idOf(hit, "GET /Groups"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null } : null;
-    },
-    /** The ids of a group's members, as the app lists them (asked for by name). */
-    async groupMembers(id: string): Promise<string[]> {
-      return groupMemberIds(id, "group");
-    },
-    async createGroup(group: ScimGroup): Promise<string> {
-      return madeOrAccepted("POST /Groups", await request("POST", "/Groups", group));
-    },
-    async replaceGroup(id: string, group: ScimGroup): Promise<void> {
-      await request("PUT", `/Groups/${encodeURIComponent(id)}`, { ...group, id });
-    },
-    /** A 404 is left to the caller. */
-    async removeGroup(id: string): Promise<void> {
-      await request("DELETE", `/Groups/${encodeURIComponent(id)}`);
-    },
-    /**
-     * Update a group by PATCH, for apps without PUT on groups: its name and externalId, then the
-     * members that differ, added and removed in batches. The current members come from the group,
-     * or from `Users?filter=groups.value eq` for apps whose groups don't list them.
-     */
-    async patchGroup(id: string, group: ScimGroup, o: { membersFrom?: "group" | "users-filter" | undefined; batch?: number | undefined } = {}): Promise<void> {
-      const path = `/Groups/${encodeURIComponent(id)}`;
-      await request("PATCH", path, {
-        schemas: [PATCH_OP_SCHEMA],
-        Operations: [{ op: "replace", path: "displayName", value: group.displayName }, ...(group.externalId ? [{ op: "replace", path: "externalId", value: group.externalId }] : [])],
-      });
-      const current = new Set(await groupMemberIds(id, o.membersFrom ?? "group"));
-      const wanted = new Set(group.members.map((m) => m.value));
-      for (const [op, ids] of [["add", [...wanted].filter((m) => !current.has(m))], ["remove", [...current].filter((m) => !wanted.has(m))]] as const) {
-        for (const batch of batches(ids, o.batch)) {
-          await request("PATCH", path, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op, path: "members", value: batch.map((value) => ({ value })) }] });
-        }
-      }
-    },
-    /** Create a group with at most `batch` members, then add the rest. */
-    async createGroupInBatches(group: ScimGroup, batch?: number): Promise<string> {
-      const [first = [], ...rest] = batches(group.members.map((m) => m.value), batch);
-      const res = await request("POST", "/Groups", { ...group, members: first.map((value) => ({ value })) });
-      // Accepted with members still to add: retried, as the group may not be there to add them to.
-      if (res.status === 202 && rest.length) throw accepted("POST /Groups", res);
-      const id = madeOrAccepted("POST /Groups", res);
-      for (const more of rest) {
-        await request("PATCH", `/Groups/${encodeURIComponent(id)}`, { schemas: [PATCH_OP_SCHEMA], Operations: [{ op: "add", path: "members", value: more.map((value) => ({ value })) }] });
-      }
-      return id;
-    },
-  };
+	return {
+		/** The user with this userName (its id and externalId), or null. */
+		async findByUserName(userName: string): Promise<{
+			id: string;
+			externalId: string | null;
+			active?: boolean;
+		} | null> {
+			const { json } = await request(
+				"GET",
+				`/Users?filter=${encodeURIComponent(`userName eq ${scimString(userName)}`)}&count=2`,
+			);
+			const list = json as {
+				schemas?: unknown;
+				Resources?: unknown;
+				totalResults?: unknown;
+			} | null;
+			// A page that isn't a SCIM list (a wrong URL that answers 200): never read as "no such user".
+			if (
+				!list ||
+				(!Array.isArray(list.Resources) &&
+					typeof list.totalResults !== "number")
+			)
+				throw new ScimError(
+					"GET /Users: not a SCIM ListResponse (check the target's url)",
+					null,
+					true,
+				);
+			const resources = Array.isArray(list.Resources)
+				? objects<{
+						id?: unknown;
+						userName?: unknown;
+						externalId?: unknown;
+						active?: unknown;
+					}>(list.Resources)
+				: [];
+			// SCIM compares userName case-insensitively; so do we, but only an exact hit is ours.
+			const hit = resources.find(
+				(r) =>
+					typeof r.userName === "string" &&
+					r.userName.toLowerCase() === userName.toLowerCase(),
+			);
+			// `active` only when the app says: absent is not "deactivated".
+			return hit
+				? {
+						id: idOf(hit, "GET /Users"),
+						externalId:
+							typeof hit.externalId === "string" && hit.externalId
+								? hit.externalId
+								: null,
+						...(typeof hit.active === "boolean" ? { active: hit.active } : {}),
+					}
+				: null;
+		},
+		/**
+		 * A page of the app's users, for drift detection: at most `count` (apps cap it at their own
+		 * page size), from `cursor` (null for the first page): the app's own cursor, or the next
+		 * startIndex, whichever it pages by. Asked for by cursor and index alike, as group members are.
+		 */
+		async listUsers(
+			cursor: string | null,
+			count: number,
+		): Promise<{ users: ListedUser[]; next: string | null }> {
+			// Cursors are ours: "c:<the app's cursor>", or "i:<startIndex>:<the previous page's last id>".
+			let startIndex = 1;
+			let c = "";
+			let lastId = "";
+			const byIndex =
+				cursor === null ? null : /^i:([1-9]\d*):([\s\S]*)$/.exec(cursor);
+			if (byIndex) {
+				startIndex = Number(byIndex[1]);
+				lastId = byIndex[2] as string;
+			} else if (cursor !== null) {
+				if (!/^c:.+/.test(cursor))
+					throw new ScimError(
+						"unknown cursor: pass the `next` of a previous page",
+						null,
+						false,
+					);
+				c = cursor.slice(2);
+			}
+			const { json } = await request(
+				"GET",
+				`/Users?count=${count}&cursor=${encodeURIComponent(c)}&startIndex=${startIndex}`,
+			);
+			const list = json as {
+				Resources?: unknown;
+				nextCursor?: unknown;
+				totalResults?: unknown;
+			} | null;
+			// No job retries a listing: a page that isn't a list is said so, not waited for.
+			if (
+				!list ||
+				(!Array.isArray(list.Resources) &&
+					typeof list.totalResults !== "number")
+			)
+				throw new ScimError(
+					"GET /Users: not a SCIM ListResponse (check the target's url)",
+					null,
+					false,
+				);
+			// The page as the app counts it (for paging), and the entries that can be read.
+			const page: unknown[] = Array.isArray(list.Resources)
+				? list.Resources
+				: [];
+			const resources = objects<{
+				id?: unknown;
+				userName?: unknown;
+				externalId?: unknown;
+				active?: unknown;
+			}>(page);
+			const users: ListedUser[] = [];
+			for (const r of resources) {
+				if (typeof r.id !== "string" || !r.id) continue;
+				users.push({
+					id: r.id,
+					userName: typeof r.userName === "string" ? r.userName : "",
+					externalId:
+						typeof r.externalId === "string" && r.externalId
+							? r.externalId
+							: null,
+					...(typeof r.active === "boolean" ? { active: r.active } : {}),
+				});
+			}
+			if (typeof list.nextCursor === "string" && list.nextCursor)
+				return { users, next: `c:${list.nextCursor}` };
+			// Paging by the app's cursor: no next cursor is the end.
+			if (c) return { users, next: null };
+			// By index. An app that ignores startIndex gives the page before again: dropped, and the end.
+			if (lastId && resources.some((r) => r.id === lastId))
+				return { users: [], next: null };
+			// More while totalResults says so; without it (apps leave it out), while the page is full.
+			const total =
+				typeof list.totalResults === "number" ? list.totalResults : null;
+			const more =
+				page.length > 0 &&
+				(total === null
+					? page.length >= count
+					: startIndex - 1 + page.length < total);
+			return {
+				users,
+				next: more
+					? `i:${startIndex + page.length}:${users.at(-1)?.id ?? lastId}`
+					: null,
+			};
+		},
+		async create(user: ScimUser): Promise<string> {
+			return madeOrAccepted(
+				"POST /Users",
+				await request("POST", "/Users", onTheWire(user)),
+			);
+		},
+		async replace(id: string, user: ScimUser): Promise<void> {
+			await request("PUT", `/Users/${encodeURIComponent(id)}`, {
+				...onTheWire(user),
+				id,
+			});
+		},
+		/**
+		 * Like replace, but only the attributes we send change: anything set at the app is kept.
+		 * `remove` names attributes (paths) of ours that now have no value, so they're cleared too.
+		 */
+		async patch(
+			id: string,
+			user: ScimUser,
+			remove: readonly string[] = [],
+		): Promise<void> {
+			const { schemas: _, ...value } = onTheWire(user);
+			const at = `/Users/${encodeURIComponent(id)}`;
+			try {
+				await request("PATCH", at, {
+					schemas: [PATCH_OP_SCHEMA],
+					Operations: [
+						{ op: "replace", value },
+						...remove.map((path) => ({ op: "remove", path })),
+					],
+				});
+			} catch (e) {
+				// Some apps refuse to remove an attribute that has no value (400 noTarget), and the
+				// removes go with every change. So: the change without them, then each remove on its own,
+				// a refusal of one being taken as "nothing to remove".
+				if (!(e instanceof ScimError && e.status === 400 && remove.length))
+					throw e;
+				await request("PATCH", at, {
+					schemas: [PATCH_OP_SCHEMA],
+					Operations: [{ op: "replace", value }],
+				});
+				for (const path of remove) {
+					try {
+						await request("PATCH", at, {
+							schemas: [PATCH_OP_SCHEMA],
+							Operations: [{ op: "remove", path }],
+						});
+					} catch (r) {
+						if (!(r instanceof ScimError && r.status === 400)) throw r;
+					}
+				}
+			}
+		},
+		async setActive(id: string, active: boolean): Promise<void> {
+			await request("PATCH", `/Users/${encodeURIComponent(id)}`, {
+				schemas: [PATCH_OP_SCHEMA],
+				Operations: [{ op: "replace", value: { active } }],
+			});
+		},
+		/** A 404 is left to the caller: it can mean gone, or a wrong URL. */
+		async remove(id: string): Promise<void> {
+			await request("DELETE", `/Users/${encodeURIComponent(id)}`);
+		},
+		/** The group with this displayName (its id and externalId), or null. */
+		/** By displayName; `externalId` is for clients that find groups by it instead (Google Workspace). */
+		async findGroupByName(
+			displayName: string,
+			_externalId?: string | null,
+		): Promise<{ id: string; externalId: string | null } | null> {
+			const { json } = await request(
+				"GET",
+				`/Groups?filter=${encodeURIComponent(`displayName eq ${scimString(displayName)}`)}&count=2`,
+			);
+			const list = json as {
+				Resources?: unknown;
+				totalResults?: unknown;
+			} | null;
+			if (
+				!list ||
+				(!Array.isArray(list.Resources) &&
+					typeof list.totalResults !== "number")
+			)
+				throw new ScimError(
+					"GET /Groups: not a SCIM ListResponse (check the target's url)",
+					null,
+					true,
+				);
+			const resources = Array.isArray(list.Resources)
+				? objects<{
+						id?: unknown;
+						displayName?: unknown;
+						externalId?: unknown;
+					}>(list.Resources)
+				: [];
+			const hit = resources.find(
+				(r) =>
+					typeof r.displayName === "string" &&
+					r.displayName.toLowerCase() === displayName.toLowerCase(),
+			);
+			return hit
+				? {
+						id: idOf(hit, "GET /Groups"),
+						externalId:
+							typeof hit.externalId === "string" && hit.externalId
+								? hit.externalId
+								: null,
+					}
+				: null;
+		},
+		/** The ids of a group's members, as the app lists them (asked for by name). */
+		async groupMembers(id: string): Promise<string[]> {
+			return groupMemberIds(id, "group");
+		},
+		async createGroup(group: ScimGroup): Promise<string> {
+			return madeOrAccepted(
+				"POST /Groups",
+				await request("POST", "/Groups", group),
+			);
+		},
+		async replaceGroup(id: string, group: ScimGroup): Promise<void> {
+			await request("PUT", `/Groups/${encodeURIComponent(id)}`, {
+				...group,
+				id,
+			});
+		},
+		/** A 404 is left to the caller. */
+		async removeGroup(id: string): Promise<void> {
+			await request("DELETE", `/Groups/${encodeURIComponent(id)}`);
+		},
+		/**
+		 * Update a group by PATCH, for apps without PUT on groups: its name and externalId, then the
+		 * members that differ, added and removed in batches. The current members come from the group,
+		 * or from `Users?filter=groups.value eq` for apps whose groups don't list them.
+		 */
+		async patchGroup(
+			id: string,
+			group: ScimGroup,
+			o: {
+				membersFrom?: "group" | "users-filter" | undefined;
+				batch?: number | undefined;
+			} = {},
+		): Promise<void> {
+			const path = `/Groups/${encodeURIComponent(id)}`;
+			await request("PATCH", path, {
+				schemas: [PATCH_OP_SCHEMA],
+				Operations: [
+					{ op: "replace", path: "displayName", value: group.displayName },
+					...(group.externalId
+						? [{ op: "replace", path: "externalId", value: group.externalId }]
+						: []),
+				],
+			});
+			const current = new Set(
+				await groupMemberIds(id, o.membersFrom ?? "group"),
+			);
+			const wanted = new Set(group.members.map((m) => m.value));
+			for (const [op, ids] of [
+				["add", [...wanted].filter((m) => !current.has(m))],
+				["remove", [...current].filter((m) => !wanted.has(m))],
+			] as const) {
+				for (const batch of batches(ids, o.batch)) {
+					await request("PATCH", path, {
+						schemas: [PATCH_OP_SCHEMA],
+						Operations: [
+							{ op, path: "members", value: batch.map((value) => ({ value })) },
+						],
+					});
+				}
+			}
+		},
+		/** Create a group with at most `batch` members, then add the rest. */
+		async createGroupInBatches(
+			group: ScimGroup,
+			batch?: number,
+		): Promise<string> {
+			const [first = [], ...rest] = batches(
+				group.members.map((m) => m.value),
+				batch,
+			);
+			const res = await request("POST", "/Groups", {
+				...group,
+				members: first.map((value) => ({ value })),
+			});
+			// Accepted with members still to add: retried, as the group may not be there to add them to.
+			if (res.status === 202 && rest.length)
+				throw accepted("POST /Groups", res);
+			const id = madeOrAccepted("POST /Groups", res);
+			for (const more of rest) {
+				await request("PATCH", `/Groups/${encodeURIComponent(id)}`, {
+					schemas: [PATCH_OP_SCHEMA],
+					Operations: [
+						{
+							op: "add",
+							path: "members",
+							value: more.map((value) => ({ value })),
+						},
+					],
+				});
+			}
+			return id;
+		},
+	};
 }
 
 export type ScimClient = ReturnType<typeof scimClient>;
