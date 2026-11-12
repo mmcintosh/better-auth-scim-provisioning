@@ -173,6 +173,9 @@ export function trimSlashes(s: string): string {
 /** A SCIM filter string literal: quotes and backslashes escaped (RFC 7644 §3.4.2.2, JSON rules). */
 export const scimString = (value: string) => JSON.stringify(value);
 
+/** A list's entries that are objects: a null (or a bare value) in an app's list is skipped, not read. */
+export const objects = <T>(list: unknown[]): T[] => list.filter((x): x is T => x !== null && typeof x === "object");
+
 /** `items` in batches of at most `size` (one batch when no size). */
 const batches = <T>(items: T[], size?: number): T[][] => {
   if (!size || items.length <= size) return items.length ? [items] : [];
@@ -288,8 +291,8 @@ export function scimClient(endpoint: ScimEndpoint) {
   async function groupMemberIds(id: string, from: "group" | "users-filter"): Promise<string[]> {
     if (from === "group") {
       const { json } = await request("GET", `/Groups/${encodeURIComponent(id)}?attributes=members`);
-      const members = (json as { members?: { value?: unknown }[] } | null)?.members;
-      return Array.isArray(members) ? members.map((m) => m.value).filter((v): v is string => typeof v === "string") : [];
+      const members = (json as { members?: unknown } | null)?.members;
+      return Array.isArray(members) ? objects<{ value?: unknown }>(members).map((m) => m.value).filter((v): v is string => typeof v === "string") : [];
     }
     const ids = new Set<string>();
     const filter = encodeURIComponent(`groups.value eq ${scimString(id)}`);
@@ -297,9 +300,9 @@ export function scimClient(endpoint: ScimEndpoint) {
     let startIndex = 1;
     for (let pages = 0; pages < 10_000; pages++) {
       const { json } = await request("GET", `/Users?filter=${filter}&cursor=${encodeURIComponent(cursor)}&startIndex=${startIndex}`);
-      const list = json as { Resources?: { id?: unknown }[]; nextCursor?: unknown; totalResults?: unknown; itemsPerPage?: unknown } | null;
+      const list = json as { Resources?: unknown[]; nextCursor?: unknown; totalResults?: unknown; itemsPerPage?: unknown } | null;
       if (!list || !Array.isArray(list.Resources)) throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, true);
-      for (const r of list.Resources) if (typeof r.id === "string") ids.add(r.id);
+      for (const r of objects<{ id?: unknown }>(list.Resources)) if (typeof r.id === "string") ids.add(r.id);
       if (typeof list.nextCursor === "string" && list.nextCursor) {
         cursor = list.nextCursor;
         continue;
@@ -332,7 +335,7 @@ export function scimClient(endpoint: ScimEndpoint) {
       // A page that isn't a SCIM list (a wrong URL that answers 200): never read as "no such user".
       if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number"))
         throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, true);
-      const resources = Array.isArray(list?.Resources) ? (list.Resources as { id?: unknown; userName?: unknown; externalId?: unknown; active?: unknown }[]) : [];
+      const resources = Array.isArray(list.Resources) ? objects<{ id?: unknown; userName?: unknown; externalId?: unknown; active?: unknown }>(list.Resources) : [];
       // SCIM compares userName case-insensitively; so do we, but only an exact hit is ours.
       const hit = resources.find((r) => typeof r.userName === "string" && r.userName.toLowerCase() === userName.toLowerCase());
       // `active` only when the app says: absent is not "deactivated".
@@ -360,7 +363,9 @@ export function scimClient(endpoint: ScimEndpoint) {
       const list = json as { Resources?: unknown; nextCursor?: unknown; totalResults?: unknown } | null;
       // No job retries a listing: a page that isn't a list is said so, not waited for.
       if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number")) throw new ScimError("GET /Users: not a SCIM ListResponse (check the target's url)", null, false);
-      const resources = Array.isArray(list.Resources) ? (list.Resources as { id?: unknown; userName?: unknown; externalId?: unknown; active?: unknown }[]) : [];
+      // The page as the app counts it (for paging), and the entries that can be read.
+      const page: unknown[] = Array.isArray(list.Resources) ? list.Resources : [];
+      const resources = objects<{ id?: unknown; userName?: unknown; externalId?: unknown; active?: unknown }>(page);
       const users: ListedUser[] = [];
       for (const r of resources) {
         if (typeof r.id !== "string" || !r.id) continue;
@@ -373,8 +378,8 @@ export function scimClient(endpoint: ScimEndpoint) {
       if (lastId && resources.some((r) => r.id === lastId)) return { users: [], next: null };
       // More while totalResults says so; without it (apps leave it out), while the page is full.
       const total = typeof list.totalResults === "number" ? list.totalResults : null;
-      const more = resources.length > 0 && (total === null ? resources.length >= count : startIndex - 1 + resources.length < total);
-      return { users, next: more ? `i:${startIndex + resources.length}:${users.at(-1)?.id ?? lastId}` : null };
+      const more = page.length > 0 && (total === null ? page.length >= count : startIndex - 1 + page.length < total);
+      return { users, next: more ? `i:${startIndex + page.length}:${users.at(-1)?.id ?? lastId}` : null };
     },
     async create(user: ScimUser): Promise<string> {
       return madeOrAccepted("POST /Users", await request("POST", "/Users", onTheWire(user)));
@@ -423,7 +428,7 @@ export function scimClient(endpoint: ScimEndpoint) {
       const list = json as { Resources?: unknown; totalResults?: unknown } | null;
       if (!list || (!Array.isArray(list.Resources) && typeof list.totalResults !== "number"))
         throw new ScimError("GET /Groups: not a SCIM ListResponse (check the target's url)", null, true);
-      const resources = Array.isArray(list.Resources) ? (list.Resources as { id?: unknown; displayName?: unknown; externalId?: unknown }[]) : [];
+      const resources = Array.isArray(list.Resources) ? objects<{ id?: unknown; displayName?: unknown; externalId?: unknown }>(list.Resources) : [];
       const hit = resources.find((r) => typeof r.displayName === "string" && r.displayName.toLowerCase() === displayName.toLowerCase());
       return hit ? { id: idOf(hit, "GET /Groups"), externalId: typeof hit.externalId === "string" && hit.externalId ? hit.externalId : null } : null;
     },
