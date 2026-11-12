@@ -1,6 +1,6 @@
 # Security
 
-Please report vulnerabilities privately, through GitHub: **Security → Report a vulnerability** on this repository. Don't open a public issue.
+Please report vulnerabilities privately, through GitHub: **Security → Report a vulnerability** on this repository, or directly at <https://github.com/mmcintosh/better-auth-scim-provisioning/security/advisories/new>. Don't open a public issue.
 
 Include what you found, how to reproduce it, and what it affects. I aim to acknowledge a report within **7 days**, then work on a fix and agree on a disclosure date with you. You'll be credited in the release notes unless you'd rather not be named. A fixed vulnerability is announced in a GitHub security advisory and in the CHANGELOG's Security section for that release.
 
