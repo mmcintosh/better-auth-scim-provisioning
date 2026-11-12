@@ -31,4 +31,4 @@ For other auth methods, `--auth auth.json`, a file holding the `auth` object as 
 { "type": "oauth2", "tokenUrl": "https://login.example.com/oauth2/token", "clientId": "…", "clientSecret": "…" }
 ```
 
- From code (an admin page's "test connection"), `checkScimTarget({ url, token | auth })` returns the same results.
+ From code (an admin page's "test connection"), `checkScimTarget({ url, token | auth })` returns the same results. It creates and deletes a real test user at the app, so a page that runs it should be an admin-only POST, like any action that changes something.

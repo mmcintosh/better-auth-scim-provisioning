@@ -85,6 +85,29 @@ describe("scimClient", () => {
     expect(e.message).toContain("no response within 50 ms");
   });
 
+  it("skips a null in an app's list rather than failing on it", async () => {
+    // Answers by path, each list with a null in it, as no known app sends but nothing forbids.
+    const answer = (path: string): unknown => {
+      if (path.startsWith("/Users?filter=userName")) return { Resources: [null, { id: "u1", userName: "ada@example.com", externalId: "user-1" }], totalResults: 2 };
+      if (path.startsWith("/Users?filter=groups.value")) return { Resources: [null, { id: "u1" }], totalResults: 2 };
+      if (path.startsWith("/Users?count=")) return { Resources: [null, { id: "u1", userName: "ada@example.com" }], totalResults: 3 };
+      if (path.startsWith("/Groups?filter=")) return { Resources: [null, { id: "g1", displayName: "Staff" }], totalResults: 2 };
+      if (path.startsWith("/Groups/g1?attributes=members")) return { id: "g1", members: [null, { value: "u1" }] };
+      return null;
+    };
+    const fetch = async (input: RequestInfo | URL) => {
+      const body = answer(new URL(String(input)).href.slice("https://app.test/scim/v2".length));
+      return body === null ? new Response(null, { status: 204 }) : new Response(JSON.stringify(body), { headers: { "content-type": "application/scim+json" } });
+    };
+    const client = scimClient({ url: "https://app.test/scim/v2", token: "t", fetch });
+    expect(await client.findByUserName("ada@example.com")).toEqual({ id: "u1", externalId: "user-1" });
+    expect(await client.findGroupByName("Staff")).toEqual({ id: "g1", externalId: null });
+    expect(await client.groupMembers("g1")).toEqual(["u1"]);
+    await expect(client.patchGroup("g1", { schemas: [], displayName: "Staff", members: [{ value: "u1" }] }, { membersFrom: "users-filter" })).resolves.toBeUndefined();
+    // The page counts as the app sent it: two of three, so a next page from startIndex 3.
+    expect(await client.listUsers(null, 2)).toEqual({ users: [{ id: "u1", userName: "ada@example.com", externalId: null }], next: "i:3:u1" });
+  });
+
   it("reads Retry-After as seconds or a date", () => {
     expect(retryAfterMs("12")).toBe(12_000);
     expect(retryAfterMs(new Date(1_000_000 + 5_000).toUTCString(), 1_000_000)).toBe(5_000);

@@ -25,6 +25,21 @@ it("reports what a limited app supports, and leaves nothing behind", async () =>
   expect(app.users.size).toBe(0);
 });
 
+it("finds the test user in a list with a null in it", async () => {
+  const app = mockScim({ requireNames: true });
+  // The same app, with a null put at the head of every list it answers with.
+  const fetch: typeof app.fetch = async (input, init) => {
+    const res = await app.fetch(input, init);
+    const json = res.status === 200 ? ((await res.clone().json()) as { Resources?: unknown[] }) : null;
+    if (!Array.isArray(json?.Resources)) return res;
+    return new Response(JSON.stringify({ ...json, Resources: [null, ...json.Resources] }), { status: 200, headers: res.headers });
+  };
+  const results = await checkScimTarget({ url: app.url, token: app.token, fetch });
+  expect(results.find((r) => r.id === "find")).toMatchObject({ ok: true });
+  expect(results.find((r) => r.id === "find-any-case")).toMatchObject({ ok: true });
+  expect(app.users.size).toBe(0);
+});
+
 it("stops after a failed create, and says why", async () => {
   const app = mockScim({ requireNames: true });
   const results = await checkScimTarget({ url: app.url, token: "wrong", fetch: app.fetch });

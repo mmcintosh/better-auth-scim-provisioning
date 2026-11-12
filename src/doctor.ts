@@ -4,7 +4,7 @@
 // (or at least deactivated) at the end. Behind `npx better-auth-scim-provisioning check`, and
 // usable from an admin page ("test connection").
 import { credentials, type ScimAuth } from "./credentials";
-import { fetchFailure, SCIM_ENTERPRISE_USER_SCHEMA, SCIM_USER_SCHEMA, scimKeys, scimString, targetUrl, trimSlashes } from "./scim-client";
+import { fetchFailure, objects, SCIM_ENTERPRISE_USER_SCHEMA, SCIM_USER_SCHEMA, scimKeys, scimString, targetUrl, trimSlashes } from "./scim-client";
 
 /** Each check, by a stable id (the `name` is for people and may change). The list can grow in a minor release. */
 export type CheckId = "service-provider-config" | "enterprise-user" | "create" | "keeps-external-id" | "find" | "find-any-case" | "duplicate-refused" | "update-put" | "update-patch" | "update-patch-path" | "deactivate" | "delete";
@@ -171,7 +171,7 @@ export async function checkScimTarget(o: CheckOptions): Promise<CheckResult[]> {
     // 3. Finding by userName, exactly and in another case.
     const find = async (name: string) => {
       const r = await call("GET", `/Users?filter=${encodeURIComponent(`userName eq ${scimString(name)}`)}`);
-      const list = Array.isArray(r.json?.Resources) ? (r.json.Resources as { id?: unknown }[]) : [];
+      const list = Array.isArray(r.json?.Resources) ? objects<{ id?: unknown }>(r.json.Resources) : [];
       return { ok: list.some((x) => x.id === id), r };
     };
     const exact = await find(userName);
