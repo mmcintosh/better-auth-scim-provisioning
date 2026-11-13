@@ -574,12 +574,22 @@ export function googleWorkspaceClient(
 	const memberValues = (group: ScimGroup) =>
 		(group.members ?? []).map((m) => m.value);
 
-	/** Ours if its description carries our marker; an address taken by another group is someone else's. */
-	async function findGroup(
-		externalId: string | null | undefined,
+	/**
+	 * The address a group gets when its own is held by another of ours: two externalIds can give
+	 * the same address ("role:…:billing_admin" and "role:…:billing-admin"). From a hash of the
+	 * externalId, so it's the same every time. Null when there's no other: with the host's own
+	 * groupEmail (its addresses are its to keep apart), or when the address is already a hash.
+	 */
+	async function spareEmail(externalId: string): Promise<string | null> {
+		if (google?.groupEmail) return null;
+		const email = `ba-${(await hex(externalId)).slice(0, 32)}@${groupDomain}`;
+		return email === (await groupEmail(externalId)) ? null : email;
+	}
+
+	/** The group at this exact address, with the externalId its marker names, if any. */
+	async function groupAt(
+		email: string,
 	): Promise<{ id: string; externalId: string | null } | null> {
-		if (!externalId) return null;
-		const email = await groupEmail(externalId);
 		try {
 			const g = await request("GET", gpath(email));
 			// Google also answers for a group's alias: only the exact address is a match.
@@ -591,13 +601,47 @@ export function googleWorkspaceClient(
 		}
 	}
 
+	/**
+	 * Ours if its description carries our marker; an address taken by a group without it is
+	 * someone else's. A group whose address was held by another of ours when it was made is at its
+	 * spare address, and is found there even once its own is free.
+	 */
+	async function findGroup(
+		externalId: string | null | undefined,
+	): Promise<{ id: string; externalId: string | null } | null> {
+		if (!externalId) return null;
+		const g = await groupAt(await groupEmail(externalId));
+		if (g?.externalId === externalId) return g;
+		const spare = await spareEmail(externalId);
+		if (!spare) return g;
+		const s = await groupAt(spare);
+		if (s?.externalId === externalId) return s;
+		// Not made yet. Its own address held by another of ours: it goes to the spare address, if
+		// that's free. Its own free: it's made there, whatever the spare holds. Someone else's: refused.
+		return g?.externalId ? s : g;
+	}
+
 	async function createGroup(group: ScimGroup): Promise<string> {
 		const externalId = group.externalId as string;
-		const created = await request("POST", "/groups", {
-			email: await groupEmail(externalId),
-			name: group.displayName,
-			description: `${MANAGED}${externalId}`,
-		});
+		const post = (email: string) =>
+			request("POST", "/groups", {
+				email,
+				name: group.displayName,
+				description: `${MANAGED}${externalId}`,
+			});
+		let created: { id?: string } | null;
+		try {
+			created = await post(await groupEmail(externalId));
+		} catch (e) {
+			if (!(e instanceof ScimError && e.status === 409)) throw e;
+			// Held by another of ours: this one goes to its spare address. Anything else (our own
+			// create whose reply was lost, someone else's group) is left to the caller, as before.
+			const spare = await spareEmail(externalId);
+			const held = spare ? await groupAt(await groupEmail(externalId)) : null;
+			if (!spare || !held?.externalId || held.externalId === externalId)
+				throw e;
+			created = await post(spare);
+		}
 		if (!created?.id)
 			throw new ScimError("POST /groups: the response has no id", null, false);
 		try {
