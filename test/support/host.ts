@@ -7,6 +7,7 @@ import { getMigrations } from "better-auth/db/migration";
 import { admin, organization } from "better-auth/plugins";
 import { scimProvisioning } from "../../src";
 import type {
+	GoogleWorkspaceTarget,
 	ScimProvisioningOptions,
 	ScimTarget,
 	Target,
@@ -30,6 +31,8 @@ type TargetSpec = Omit<TargetOptions, "fetch"> &
 		indexPaged?: boolean;
 		noTotal?: boolean;
 		lowercaseKeys?: boolean;
+		/** Google Workspace settings beyond the mock's own credentials (groupDomain, groupEmail). */
+		google?: Partial<GoogleWorkspaceTarget["google"]>;
 	};
 
 /** A database for Better Auth's `database` option, and whether it needs Better Auth's migrations. */
@@ -194,6 +197,7 @@ export async function createHost(
 										type: "google-workspace",
 										url: google.url,
 										google: {
+											...s.google,
 											clientEmail: google.clientEmail,
 											privateKey: google.privateKey,
 											adminEmail: google.admin,

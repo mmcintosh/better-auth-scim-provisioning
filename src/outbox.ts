@@ -2555,7 +2555,10 @@ export function outbox(
 			});
 			const what = ref.kind === "group" ? "organization" : ref.kind;
 			throw new ScimError(
-				`group ${displayName}: a group with this name already exists at the app and isn't this ${what}'s; rename one of them, or set ${ref.kind === "group" ? "groupName" : `${ref.kind}GroupName`}`,
+				// Google finds a group by its address, not its name: renaming doesn't help there.
+				target.type === "google-workspace"
+					? `group ${displayName}: a Google Group already has this ${what}'s address and isn't this ${what}'s; give that group another address in Google, or set google.groupEmail`
+					: `group ${displayName}: a group with this name already exists at the app and isn't this ${what}'s; rename one of them, or set ${ref.kind === "group" ? "groupName" : `${ref.kind}GroupName`}`,
 				409,
 				false,
 			);

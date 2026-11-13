@@ -283,7 +283,9 @@ export interface GoogleWorkspaceTarget extends TargetOptions {
 		/**
 		 * A group's email address, from its externalId (an organization's id, `team:<id>` or
 		 * `role:<organization id>:<role>`). Keep it stable: it's how the group is found again. Default
-		 * `ba-<externalId as a slug>@<groupDomain>`.
+		 * `ba-<externalId as a slug>@<groupDomain>`, or `ba-<hash>@<groupDomain>` when another of our
+		 * groups already has that one ("billing_admin" and "billing-admin"). Your own must keep the
+		 * groups apart: a second group given one address is refused.
 		 */
 		groupEmail?: ((externalId: string) => string) | undefined;
 		/** Google's token endpoint; default `https://oauth2.googleapis.com/token`. Change it only for a proxy. */
