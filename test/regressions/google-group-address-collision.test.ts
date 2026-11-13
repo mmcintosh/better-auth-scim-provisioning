@@ -95,6 +95,27 @@ it("two roles whose addresses come out the same both get a group: the second at 
 	expect([...groupAt(h, first.email)!.members]).toEqual([ada]);
 });
 
+it("a group whose own address is free is made there, whatever is at its spare address", async () => {
+	const h = await createHost({ targets: [{ ...G, roleGroups: ["admin"] }] });
+	const { org, join } = await setUp(h);
+	// Someone else's group, without our marker, at the spare address.
+	h.google.groups.set("hand", {
+		id: "hand",
+		email: spare(`role:${org.id}:admin`),
+		name: "Someone's",
+		members: new Set(["x"]),
+	});
+	const ada = await join("Ada Lovelace", "admin");
+	expect(await h.jobs()).toEqual([]);
+	expect([
+		...groupAt(h, `ba-role-${org.id.toLowerCase()}-admin@example.com`)!.members,
+	]).toEqual([ada]);
+	expect(h.google.groups.get("hand")).toMatchObject({
+		name: "Someone's",
+		members: new Set(["x"]),
+	});
+});
+
 it("with the host's own groupEmail, a clash is still refused, and the error says what to do at Google", async () => {
 	const h = await createHost({
 		targets: [

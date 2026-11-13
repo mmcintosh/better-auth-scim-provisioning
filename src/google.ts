@@ -615,9 +615,10 @@ export function googleWorkspaceClient(
 		const spare = await spareEmail(externalId);
 		if (!spare) return g;
 		const s = await groupAt(spare);
-		if (s) return s;
-		// Held by another of ours: this one isn't made yet, and goes to the spare address.
-		return g?.externalId ? null : g;
+		if (s?.externalId === externalId) return s;
+		// Not made yet. Its own address held by another of ours: it goes to the spare address, if
+		// that's free. Its own free: it's made there, whatever the spare holds. Someone else's: refused.
+		return g?.externalId ? s : g;
 	}
 
 	async function createGroup(group: ScimGroup): Promise<string> {
