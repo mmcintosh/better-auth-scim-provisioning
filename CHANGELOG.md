@@ -16,6 +16,10 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 - **Google Workspace: a `mapUser`'s primary address stays the only primary.** The work address was always sent as primary, so a `mapUser` that marked another address primary gave Google two. The work address is now primary only when no other address is (or as the `mapUser` sets it).
 - **`check --auth`: a `type` such as `toString` gets the usual message.** A name every JavaScript object has was taken for a type, and the check failed with a TypeError instead of saying which types there are.
 
+### Documentation
+
+- **Google Workspace: role names that give the same group address.** A Google Group's address is its externalId in lower case, with each run of characters other than letters and digits made one `-`, so roles such as `billing_admin` and `billing-admin` in one organization share an address, and the second gets no group. [Google Workspace](docs/google-workspace.md) says what happens and how to avoid it ([#147](https://github.com/mmcintosh/better-auth-scim-provisioning/issues/147)).
+
 ## [1.8.2] - 2026-11-04
 
 Requires Better Auth 1.7.16 or later, which fixes twelve advisories published on 2026-11-03; the README's reference sections move to docs/.
